@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <configuration>
     <contextName>cabe_log</contextName>
-    <property name="LOG_PATH" value="D:\log" />
+    <property name="LOG_PATH" value="/var/log/cabe" />
     <property name="LOG_PATTERN" value="%date{yyyy-MM-dd HH:mm:ss} | %-5level | %thread | %logger | %msg%n"/>
 
     <appender name="ERROR_LOG" class="ch.qos.logback.core.rolling.RollingFileAppender">
