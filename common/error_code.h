@@ -1,0 +1,35 @@
+/*
+ * Project: Cabe
+ * Created Time: 3/15/24 4:03 PM
+ * Created by: CodeFarmerPK
+ */
+
+#ifndef CABE_ERROR_CODE_H
+#define CABE_ERROR_CODE_H
+
+// status codes
+#define STATUS_SUCCESS 0
+
+// memory codes
+#define MEMORY_NULL_POINTER_EXCEPTION -200000
+#define MEMORY_EMPTY_KEY -200001
+#define MEMORY_EMPTY_VALUE -200002
+#define MEMORY_INSERT_FAIL -200003
+
+// file codes
+#define FILE_NO_SUCH_FILE -300000
+#define FILE_EMPTY_FILE_NAME -300001
+#define FILE_OPEN_FAIL -300002
+#define FILE_WRITE_FAIL -300003
+#define FILE_READ_FAIL -300004
+#define FILE_SEEK_FAIL -300005
+#define FILE_FLUSH_FAIL -300006
+#define FILE_CLOSE_FAIL -300007
+
+// cabe codes
+#define CABE_ERROR_DATA -400001
+#define CABE_EMPTY_KEY -400002
+#define CABE_EMPTY_VALUE -400002
+#define CABE_DATA_NOT_FOUND -400004
+
+#endif //CABE_ERROR_CODE_H
