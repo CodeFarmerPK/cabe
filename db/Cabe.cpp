@@ -125,8 +125,7 @@ int32_t Cabe::Get(const std::vector<char> &keyVector, std::vector<char> &valueVe
         memcpy(valueVector.data(), preVector.data() + metadataSize + keySize, valueSize);
     }
 
-    uint32_t crc = calCRC(valueVector, valueSize);
-    if (metadata->crc != crc) {
+    if (metadata->crc != calCRC(valueVector, valueSize)) {
         return CABE_ERROR_DATA;
     }
 
@@ -165,132 +164,100 @@ int32_t Cabe::Delete(const std::vector<char> &keyVector) {
 }
 
 int32_t Cabe::Merge() {
-    // todo 需重构
-    std::vector<char> preVector(dbOptions.preReadSize);
-
-    std::vector<char> keyVector;
-    std::vector<char> valueVector;
-    std::vector<char> dataVector;
-
-    FILE *mergingFile;
-    Metadata metadata{};
-    size_t readSize;
-    int64_t totalSize;
-    uint32_t crc;
-    int64_t offset = 0;
-    int64_t mergeOffset = 0;
-    uint32_t mergeFileId = 0;
-    MemoryIndex mergeIndex{};
+    // todo 暂时只考虑正常流程，不考虑异常处理
 
     // 仅merge非活跃文件
     auto mergeFiles(inactiveFiles);
     if (mergeFiles.empty()) {
-        return -1;
+        return CABE_MERGE_ERROR;
     }
 
-    int32_t status = ioManager->Open(dbOptions.dataFilePath, mergeFileId, dbOptions.mergeFileSuffix, mergingFile);
-    if (status != STATUS_SUCCESS) {
-        return status;
-    }
-    mergedFiles[mergeFileId] = mergingFile;
     mergeFlag.mergeStart = true;
     mergeFlag.mergeStartTime = getTimeStamp();
+
+    std::vector<char> preVector(dbOptions.preReadSize);
+
+    // todo 索引插入和crc计算通过指针地址进行，无需分配vector
+    std::vector<char> keyVector;
+    std::vector<char> valueVector;
+
+    FILE *mergeFile;
+    Metadata metadata;            // 文件索引信息
+    MemoryIndex mergeIndex;       // 内存索引信息
+    size_t readSize = 0;          // 每次读取的大小
+    int64_t readOffset = 0;       // 旧文件的偏移量，每次读旧文件之后更新，用于控制文件是否读完
+    int64_t totalSize = 0;        // 本次读取的数据总大小
+
+    uint32_t mergeFileId = 0;     // 正在merge的文件id
+    int64_t mergeOffset = 0;      // 正在merge的文件偏移量，每次写merge文件之后更新，用于控制文件是否需要开启新的merge文件
+
+    ioManager->Open(dbOptions.dataFilePath, mergeFileId, dbOptions.mergeFileSuffix, mergeFile);
+    mergeFiles[mergeFileId] = mergeFile;
     for (auto &item: mergeFiles) {
         while (true) {
-            status = ioManager->Read(preVector, offset, readSize, item.second);
-            if (status != STATUS_SUCCESS) {
-                break;
-            }
-
-            if (offset >= dbOptions.dataFileSize) {
-                status = ioManager->Close(item.second);
-                if (status != STATUS_SUCCESS) {
-                    break;
-                }
+            // 一个旧文件读完就删除它，从内存中删除打开文件的索引，并退出本次循环
+            if (readOffset >= dbOptions.dataFileSize) {
+                ioManager->Close(item.second);
+                inactiveFiles.erase(item.first);
                 std::filesystem::remove(dbOptions.dataFilePath + std::to_string(item.first) + dbOptions.dataFileSuffix);
-                offset = 0;
                 break;
             }
-
+            // 读旧文件数据，readOffset为文件偏移量，readSize为读取的文件大小
+            ioManager->Read(preVector, readOffset, readSize, item.second);
             metadata = *reinterpret_cast<Metadata *>(preVector.data());
+            totalSize = metadataSize + metadata.keySize + metadata.valueSize;
+
             if (metadata.dataType == DataType::DataNormal) {
-                totalSize = metadataSize + metadata.keySize + metadata.valueSize;
                 if (totalSize > dbOptions.preReadSize) {
+                    // 数据大小超出预读大小，重新读取一次
                     preVector.resize(totalSize);
-                    status = ioManager->Read(preVector, offset, readSize, item.second);
-                    if (status != STATUS_SUCCESS) {
-                        return status;
-                    }
+                    ioManager->Read(preVector, readOffset, readSize, item.second);
                 }
 
-
-                valueVector.resize(metadata.valueSize);
-                memcpy(valueVector.data(), preVector.data() + metadataSize + metadata.keySize, metadataSize);
-                crc = calCRC(valueVector, metadata.valueSize);
-                if (metadata.crc != crc) {
-                    continue;
-                }
-                index->Get(valueVector, mergeIndex);
-
-                if (mergeOffset > dbOptions.dataFileSize) {
-                    ioManager->Sync(mergingFile);
-                    mergedFiles[mergeFileId] = mergingFile;
-                    mergeFileId++;
-                    mergeOffset = 0;
-                    status = ioManager->Open(dbOptions.dataFilePath,
-                                             mergeFileId,
-                                             dbOptions.mergeFileSuffix,
-                                             mergingFile);
-                }
-
-                if (mergeIndex.fileID == item.first && mergeIndex.offset == offset) {
-                    keyVector.resize(metadata.keySize);
-                    if (preVector.size() > dbOptions.preReadSize) {
-                        status = ioManager->Write(preVector, mergingFile);
-                        memcpy(keyVector.data(), preVector.data() + metadataSize, keyVector.size());
-                    } else {
-                        dataVector.resize(totalSize);
-                        memcpy(dataVector.data(), preVector.data(), totalSize);
-                        memcpy(keyVector.data(), dataVector.data() + metadataSize, keyVector.size());
-                        status = ioManager->Write(dataVector, mergingFile);
-                    }
-                    if (status != STATUS_SUCCESS) {
-                        // todo 失败回滚
+                keyVector.resize(metadata.keySize);
+                memcpy(keyVector.data(), preVector.data() + metadataSize, keyVector.size());
+                index->Get(keyVector, mergeIndex);
+                if (mergeIndex.fileID == item.first && mergeIndex.offset == readOffset) {
+                    valueVector.resize(metadata.valueSize);
+                    memcpy(valueVector.data(), preVector.data() + metadataSize + metadata.keySize, valueVector.size());
+                    if (metadata.crc != calCRC(valueVector, valueVector.size())) {
+                        readOffset += totalSize;
                         continue;
                     }
 
-                    ioManager->Sync(mergingFile);
-                    // 更新索引，指向新文件位置
+                    // todo AppendData函数需要支持merge，统一处理
+                    if (mergeOffset >= dbOptions.dataFileSize) {
+                        ioManager->Sync(mergeFile);
+                        mergeFileId++;
+                        ioManager->Open(dbOptions.dataFilePath, mergeFileId, dbOptions.mergeFileSuffix, mergeFile);
+                        mergeFiles[mergeFileId] = mergeFile;
+                    }
+                    ioManager->Write(preVector, totalSize, activeFile);
+
                     mergeIndex.fileID = mergeFileId;
                     mergeIndex.offset = mergeOffset;
                     mergeIndex.timeStamp = getTimeStamp();
-
                     index->Put(keyVector, mergeIndex);
+                    // 成功写入时更新merge文件偏移量
                     mergeOffset += totalSize;
-
-                    if (mergeOffset >= dbOptions.dataFileSize) {
-                        break;
-                    }
                 }
             }
+            // 更新已读旧文件偏移量
+            readOffset += totalSize;
         }
     }
 
-    for (auto &item: mergedFiles) {
+
+    for (auto &item: mergeFiles) {
         ioManager->Sync(item.second);
         ioManager->Close(item.second);
         std::string oldFilePath = dbOptions.dataFilePath + std::to_string(item.first) + dbOptions.mergeFileSuffix;
         std::string newFilePath = dbOptions.dataFilePath + std::to_string(item.first) + dbOptions.dataFileSuffix;
         std::filesystem::rename(oldFilePath, newFilePath);
     }
-
-    for (const auto &item: mergeFiles) {
-        inactiveFiles.erase(item.first);
-    }
-    mergedFiles.clear();
-
+    mergeFiles.clear();
     mergeFlag.mergeStart = false;
-    mergeFlag.mergeStartTime = 0;
+    mergeFlag.mergeStartTime = getTimeStamp();
     return STATUS_SUCCESS;
 }
 
@@ -318,9 +285,8 @@ int32_t Cabe::AppendData(const std::vector<char> &dataVector) {
     }
 
     // 追加写入文件并更新当前文件偏移量
-
-    ioManager->Write(dataVector, activeFile);
-    ioManager->Sync(activeFile);
+    int64_t dataSize = dataVector.size();
+    ioManager->Write(dataVector, dataSize, activeFile);
     activeFileInfo->offset += static_cast<int64_t>(dataVector.size());
     return STATUS_SUCCESS;
 }

@@ -21,7 +21,7 @@ int32_t STDIO::Open(const std::string &directory, size_t fileID, const std::stri
     return STATUS_SUCCESS;
 };
 
-int32_t STDIO::Write(const std::vector<char> &dataVector, FILE *&file) {
+int32_t STDIO::Write(const std::vector<char> &dataVector, int64_t &dataSize, FILE *&file) {
     if (!file) {
         return FILE_NO_SUCH_FILE;
     }
@@ -30,7 +30,7 @@ int32_t STDIO::Write(const std::vector<char> &dataVector, FILE *&file) {
         return FILE_WRITE_FAIL;
     }
 
-    size_t writtenSize = fwrite(dataVector.data(), sizeof(char), dataVector.size(), file);
+    size_t writtenSize = fwrite(dataVector.data(), sizeof(char), dataSize, file);
     if (writtenSize != dataVector.size()) {
         return FILE_WRITE_FAIL;
     }

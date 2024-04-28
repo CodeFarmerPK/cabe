@@ -7,6 +7,7 @@
 #include "HashIndex.h"
 
 int32_t HashIndex::Put(const std::vector<char> &key, MemoryIndex memoryIndex) {
+    // todo 支持指针传参
     hashIndex[key] = memoryIndex;
     return STATUS_SUCCESS;
 }

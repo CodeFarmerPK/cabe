@@ -18,7 +18,7 @@ public:
     virtual int32_t Open(const std::string &directory, uint64_t fileID, const std::string &fileSuffix, FILE *&file) = 0;
 
     // 将字节数组写入文件
-    virtual int32_t Write(const std::vector<char> &dataVector, FILE *&file) = 0;
+    virtual int32_t Write(const std::vector<char> &dataVector, int64_t &dataSize, FILE *&file) = 0;
 
     // 从文件中给定位置读取数据
     virtual int32_t Read(std::vector<char> &valueVector, int64_t offset, size_t &readSize, FILE *&File) = 0;

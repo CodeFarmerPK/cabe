@@ -22,7 +22,7 @@ public:
 
     int32_t Open(const std::string &directory, uint64_t fileID, const std::string &fileSuffix, FILE *&file) override;
 
-    int32_t Write(const std::vector<char> &dataVector, FILE *&file) override;
+    int32_t Write(const std::vector<char> &dataVector, int64_t &dataSize, FILE *&file) override;
 
     int32_t Read(std::vector<char> &valueVector, int64_t offset, size_t &readSize, FILE *&File) override;
 
