@@ -13,3 +13,9 @@ add_executable(cabe main.cpp
         db/Cabe.cpp
         db/Cabe.h
 )
+
+#set(ENV{PKG_CONFIG_PATH} /usr/lib/pkgconfig)
+find_package(PkgConfig)
+pkg_search_module(XNVME REQUIRED xnvme)
+target_include_directories(cabe PRIVATE ${XNVME_INCLUDE_DIRS})
+target_link_libraries(cabe PRIVATE ${XNVME_LIBRARIES})
