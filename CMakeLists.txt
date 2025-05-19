@@ -7,3 +7,6 @@ add_executable(cabe main.cpp
         util/crc32.h
         util/crc32.cpp
 )
+
+
+include_directories(${CMAKE_SOURCE_DIR})
