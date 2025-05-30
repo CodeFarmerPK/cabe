@@ -50,6 +50,6 @@ namespace cabe::util {
         for (const char c : data) {
             crc = crc >> 8 ^ crcTable[(crc ^ static_cast<uint8_t>(c)) & 0xFF];
         }
-        return ~crc ;
+        return ~crc;
     }
 } // namespace cabe::util

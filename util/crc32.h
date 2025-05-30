@@ -8,6 +8,7 @@
 #define CRC32_H
 
 #include "common/error_code.h"
+#include <span>
 
 namespace cabe::util {
     uint32_t CRC32(std::span<const char> data);
