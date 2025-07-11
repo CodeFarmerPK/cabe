@@ -8,6 +8,8 @@ add_executable(cabe main.cpp
         util/crc32.cpp
         memory/index.h
         memory/index.cpp
+        localstore/std_io.cpp
+        localstore/std_io.h
 )
 
 
