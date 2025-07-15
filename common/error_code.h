@@ -10,8 +10,6 @@
 
 #define SUCCESS 0
 
-#define DATA_SIZE 32
-
 // memory codes
 #define MEMORY_NULL_POINTER_EXCEPTION (-100000)
 #define MEMORY_EMPTY_KEY (-100001)
@@ -23,5 +21,9 @@
 #define DEVICE_FAILED_TO_SEEK_OFFSET (-200001)
 #define DEVICE_FAILED_TO_WRITE_DATA (-200002)
 #define DEVICE_FAILED_TO_READ_DATA (-200002)
+
+// cabe codes
+#define CABE_EMPTY_KEY -300001
+#define CABE_EMPTY_VALUE -300002
 
 #endif // ERROR_CODE_H

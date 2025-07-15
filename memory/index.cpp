@@ -8,7 +8,7 @@
 std::unordered_map<std::string_view, MemoryIndex> Index::memoryIndexMap;
 
 int32_t Index::Put(const std::string_view& key, MemoryIndex& memoryIndex) {
-    auto res = memoryIndexMap.insert_or_assign (key, std::move(memoryIndex));
+    auto res = memoryIndexMap.insert_or_assign (key, memoryIndex);
     if (res.second) {
         return SUCCESS;
     }
@@ -33,6 +33,3 @@ int32_t Index::Delete(const std::string_view& key) {
     return SUCCESS;
 }
 
-int32_t Index::Persist() {
-    return SUCCESS;
-}

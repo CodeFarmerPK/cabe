@@ -16,14 +16,9 @@ public:
 
     virtual ~std_io() = default;
 
-    int32_t Open(const std::string& devicePath);
+    virtual int32_t Write(const std::span<char>& dataSpan, int64_t offset, int fd);
 
-    int32_t Write(const std::span<char>& dataSpan, int64_t offset);
-
-    int32_t Read(const std::span<char>& dataSpan, int64_t offset);
-
-private:
-    int fd = 0;
+    virtual int32_t Read(const std::span<char>& dataSpan, int64_t offset, int fd);
 };
 
 

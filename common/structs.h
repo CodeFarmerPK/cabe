@@ -8,6 +8,8 @@
 
 #include <cstdint>
 
+#define DATA_SIZE 1048576
+
 // 内存索引
 // 记录在内存中的索引数据结构
 struct MemoryIndex {

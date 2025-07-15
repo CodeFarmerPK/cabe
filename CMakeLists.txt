@@ -10,6 +10,9 @@ add_executable(cabe main.cpp
         memory/index.cpp
         localstore/std_io.cpp
         localstore/std_io.h
+        db/cabe.cpp
+        db/cabe.h
+        util/util.h
 )
 
 

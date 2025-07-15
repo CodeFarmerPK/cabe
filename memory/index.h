@@ -24,8 +24,6 @@ public:
 
     static int32_t Delete(const std::string_view& key);
 
-    static int32_t Persist();
-
 private:
     static std::unordered_map<std::string_view, MemoryIndex> memoryIndexMap;
 };

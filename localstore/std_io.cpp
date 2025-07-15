@@ -3,18 +3,12 @@
 //
 
 #include "std_io.h"
+#include "common/structs.h"
 
 #include <fcntl.h>
 #include <unistd.h>
 
-int32_t std_io::Open(const std::string& devicePath) {
-    fd = open(devicePath.c_str(), O_RDWR);
-    if (fd == -1) {
-        return DEVICE_FAILED_TO_OPEN_DEVICE;
-    }
-    return SUCCESS;
-}
-int32_t std_io::Write(const std::span<char>& dataSpan, int64_t offset) {
+int32_t std_io::Write(const std::span<char>& dataSpan, int64_t offset, const int fd) {
     if (lseek(fd, offset, SEEK_SET) == -1) {
         return DEVICE_FAILED_TO_SEEK_OFFSET;
     }
@@ -24,7 +18,7 @@ int32_t std_io::Write(const std::span<char>& dataSpan, int64_t offset) {
     }
     return SUCCESS;
 }
-int32_t std_io::Read(const std::span<char>& dataSpan, int64_t offset) {
+int32_t std_io::Read(const std::span<char>& dataSpan, int64_t offset, const int fd) {
     if (lseek(fd, offset, SEEK_SET) == -1) {
         return DEVICE_FAILED_TO_SEEK_OFFSET;
     }
