@@ -3,16 +3,15 @@ project(cabe)
 
 set(CMAKE_CXX_STANDARD 20)
 
-add_executable(cabe main.cpp
+add_executable(cabe
+        main.cpp
+        util/util.h
         util/crc32.h
         util/crc32.cpp
+        common/error_code.h
+        common/structs.h
         memory/index.h
         memory/index.cpp
-        localstore/std_io.cpp
-        localstore/std_io.h
-        db/cabe.cpp
-        db/cabe.h
-        util/util.h
 )
 
 

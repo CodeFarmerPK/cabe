@@ -5,31 +5,64 @@
  */
 
 #include "index.h"
-std::unordered_map<std::string_view, MemoryIndex> Index::memoryIndexMap;
 
-int32_t Index::Put(const std::string_view& key, MemoryIndex& memoryIndex) {
-    auto res = memoryIndexMap.insert_or_assign (key, memoryIndex);
-    if (res.second) {
-        return SUCCESS;
+int32_t Index::Put(Key key, const IndexEntry& entry) {
+    try {
+        indexMap_[key] = entry;
+    } catch (...) {
+        return MEMORY_INSERT_FAIL;
     }
-    return MEMORY_INSERT_FAIL;
-}
-
-int32_t Index::Get(const std::string_view& key, MemoryIndex& memoryIndex) {
-    auto it = memoryIndexMap.find(key);
-    if (it == memoryIndexMap.end()) {
-        return MEMORY_EMPTY_KEY;
-    }
-    memoryIndex = it->second;
     return SUCCESS;
 }
 
-int32_t Index::Delete(const std::string_view& key) {
-    auto it = memoryIndexMap.find(key);
-    if (it == memoryIndexMap.end()) {
-        return MEMORY_EMPTY_KEY;
+int32_t Index::Get(Key key, IndexEntry* entry) {
+    if (entry == nullptr) {
+        return MEMORY_NULL_POINTER_EXCEPTION;
     }
-    memoryIndexMap.erase(it);
+
+    auto it = indexMap_.find(key);
+    if (it == indexMap_.end()) {
+        return INDEX_KEY_NOT_FOUND;
+    }
+
+    if (it->second.state != DataState::Active) {
+        return INDEX_KEY_DELETED;
+    }
+
+    *entry = it->second;
     return SUCCESS;
 }
 
+int32_t Index::Delete(Key key) {
+    auto it = indexMap_.find(key);
+    if (it == indexMap_.end()) {
+        return INDEX_KEY_NOT_FOUND;
+    }
+
+    if (it->second.state == DataState::Deleted) {
+        return INDEX_KEY_DELETED;
+    }
+
+    it->second.state = DataState::Deleted;
+    return SUCCESS;
+}
+
+int32_t Index::Remove(Key key) {
+    auto count = indexMap_.erase(key);
+    if (count == 0) {
+        return INDEX_KEY_NOT_FOUND;
+    }
+    return SUCCESS;
+}
+
+size_t Index::Size() const {
+    return indexMap_.size();
+}
+
+bool Index::Contains(Key key) const {
+    auto it = indexMap_.find(key);
+    if (it == indexMap_.end()) {
+        return false;
+    }
+    return it->second.state == DataState::Active;
+}

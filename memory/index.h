@@ -9,8 +9,7 @@
 
 #include "common/error_code.h"
 #include "common/structs.h"
-#include <string_view>
-#include <unordered_map>
+#include <map>
 
 class Index {
 public:
@@ -18,14 +17,20 @@ public:
 
     ~Index() = default;
 
-    static int32_t Put(const std::string_view& key, MemoryIndex& memoryIndex);
+    int32_t Put(Key key, const IndexEntry& entry);
 
-    static int32_t Get(const std::string_view& key, MemoryIndex& memoryIndex);
+    int32_t Get(Key key, IndexEntry* entry);
 
-    static int32_t Delete(const std::string_view& key);
+    int32_t Delete(Key key);
+
+    int32_t Remove(Key key);
+
+
+    size_t Size() const;
+    bool Contains(Key key) const;
 
 private:
-    static std::unordered_map<std::string_view, MemoryIndex> memoryIndexMap;
+    std::map<Key, IndexEntry> indexMap_;
 };
 
 #endif

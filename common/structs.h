@@ -8,27 +8,22 @@
 
 #include <cstdint>
 
-#define DATA_SIZE 1048576
-
-// 内存索引
-// 记录在内存中的索引数据结构
-struct MemoryIndex {
-    int64_t offset;
-    uint64_t timeStamp;
-};
+#define CABE_VALUE_DATA_SIZE (1024 * 1024)
 
 // 数据状态
-// 数据状态标记
-enum DataType { DataNormal, DataDeleted };
+enum class DataState : uint8_t {
+    Active,
+    Deleted
+};
 
-// 元数据
-// 数据信息的描述
-struct Metadata {
-    DataType dataType;
+// Key
+using Key = uint64_t;
 
-    int64_t keySize;
-    int64_t valueSize;
+// 内存索引
+struct IndexEntry {
+    uint64_t blockId;
     uint64_t timestamp;
     uint32_t crc;
+    DataState state;
 };
 #endif // STRUCTS_H
