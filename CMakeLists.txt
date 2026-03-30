@@ -12,6 +12,12 @@ add_executable(cabe
         common/structs.h
         memory/index.h
         memory/index.cpp
+        storage/free_list.cpp
+        storage/free_list.h
+        storage/storage.cpp
+        storage/storage.h
+        engine/engine.cpp
+        engine/engine.h
 )
 
 

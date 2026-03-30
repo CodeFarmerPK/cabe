@@ -7,6 +7,7 @@
 #define STRUCTS_H
 
 #include <cstdint>
+#include <span>
 
 #define CABE_VALUE_DATA_SIZE (1024 * 1024)
 
@@ -19,9 +20,16 @@ enum class DataState : uint8_t {
 // Key
 using Key = uint64_t;
 
+// BlockId
+using BlockId = uint64_t;
+
+// 定义常用 span 类型
+using DataView = std::span<const char>;
+using DataBuffer = std::span<char>;
+
 // 内存索引
 struct IndexEntry {
-    uint64_t blockId;
+    BlockId blockId;
     uint64_t timestamp;
     uint32_t crc;
     DataState state;

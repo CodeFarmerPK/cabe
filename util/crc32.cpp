@@ -8,7 +8,6 @@
 
 namespace cabe::util {
     namespace {
-        // 0x11EDC6F41
         constexpr uint32_t crcTable[256] = {0x00000000, 0x0A5F4D75, 0x14BE9AEA, 0x1EE1D79F, 0x14C5EB57, 0x1E9AA622,
             0x007B71BD, 0x0A243CC8, 0x1433082D, 0x1E6C4558, 0x008D92C7, 0x0AD2DFB2, 0x00F6E37A, 0x0AA9AE0F, 0x14487990,
             0x1E1734E5, 0x15DECED9, 0x1F8183AC, 0x01605433, 0x0B3F1946, 0x011B258E, 0x0B4468FB, 0x15A5BF64, 0x1FFAF211,
@@ -40,12 +39,12 @@ namespace cabe::util {
             0x12D9FF10, 0x0C38288F, 0x066765FA, 0x0C435932, 0x061C1447, 0x18FDC3D8, 0x12A28EAD};
 
         // TODO 硬件指令优化
-        uint32_t AccelerationCRC32(std::span<const char> data) {
+        uint32_t AccelerationCRC32(DataView data) {
             return 0;
         }
     } // namespace
 
-    uint32_t CRC32(const std::span<const char> data) {
+    uint32_t CRC32(const DataView data) {
         uint32_t crc = 0xFFFFFFFF;
         for (const char c : data) {
             crc = crc >> 8 ^ crcTable[(crc ^ static_cast<uint8_t>(c)) & 0xFF];
