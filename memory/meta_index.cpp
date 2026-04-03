@@ -4,19 +4,19 @@
  * Created by: CodeFarmerPK
  */
 
-#include "index.h"
+#include "meta_index.h"
 
-int32_t Index::Put(const Key key, const IndexEntry& entry) {
+int32_t MetaIndex::Put(const std::string& key, const KeyMeta& meta) {
     try {
-        indexMap_[key] = entry;
+        indexMap_[key] = meta;
     } catch (...) {
         return MEMORY_INSERT_FAIL;
     }
     return SUCCESS;
 }
 
-int32_t Index::Get(const Key key, IndexEntry* entry) {
-    if (entry == nullptr) {
+int32_t MetaIndex::Get(const std::string& key, KeyMeta* meta) const {
+    if (meta == nullptr) {
         return MEMORY_NULL_POINTER_EXCEPTION;
     }
 
@@ -25,15 +25,16 @@ int32_t Index::Get(const Key key, IndexEntry* entry) {
         return INDEX_KEY_NOT_FOUND;
     }
 
+    *meta = it->second;
+
     if (it->second.state != DataState::Active) {
         return INDEX_KEY_DELETED;
     }
 
-    *entry = it->second;
     return SUCCESS;
 }
 
-int32_t Index::Delete(const Key key) {
+int32_t MetaIndex::Delete(const std::string& key) {
     const auto it = indexMap_.find(key);
     if (it == indexMap_.end()) {
         return INDEX_KEY_NOT_FOUND;
@@ -47,18 +48,18 @@ int32_t Index::Delete(const Key key) {
     return SUCCESS;
 }
 
-int32_t Index::Remove(const Key key) {
+int32_t MetaIndex::Remove(const std::string& key) {
     if (const auto count = indexMap_.erase(key); count == 0) {
         return INDEX_KEY_NOT_FOUND;
     }
     return SUCCESS;
 }
 
-size_t Index::Size() const {
+size_t MetaIndex::Size() const {
     return indexMap_.size();
 }
 
-bool Index::Contains(const Key key) const {
+bool MetaIndex::Contains(const std::string& key) const {
     const auto it = indexMap_.find(key);
     if (it == indexMap_.end()) {
         return false;

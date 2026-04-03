@@ -5,9 +5,10 @@
  */
 
 #include "engine.h"
-#include "util/util.h"
-#include "util/crc32.h"
 
+#include "util/crc32.h"
+#include "util/util.h"
+#include <algorithm>
 #include <chrono>
 #include <cstdlib>
 #include <cstring>
@@ -49,130 +50,223 @@ int32_t Engine::Close() {
     return SUCCESS;
 }
 
-int32_t Engine::Put(DataView data, Key* key) {
+// ============================================================
+// Put: 将 data 拆分为多个 chunk 写入
+// ============================================================
+int32_t Engine::Put(const std::string& key, const DataView data) {
     if (!isOpen_) {
         return DEVICE_FAILED_TO_OPEN_DEVICE;
     }
-
-    if (data.empty() || key == nullptr) {
-        return MEMORY_NULL_POINTER_EXCEPTION;
+    if (key.empty()) {
+        return CABE_EMPTY_KEY;
     }
-
-    // 分配 Key
-    const Key newKey = nextKey_++;
-
-    // 分配 BlockId
-    BlockId blockId;
-    int32_t ret = freeList_.Allocate(&blockId);
-    if (ret != SUCCESS) {
-        return ret;
-    }
-
-    // 分配对齐内存并拷贝数据
-    char* alignedBuffer = AllocateAlignedBuffer();
-    if (alignedBuffer == nullptr) {
-        freeList_.Release(blockId);
-        return MEMORY_INSERT_FAIL;
-    }
-    std::memcpy(alignedBuffer, data.data(), CABE_VALUE_DATA_SIZE);
-
-    // 写入磁盘
-    ret =  storage_.WriteBlock(blockId, {alignedBuffer, CABE_VALUE_DATA_SIZE});
-    FreeAlignedBuffer(alignedBuffer);
-
-    if (ret != SUCCESS) {
-        freeList_.Release(blockId);
-        return ret;
-    }
-
-    // 计算 CRC
-    const uint32_t crc = cabe::util::CRC32(DataView(data));
-
-    // 更新索引
-    const IndexEntry entry = {.blockId = blockId, .timestamp = cabe::util::GetTimeStamp(), .crc = crc, .state = DataState::Active};
-
-    ret = index_.Put(newKey, entry);
-    if (ret != SUCCESS) {
-        freeList_.Release(blockId);
-        return ret;
-    }
-
-    *key = newKey;
-    return SUCCESS;
-}
-
-int32_t Engine::Get(const Key key, DataBuffer data) {
-    if (!isOpen_) {
-        return DEVICE_FAILED_TO_OPEN_DEVICE;
-    }
-
     if (data.empty()) {
+        return CABE_EMPTY_VALUE;
+    }
+
+    const uint64_t totalSize = data.size();
+    const auto chunkCount = static_cast<uint32_t>((totalSize + CABE_VALUE_DATA_SIZE - 1) / CABE_VALUE_DATA_SIZE);
+
+    // 分配连续的 chunkId: [firstChunkId, firstChunkId + chunkCount)
+    const ChunkId firstChunkId = AllocateChunkIds(chunkCount);
+    const uint64_t now = cabe::util::GetTimeStamp();
+
+    // 记录已成功写入的 chunk 数量，用于失败时回滚
+    uint32_t writtenCount = 0;
+
+    // 逐 chunk 写入
+    for (uint32_t i = 0; i < chunkCount; ++i) {
+        const uint64_t offset = static_cast<uint64_t>(i) * CABE_VALUE_DATA_SIZE;
+        const uint64_t remaining = totalSize - offset;
+        const uint64_t chunkSize = std::min(static_cast<uint64_t>(CABE_VALUE_DATA_SIZE), remaining);
+
+        // 分配磁盘块
+        BlockId blockId;
+        int32_t ret = freeList_.Allocate(&blockId);
+        if (ret != SUCCESS) {
+            goto rollback;
+        }
+
+        {
+            // 分配对齐内存，拷贝数据
+            char* alignedBuffer = AllocateAlignedBuffer();
+            if (alignedBuffer == nullptr) {
+                freeList_.Release(blockId);
+                goto rollback;
+            }
+            std::memcpy(alignedBuffer, data.data() + offset, chunkSize);
+
+            // 写入磁盘
+            ret = storage_.WriteBlock(blockId, {alignedBuffer, CABE_VALUE_DATA_SIZE});
+            if (ret != SUCCESS) {
+                FreeAlignedBuffer(alignedBuffer);
+                freeList_.Release(blockId);
+                goto rollback;
+            }
+
+            // 计算 CRC
+            const uint32_t crc = cabe::util::CRC32({alignedBuffer, CABE_VALUE_DATA_SIZE});
+            FreeAlignedBuffer(alignedBuffer);
+
+            // 写入第二层索引
+            const ChunkMeta chunkMeta = {.blockId = blockId, .crc = crc, .timestamp = now, .state = DataState::Active};
+            ret = chunkIndex_.Put(firstChunkId + i, chunkMeta);
+            if (ret != SUCCESS) {
+                freeList_.Release(blockId);
+                goto rollback;
+            }
+        }
+
+        ++writtenCount;
+    }
+
+    {
+        // 写入第一层索引
+        const KeyMeta keyMeta = {.firstChunkId = firstChunkId,
+            .chunkCount = chunkCount,
+            .totalSize = totalSize,
+            .createdAt = now,
+            .modifiedAt = now,
+            .state = DataState::Active};
+        return metaIndex_.Put(key, keyMeta);
+    }
+
+rollback:
+    // 回滚已成功写入的 0 ~ writtenCount-1 个 chunk
+    for (uint32_t j = 0; j < writtenCount; ++j) {
+        ChunkMeta written{};
+        if (chunkIndex_.Get(firstChunkId + j, &written) == SUCCESS) {
+            freeList_.Release(written.blockId);
+        }
+        chunkIndex_.Remove(firstChunkId + j);
+    }
+    return MEMORY_INSERT_FAIL;
+}
+
+// ============================================================
+// Get: 通过两层索引定位并合并所有 chunk
+// ============================================================
+int32_t Engine::Get(const std::string& key, DataBuffer buffer, uint64_t* readSize) const {
+    if (!isOpen_) {
+        return DEVICE_FAILED_TO_OPEN_DEVICE;
+    }
+    if (key.empty()) {
+        return CABE_EMPTY_KEY;
+    }
+    if (buffer.empty() || readSize == nullptr) {
         return MEMORY_NULL_POINTER_EXCEPTION;
     }
 
-    // 查询索引
-    IndexEntry entry{};
-    int32_t ret = index_.Get(key, &entry);
+    // 第一层: key → KeyMeta{firstChunkId, chunkCount, totalSize}
+    KeyMeta keyMeta{};
+    int32_t ret = metaIndex_.Get(key, &keyMeta);
     if (ret != SUCCESS) {
         return ret;
     }
 
-    // 分配对齐内存
-    char* alignedBuffer = AllocateAlignedBuffer();
-    if (alignedBuffer == nullptr) {
-        return MEMORY_INSERT_FAIL;
+    if (buffer.size() < keyMeta.totalSize) {
+        return CABE_INVALID_DATA_SIZE;
     }
 
-    // 读取磁盘
-    ret = storage_.ReadBlock(entry.blockId, {alignedBuffer, CABE_VALUE_DATA_SIZE});
+    // 第二层: 从 firstChunkId 顺序遍历 chunkCount 个 ChunkMeta
+    std::vector<ChunkMeta> chunkMetas;
+    ret = chunkIndex_.GetRange(keyMeta.firstChunkId, keyMeta.chunkCount, &chunkMetas);
     if (ret != SUCCESS) {
-        FreeAlignedBuffer(alignedBuffer);
         return ret;
     }
 
-    // 校验 CRC
-    if (const uint32_t crc = cabe::util::CRC32({alignedBuffer, CABE_VALUE_DATA_SIZE});crc != entry.crc) {
+    // 逐 chunk 读取并拼接
+    for (uint32_t i = 0; i < keyMeta.chunkCount; ++i) {
+        const ChunkMeta& meta = chunkMetas[i];
+
+        char* alignedBuffer = AllocateAlignedBuffer();
+        if (alignedBuffer == nullptr) {
+            return MEMORY_INSERT_FAIL;
+        }
+
+        ret = storage_.ReadBlock(meta.blockId, {alignedBuffer, CABE_VALUE_DATA_SIZE});
+        if (ret != SUCCESS) {
+            FreeAlignedBuffer(alignedBuffer);
+            return ret;
+        }
+
+        // CRC 校验
+        if (const uint32_t crc = cabe::util::CRC32({alignedBuffer, CABE_VALUE_DATA_SIZE}); crc != meta.crc) {
+            FreeAlignedBuffer(alignedBuffer);
+            return DATA_CRC_MISMATCH;
+        }
+
+        // 拷贝到 buffer
+        const uint64_t offset = static_cast<uint64_t>(i) * CABE_VALUE_DATA_SIZE;
+        const uint64_t remaining = keyMeta.totalSize - offset;
+        const uint64_t copySize = std::min(static_cast<uint64_t>(CABE_VALUE_DATA_SIZE), remaining);
+
+        std::memcpy(buffer.data() + offset, alignedBuffer, copySize);
         FreeAlignedBuffer(alignedBuffer);
-        return DEVICE_FAILED_TO_READ_DATA;
     }
 
-    // 拷贝数据
-    std::memcpy(data.data(), alignedBuffer, CABE_VALUE_DATA_SIZE);
-    FreeAlignedBuffer(alignedBuffer);
-
+    *readSize = keyMeta.totalSize;
     return SUCCESS;
 }
 
-int32_t Engine::Delete(const Key key) {
+// ============================================================
+// Delete: 标记删除（两层都标记）
+// ============================================================
+int32_t Engine::Delete(const std::string& key) {
     if (!isOpen_) {
         return DEVICE_FAILED_TO_OPEN_DEVICE;
     }
 
-    return index_.Delete(key);
-}
-
-int32_t Engine::Remove(const Key key) {
-    if (!isOpen_) {
-        return DEVICE_FAILED_TO_OPEN_DEVICE;
-    }
-
-    // 获取索引信息
-    IndexEntry entry{};
-    if (const int32_t ret = index_.Get(key, &entry);ret != SUCCESS && ret != INDEX_KEY_DELETED) {
+    // 获取 chunk 范围
+    KeyMeta keyMeta{};
+    int32_t ret = metaIndex_.Get(key, &keyMeta);
+    if (ret != SUCCESS) {
         return ret;
     }
 
-    // 如果 Get 返回 INDEX_KEY_DELETED，需要直接查 map 获取 blockId
-    // 这里需要特殊处理，先简化：假设 Delete 后仍可获取 entry
-    // 回收 BlockId
-    freeList_.Release(entry.blockId);
+    // 标记第二层
+    ret = chunkIndex_.DeleteRange(keyMeta.firstChunkId, keyMeta.chunkCount);
+    if (ret != SUCCESS) {
+        return ret;
+    }
 
-    // 从索引中移除
-    return index_.Remove(key);
+    // 标记第一层
+    return metaIndex_.Delete(key);
+}
+
+// ============================================================
+// Remove: 物理移除，回收磁盘块
+// ============================================================
+int32_t Engine::Remove(const std::string& key) {
+    if (!isOpen_) {
+        return DEVICE_FAILED_TO_OPEN_DEVICE;
+    }
+
+    // 获取 KeyMeta（需要能获取已删除条目的 chunk 范围）
+    KeyMeta keyMeta{};
+    int32_t ret = metaIndex_.Get(key, &keyMeta);
+    if (ret != SUCCESS && ret != INDEX_KEY_DELETED) {
+        return ret;
+    }
+
+    // 回收所有 chunk 对应的磁盘块
+    for (uint32_t i = 0; i < keyMeta.chunkCount; ++i) {
+        ChunkMeta chunkMeta{};
+        int32_t getResult = chunkIndex_.Get(keyMeta.firstChunkId + i, &chunkMeta);
+        if (getResult == SUCCESS || getResult == CHUNK_DELETED) {
+            freeList_.Release(chunkMeta.blockId);
+        }
+    }
+
+    // 物理移除第二层
+    chunkIndex_.RemoveRange(keyMeta.firstChunkId, keyMeta.chunkCount);
+
+    // 物理移除第一层
+    return metaIndex_.Remove(key);
 }
 
 size_t Engine::Size() const {
-    return index_.Size();
+    return metaIndex_.Size();
 }
 
 bool Engine::IsOpen() const {
@@ -191,4 +285,10 @@ void Engine::FreeAlignedBuffer(char* buffer) {
     if (buffer != nullptr) {
         std::free(buffer);
     }
+}
+
+ChunkId Engine::AllocateChunkIds(const uint32_t count) {
+    const ChunkId first = nextChunkId_;
+    nextChunkId_ += count;
+    return first;
 }

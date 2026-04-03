@@ -42,7 +42,7 @@ int32_t Storage::Close() {
     return SUCCESS;
 }
 
-int32_t Storage::WriteBlock(const BlockId blockId, DataView data) const {
+int32_t Storage::WriteBlock(const BlockId blockId,const DataView data) const {
     if (fd_ < 0) {
         return DEVICE_FAILED_TO_OPEN_DEVICE;
     }

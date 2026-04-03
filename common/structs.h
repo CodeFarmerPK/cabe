@@ -11,27 +11,33 @@
 
 #define CABE_VALUE_DATA_SIZE (1024 * 1024)
 
-// 数据状态
-enum class DataState : uint8_t {
-    Active,
-    Deleted
-};
 
-// Key
-using Key = uint64_t;
+using ChunkId = uint64_t;   // 逻辑标识，全局自增
+using BlockId = uint64_t;   // 物理位置
 
-// BlockId
-using BlockId = uint64_t;
-
-// 定义常用 span 类型
 using DataView = std::span<const char>;
 using DataBuffer = std::span<char>;
 
-// 内存索引
-struct IndexEntry {
-    BlockId blockId;
-    uint64_t timestamp;
-    uint32_t crc;
-    DataState state;
+// 数据状态
+enum class DataState : uint8_t {
+    Active = 0,
+    Deleted = 1
 };
+
+struct KeyMeta {
+    ChunkId firstChunkId;       // 起始 chunkId
+    uint32_t chunkCount;        // chunk 数量
+    uint64_t totalSize;         // 实际数据总大小
+    uint64_t createdAt;         // 创建时间
+    uint64_t modifiedAt;        // 修改时间
+    DataState state;            // 状态
+};
+
+struct ChunkMeta {
+    BlockId blockId;        // 物理块位置
+    uint32_t crc;           // CRC 校验
+    uint64_t timestamp;     // 写入时间
+    DataState state;        // 状态
+};
+
 #endif // STRUCTS_H

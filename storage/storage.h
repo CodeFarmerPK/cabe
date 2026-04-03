@@ -14,7 +14,6 @@
 
 class Storage {
 public:
-public:
     Storage() = default;
     ~Storage();
 
