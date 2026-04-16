@@ -10,11 +10,11 @@
 #include "util/util.h"
 #include <algorithm>
 #include <chrono>
-#include <cstdlib>
 #include <cstring>
 
-// 内存对齐大小（O_DIRECT 要求）
-constexpr size_t ALIGNMENT = 512;
+// 缓冲池默认缓冲区数量
+// 设为 8：为未来 io_uring 批量提交留出裕量
+constexpr uint32_t DEFAULT_POOL_BUFFER_COUNT = 8;
 
 Engine::~Engine() {
     if (isOpen_) {
@@ -32,6 +32,13 @@ int32_t Engine::Open(const std::string& devicePath) {
         return ret;
     }
 
+    // 初始化缓冲池：预分配 DEFAULT_POOL_BUFFER_COUNT 个 1MB 缓冲区
+    const int32_t poolRet = bufferPool_.Init(CABE_VALUE_DATA_SIZE, DEFAULT_POOL_BUFFER_COUNT);
+    if (poolRet != SUCCESS) {
+        storage_.Close();
+        return poolRet;
+    }
+
     isOpen_ = true;
     return SUCCESS;
 }
@@ -40,6 +47,9 @@ int32_t Engine::Close() {
     if (!isOpen_) {
         return SUCCESS;
     }
+
+    // 先销毁缓冲池，再关闭存储
+    bufferPool_.Destroy();
 
     int32_t ret = storage_.Close();
     if (ret != SUCCESS) {
@@ -89,7 +99,7 @@ int32_t Engine::Put(const std::string& key, const DataView data) {
 
         {
             // 分配对齐内存，拷贝数据
-            char* alignedBuffer = AllocateAlignedBuffer();
+            char* alignedBuffer = bufferPool_.Acquire();
             if (alignedBuffer == nullptr) {
                 freeList_.Release(blockId);
                 goto rollback;
@@ -99,14 +109,14 @@ int32_t Engine::Put(const std::string& key, const DataView data) {
             // 写入磁盘
             ret = storage_.WriteBlock(blockId, {alignedBuffer, CABE_VALUE_DATA_SIZE});
             if (ret != SUCCESS) {
-                FreeAlignedBuffer(alignedBuffer);
+                bufferPool_.Release(alignedBuffer);
                 freeList_.Release(blockId);
                 goto rollback;
             }
 
             // 计算 CRC
             const uint32_t crc = cabe::util::CRC32({alignedBuffer, CABE_VALUE_DATA_SIZE});
-            FreeAlignedBuffer(alignedBuffer);
+            bufferPool_.Release(alignedBuffer);
 
             // 写入第二层索引
             const ChunkMeta chunkMeta = {.blockId = blockId, .crc = crc, .timestamp = now, .state = DataState::Active};
@@ -179,20 +189,20 @@ int32_t Engine::Get(const std::string& key, DataBuffer buffer, uint64_t* readSiz
     for (uint32_t i = 0; i < keyMeta.chunkCount; ++i) {
         const ChunkMeta& meta = chunkMetas[i];
 
-        char* alignedBuffer = AllocateAlignedBuffer();
+        char* alignedBuffer = bufferPool_.Acquire();
         if (alignedBuffer == nullptr) {
-            return MEMORY_INSERT_FAIL;
+            return POOL_EXHAUSTED;
         }
 
         ret = storage_.ReadBlock(meta.blockId, {alignedBuffer, CABE_VALUE_DATA_SIZE});
         if (ret != SUCCESS) {
-            FreeAlignedBuffer(alignedBuffer);
+            bufferPool_.Release(alignedBuffer);
             return ret;
         }
 
         // CRC 校验
         if (const uint32_t crc = cabe::util::CRC32({alignedBuffer, CABE_VALUE_DATA_SIZE}); crc != meta.crc) {
-            FreeAlignedBuffer(alignedBuffer);
+            bufferPool_.Release(alignedBuffer);
             return DATA_CRC_MISMATCH;
         }
 
@@ -202,7 +212,7 @@ int32_t Engine::Get(const std::string& key, DataBuffer buffer, uint64_t* readSiz
         const uint64_t copySize = std::min(static_cast<uint64_t>(CABE_VALUE_DATA_SIZE), remaining);
 
         std::memcpy(buffer.data() + offset, alignedBuffer, copySize);
-        FreeAlignedBuffer(alignedBuffer);
+        bufferPool_.Release(alignedBuffer);
     }
 
     *readSize = keyMeta.totalSize;
@@ -271,20 +281,6 @@ size_t Engine::Size() const {
 
 bool Engine::IsOpen() const {
     return isOpen_;
-}
-
-char* Engine::AllocateAlignedBuffer() {
-    void* buffer = std::aligned_alloc(ALIGNMENT, CABE_VALUE_DATA_SIZE);
-    if (buffer != nullptr) {
-        std::memset(buffer, 0, CABE_VALUE_DATA_SIZE);
-    }
-    return static_cast<char*>(buffer);
-}
-
-void Engine::FreeAlignedBuffer(char* buffer) {
-    if (buffer != nullptr) {
-        std::free(buffer);
-    }
 }
 
 ChunkId Engine::AllocateChunkIds(const uint32_t count) {

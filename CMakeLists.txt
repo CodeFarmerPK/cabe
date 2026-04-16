@@ -14,6 +14,8 @@ set(CABE_LIB_SOURCES
         storage/free_list.cpp
         storage/storage.cpp
         engine/engine.cpp
+        buffer/buffer_pool.cpp
+        test/buffer/buffer_pool_test.cpp
 )
 
 # 静态库，供 main 和 test 共用
@@ -48,6 +50,7 @@ if(CABE_BUILD_TESTS)
     set(TEST_SOURCES
             test/memory/meta_index_test.cpp
             test/memory/chunk_index_test.cpp
+            test/buffer/buffer_pool_test.cpp
             test/storage/free_list_test.cpp
             test/util/crc32_test.cpp
             test/engine/engine_test.cpp

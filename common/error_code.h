@@ -38,4 +38,12 @@
 
 // crc codes
 #define DATA_CRC_MISMATCH (-600001)
+
+// buffer pool codes
+#define POOL_ALREADY_INITIALIZED (-700001)
+#define POOL_NOT_INITIALIZED     (-700002)
+#define POOL_MMAP_FAILED         (-700003)
+#define POOL_EXHAUSTED           (-700004)
+#define POOL_INVALID_POINTER     (-700005)
+#define POOL_INVALID_PARAMS      (-700006)
 #endif // ERROR_CODE_H
