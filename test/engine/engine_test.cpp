@@ -9,14 +9,12 @@
  * 不支持时相关测试自动 SKIP
  */
 
-#include <gtest/gtest.h>
+    #include <gtest/gtest.h>
 #include "engine/engine.h"
 #include <cstring>
 #include <fcntl.h>
 #include <unistd.h>
 #include <vector>
-
-static const char* TEST_DEVICE_PATH = "/tmp/cabe_engine_test.dat";
 
 static bool SupportsDirectIO(const char* path) {
     int fd = ::open(path, O_RDWR | O_CREAT | O_TRUNC, 0644);
@@ -41,10 +39,20 @@ static bool SupportsDirectIO(const char* path) {
 class EngineTest : public ::testing::Test {
 protected:
     Engine engine_;
+    std::string devicePath_;
 
     void SetUp() override {
-        if (!SupportsDirectIO(TEST_DEVICE_PATH)) {
-            GTEST_SKIP() << "O_DIRECT not supported, skipping Engine tests";
+        // 唯一路径: test_suite + test_name + pid
+        // 防止 ctest -j N 时多个测试并行走同一文件，在 SetUp() 里
+        // 通过 O_TRUNC 互相清零对方的数据
+        const auto* info =
+            ::testing::UnitTest::GetInstance()->current_test_info();
+        devicePath_ = std::string("/var/tmp/cabe_")
+                    + info->test_suite_name() + "_" + info->name()
+                    + "_" + std::to_string(::getpid()) + ".dat";
+
+        if (!SupportsDirectIO(devicePath_.c_str())) {
+            GTEST_SKIP() << "O_DIRECT not supported at " << devicePath_;
         }
     }
 
@@ -52,7 +60,7 @@ protected:
         if (engine_.IsOpen()) {
             engine_.Close();
         }
-        ::unlink(TEST_DEVICE_PATH);
+                    ::unlink(devicePath_.c_str());
     }
 
     static std::vector<char> MakeData(size_t size, char fill = 'A') {
@@ -65,7 +73,7 @@ protected:
 // ============================================================
 
 TEST_F(EngineTest, OpenAndClose) {
-    ASSERT_EQ(SUCCESS, engine_.Open(TEST_DEVICE_PATH));
+    ASSERT_EQ(SUCCESS, engine_.Open(devicePath_.c_str()));
     EXPECT_TRUE(engine_.IsOpen());
 
     ASSERT_EQ(SUCCESS, engine_.Close());
@@ -73,13 +81,13 @@ TEST_F(EngineTest, OpenAndClose) {
 }
 
 TEST_F(EngineTest, DoubleOpenIdempotent) {
-    ASSERT_EQ(SUCCESS, engine_.Open(TEST_DEVICE_PATH));
-    ASSERT_EQ(SUCCESS, engine_.Open(TEST_DEVICE_PATH));
+    ASSERT_EQ(SUCCESS, engine_.Open(devicePath_.c_str()));
+    ASSERT_EQ(SUCCESS, engine_.Open(devicePath_.c_str()));
     EXPECT_TRUE(engine_.IsOpen());
 }
 
 TEST_F(EngineTest, DoubleCloseIdempotent) {
-    ASSERT_EQ(SUCCESS, engine_.Open(TEST_DEVICE_PATH));
+    ASSERT_EQ(SUCCESS, engine_.Open(devicePath_.c_str()));
     ASSERT_EQ(SUCCESS, engine_.Close());
     ASSERT_EQ(SUCCESS, engine_.Close());
 }
@@ -93,7 +101,7 @@ TEST_F(EngineTest, OpenEmptyPathFails) {
 // ============================================================
 
 TEST_F(EngineTest, PutGetSmallValue) {
-    ASSERT_EQ(SUCCESS, engine_.Open(TEST_DEVICE_PATH));
+    ASSERT_EQ(SUCCESS, engine_.Open(devicePath_.c_str()));
 
     auto data = MakeData(1024, 'X');
     ASSERT_EQ(SUCCESS, engine_.Put("key1", {data.data(), data.size()}));
@@ -106,7 +114,7 @@ TEST_F(EngineTest, PutGetSmallValue) {
 }
 
 TEST_F(EngineTest, PutGetExactlyOneMB) {
-    ASSERT_EQ(SUCCESS, engine_.Open(TEST_DEVICE_PATH));
+    ASSERT_EQ(SUCCESS, engine_.Open(devicePath_.c_str()));
 
     auto data = MakeData(CABE_VALUE_DATA_SIZE, 'M');
     ASSERT_EQ(SUCCESS, engine_.Put("exact1mb", {data.data(), data.size()}));
@@ -123,7 +131,7 @@ TEST_F(EngineTest, PutGetExactlyOneMB) {
 // ============================================================
 
 TEST_F(EngineTest, PutGetMultiChunk) {
-    ASSERT_EQ(SUCCESS, engine_.Open(TEST_DEVICE_PATH));
+    ASSERT_EQ(SUCCESS, engine_.Open(devicePath_.c_str()));
 
     // 3.5 MB => 4 个 chunk
     const size_t totalSize = CABE_VALUE_DATA_SIZE * 3 + CABE_VALUE_DATA_SIZE / 2;
@@ -146,18 +154,18 @@ TEST_F(EngineTest, PutGetMultiChunk) {
 // ============================================================
 
 TEST_F(EngineTest, PutEmptyKeyFails) {
-    ASSERT_EQ(SUCCESS, engine_.Open(TEST_DEVICE_PATH));
+    ASSERT_EQ(SUCCESS, engine_.Open(devicePath_.c_str()));
     auto data = MakeData(100);
     EXPECT_EQ(CABE_EMPTY_KEY, engine_.Put("", {data.data(), data.size()}));
 }
 
 TEST_F(EngineTest, PutEmptyValueFails) {
-    ASSERT_EQ(SUCCESS, engine_.Open(TEST_DEVICE_PATH));
+    ASSERT_EQ(SUCCESS, engine_.Open(devicePath_.c_str()));
     EXPECT_EQ(CABE_EMPTY_VALUE, engine_.Put("key1", DataView{}));
 }
 
 TEST_F(EngineTest, GetNonExistentKey) {
-    ASSERT_EQ(SUCCESS, engine_.Open(TEST_DEVICE_PATH));
+    ASSERT_EQ(SUCCESS, engine_.Open(devicePath_.c_str()));
     std::vector<char> buf(CABE_VALUE_DATA_SIZE);
     uint64_t readSize = 0;
     EXPECT_EQ(INDEX_KEY_NOT_FOUND,
@@ -165,7 +173,7 @@ TEST_F(EngineTest, GetNonExistentKey) {
 }
 
 TEST_F(EngineTest, GetBufferTooSmall) {
-    ASSERT_EQ(SUCCESS, engine_.Open(TEST_DEVICE_PATH));
+    ASSERT_EQ(SUCCESS, engine_.Open(devicePath_.c_str()));
     auto data = MakeData(1024);
     ASSERT_EQ(SUCCESS, engine_.Put("key1", {data.data(), data.size()}));
 
@@ -176,7 +184,7 @@ TEST_F(EngineTest, GetBufferTooSmall) {
 }
 
 TEST_F(EngineTest, GetNullReadSizeFails) {
-    ASSERT_EQ(SUCCESS, engine_.Open(TEST_DEVICE_PATH));
+    ASSERT_EQ(SUCCESS, engine_.Open(devicePath_.c_str()));
     auto data = MakeData(100);
     engine_.Put("key1", {data.data(), data.size()});
 
@@ -203,7 +211,7 @@ TEST_F(EngineTest, OperationsBeforeOpenFail) {
 // ============================================================
 
 TEST_F(EngineTest, DeleteThenGetReturnsDeleted) {
-    ASSERT_EQ(SUCCESS, engine_.Open(TEST_DEVICE_PATH));
+    ASSERT_EQ(SUCCESS, engine_.Open(devicePath_.c_str()));
     auto data = MakeData(512);
     ASSERT_EQ(SUCCESS, engine_.Put("key1", {data.data(), data.size()}));
     ASSERT_EQ(SUCCESS, engine_.Delete("key1"));
@@ -215,7 +223,7 @@ TEST_F(EngineTest, DeleteThenGetReturnsDeleted) {
 }
 
 TEST_F(EngineTest, DeleteNonExistentFails) {
-    ASSERT_EQ(SUCCESS, engine_.Open(TEST_DEVICE_PATH));
+    ASSERT_EQ(SUCCESS, engine_.Open(devicePath_.c_str()));
     EXPECT_EQ(INDEX_KEY_NOT_FOUND, engine_.Delete("missing"));
 }
 
@@ -224,7 +232,7 @@ TEST_F(EngineTest, DeleteNonExistentFails) {
 // ============================================================
 
 TEST_F(EngineTest, RemoveDirectly) {
-    ASSERT_EQ(SUCCESS, engine_.Open(TEST_DEVICE_PATH));
+    ASSERT_EQ(SUCCESS, engine_.Open(devicePath_.c_str()));
     auto data = MakeData(512);
     ASSERT_EQ(SUCCESS, engine_.Put("key1", {data.data(), data.size()}));
     EXPECT_EQ(1u, engine_.Size());
@@ -239,7 +247,7 @@ TEST_F(EngineTest, RemoveDirectly) {
 }
 
 TEST_F(EngineTest, RemoveAfterDelete) {
-    ASSERT_EQ(SUCCESS, engine_.Open(TEST_DEVICE_PATH));
+    ASSERT_EQ(SUCCESS, engine_.Open(devicePath_.c_str()));
     auto data = MakeData(512);
     ASSERT_EQ(SUCCESS, engine_.Put("key1", {data.data(), data.size()}));
     ASSERT_EQ(SUCCESS, engine_.Delete("key1"));
@@ -248,12 +256,12 @@ TEST_F(EngineTest, RemoveAfterDelete) {
 }
 
 TEST_F(EngineTest, RemoveNonExistentFails) {
-    ASSERT_EQ(SUCCESS, engine_.Open(TEST_DEVICE_PATH));
+    ASSERT_EQ(SUCCESS, engine_.Open(devicePath_.c_str()));
     EXPECT_EQ(INDEX_KEY_NOT_FOUND, engine_.Remove("missing"));
 }
 
 TEST_F(EngineTest, RemoveMultiChunkFile) {
-    ASSERT_EQ(SUCCESS, engine_.Open(TEST_DEVICE_PATH));
+    ASSERT_EQ(SUCCESS, engine_.Open(devicePath_.c_str()));
 
     // 2.5MB => 3 个 chunk
     const size_t totalSize = CABE_VALUE_DATA_SIZE * 2 + CABE_VALUE_DATA_SIZE / 2;
@@ -268,7 +276,7 @@ TEST_F(EngineTest, RemoveMultiChunkFile) {
 // ============================================================
 
 TEST_F(EngineTest, MultipleKeysPutAndGet) {
-    ASSERT_EQ(SUCCESS, engine_.Open(TEST_DEVICE_PATH));
+    ASSERT_EQ(SUCCESS, engine_.Open(devicePath_.c_str()));
 
     auto data1 = MakeData(100, 'A');
     auto data2 = MakeData(200, 'B');
@@ -306,7 +314,7 @@ TEST_F(EngineTest, MultipleKeysPutAndGet) {
 // ============================================================
 
 TEST_F(EngineTest, SizeTracksCorrectly) {
-    ASSERT_EQ(SUCCESS, engine_.Open(TEST_DEVICE_PATH));
+    ASSERT_EQ(SUCCESS, engine_.Open(devicePath_.c_str()));
     EXPECT_EQ(0u, engine_.Size());
 
     auto data = MakeData(100);
@@ -325,7 +333,7 @@ TEST_F(EngineTest, SizeTracksCorrectly) {
 // ============================================================
 
 TEST_F(EngineTest, DataIntegrityMultiChunk) {
-    ASSERT_EQ(SUCCESS, engine_.Open(TEST_DEVICE_PATH));
+    ASSERT_EQ(SUCCESS, engine_.Open(devicePath_.c_str()));
 
     // 构造具有特征 pattern 的 2MB 数据
     const size_t totalSize = CABE_VALUE_DATA_SIZE * 2;

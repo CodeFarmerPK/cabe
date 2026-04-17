@@ -1,8 +1,109 @@
 cmake_minimum_required(VERSION 3.14)
-project(cabe)
+project(cabe LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(CMAKE_CXX_EXTENSIONS OFF)
+
+# ============================================================
+# 平台与工具链校验 —— Cabe 仅支持 Fedora 43
+# 详见 README.md "Supported Platform" 章节
+# ============================================================
+
+# --- Linux 硬性要求（O_DIRECT / mmap / pread / pwrite / io_uring）---
+if(NOT CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    message(FATAL_ERROR
+        "Cabe only supports Linux (target: Fedora 43). Detected: ${CMAKE_SYSTEM_NAME}.")
+endif()
+
+# --- 发行版：仅 Fedora 43 ---
+if(NOT EXISTS /etc/os-release)
+    message(FATAL_ERROR "Cannot detect distribution (/etc/os-release missing). Cabe requires Fedora 43.")
+endif()
+file(READ /etc/os-release CABE_OS_RELEASE)
+string(REGEX MATCH "\nID=([^\n]+)"         _ "\n${CABE_OS_RELEASE}")
+set(CABE_DISTRO_ID "${CMAKE_MATCH_1}")
+string(REGEX MATCH "\nVERSION_ID=([^\n]+)" _ "\n${CABE_OS_RELEASE}")
+set(CABE_DISTRO_VERSION "${CMAKE_MATCH_1}")
+string(STRIP "${CABE_DISTRO_ID}"      CABE_DISTRO_ID)
+string(STRIP "${CABE_DISTRO_VERSION}" CABE_DISTRO_VERSION)
+
+if(NOT CABE_DISTRO_ID STREQUAL "fedora")
+    message(FATAL_ERROR
+        "Cabe only supports Fedora 43. Detected: ${CABE_DISTRO_ID} ${CABE_DISTRO_VERSION}.")
+endif()
+if(CABE_DISTRO_VERSION VERSION_LESS 43)
+    message(FATAL_ERROR
+        "Cabe requires Fedora 43+. Detected: Fedora ${CABE_DISTRO_VERSION}.")
+endif()
+message(STATUS "Distribution: Fedora ${CABE_DISTRO_VERSION}")
+
+# --- 编译器：GCC 15+ 或 Clang 20+（Fedora 43 默认工具链）---
+if(NOT (CMAKE_CXX_COMPILER_ID STREQUAL "GNU" OR CMAKE_CXX_COMPILER_ID STREQUAL "Clang"))
+    message(FATAL_ERROR "Cabe requires GCC or Clang. Detected: ${CMAKE_CXX_COMPILER_ID}")
+endif()
+if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND CMAKE_CXX_COMPILER_VERSION VERSION_LESS 15.0)
+    message(FATAL_ERROR
+        "Cabe requires GCC 15+ (Fedora 43 ships GCC 15). Detected: ${CMAKE_CXX_COMPILER_VERSION}.")
+endif()
+if(CMAKE_CXX_COMPILER_ID STREQUAL "Clang" AND CMAKE_CXX_COMPILER_VERSION VERSION_LESS 20.0)
+    message(FATAL_ERROR
+        "Cabe requires Clang 20+ (Fedora 43 ships Clang 20). Detected: ${CMAKE_CXX_COMPILER_VERSION}.")
+endif()
+
+# --- 内核：Fedora 43 发布内核 6.16+（软校验）---
+execute_process(
+    COMMAND uname -r
+    OUTPUT_VARIABLE CABE_KERNEL_VERSION
+    OUTPUT_STRIP_TRAILING_WHITESPACE)
+string(REGEX MATCH "^([0-9]+\\.[0-9]+)" _ "${CABE_KERNEL_VERSION}")
+set(CABE_KERNEL_SHORT "${CMAKE_MATCH_1}")
+if(CABE_KERNEL_SHORT VERSION_LESS 6.16)
+    message(WARNING
+        "Cabe targets kernel 6.16+ (Fedora 43). Detected: ${CABE_KERNEL_VERSION}. "
+        "Newer io_uring features (P3+) may be unavailable.")
+endif()
+
+# --- 必需的系统头文件 ---
+include(CheckIncludeFileCXX)
+check_include_file_cxx(sys/mman.h CABE_HAVE_SYS_MMAN_H)
+check_include_file_cxx(fcntl.h    CABE_HAVE_FCNTL_H)
+check_include_file_cxx(unistd.h   CABE_HAVE_UNISTD_H)
+if(NOT CABE_HAVE_SYS_MMAN_H OR NOT CABE_HAVE_FCNTL_H OR NOT CABE_HAVE_UNISTD_H)
+    message(FATAL_ERROR "Missing required POSIX headers (sys/mman.h / fcntl.h / unistd.h)")
+endif()
+
+message(STATUS "Kernel:   ${CABE_KERNEL_VERSION}")
+message(STATUS "Compiler: ${CMAKE_CXX_COMPILER_ID} ${CMAKE_CXX_COMPILER_VERSION}")
+
+# ============================================================
+# Sanitizer 选项（CI 会在 ASAN/TSAN/UBSAN 矩阵里各跑一遍）
+# ============================================================
+option(CABE_ENABLE_TSAN  "Enable ThreadSanitizer"            OFF)
+option(CABE_ENABLE_ASAN  "Enable AddressSanitizer"           OFF)
+option(CABE_ENABLE_UBSAN "Enable UndefinedBehaviorSanitizer" OFF)
+
+if(CABE_ENABLE_TSAN AND CABE_ENABLE_ASAN)
+    message(FATAL_ERROR "TSAN and ASAN cannot be enabled simultaneously")
+endif()
+if(CABE_ENABLE_TSAN)
+    add_compile_options(-fsanitize=thread -fno-omit-frame-pointer -g)
+    add_link_options(-fsanitize=thread)
+    message(STATUS "ThreadSanitizer: ON")
+endif()
+if(CABE_ENABLE_ASAN)
+    add_compile_options(-fsanitize=address -fno-omit-frame-pointer -g)
+    add_link_options(-fsanitize=address)
+    message(STATUS "AddressSanitizer: ON")
+endif()
+if(CABE_ENABLE_UBSAN)
+    add_compile_options(-fsanitize=undefined)
+    add_link_options(-fsanitize=undefined)
+    message(STATUS "UBSanitizer: ON")
+endif()
+
+# 通用警告
+add_compile_options(-Wall -Wextra -Wpedantic -Wno-unused-parameter)
 
 # ============================================================
 # 项目源文件（不含 main.cpp）
@@ -15,7 +116,6 @@ set(CABE_LIB_SOURCES
         storage/storage.cpp
         engine/engine.cpp
         buffer/buffer_pool.cpp
-        test/buffer/buffer_pool_test.cpp
 )
 
 # 静态库，供 main 和 test 共用

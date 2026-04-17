@@ -6,6 +6,12 @@
 #ifndef STRUCTS_H
 #define STRUCTS_H
 
+// Cabe 当前仅支持 Linux（依赖 O_DIRECT / mmap / pread / pwrite / liburing）
+// CMake 已在配置阶段做同样检查，此处为源码级兜底，防止跨平台 IDE 误触发构建
+#if !defined(__linux__)
+#  error "Cabe currently only supports Linux (target: Fedora 43). See README.md."
+#endif
+
 #include <cstdint>
 #include <span>
 
