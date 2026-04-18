@@ -43,7 +43,7 @@
 ./scripts/run-tests.sh --release      # Release
 ./scripts/run-tests.sh --asan         # Debug + AddressSanitizer
 ./scripts/run-tests.sh --tsan         # Debug + ThreadSanitizer
-./scripts/run-tests.sh --filter '*BufferPool*'
+./scripts/run-tests.sh --filter 'BufferPool'
 ```
 
 每个 sanitizer 使用独立 build 目录（`build-asan/` `build-tsan/`），切换不触发全量重编。

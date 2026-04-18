@@ -116,6 +116,7 @@ set(CABE_LIB_SOURCES
         storage/storage.cpp
         engine/engine.cpp
         buffer/buffer_pool.cpp
+        util/cpu_features.cpp
 )
 
 # 静态库，供 main 和 test 共用
@@ -154,6 +155,7 @@ if(CABE_BUILD_TESTS)
             test/storage/free_list_test.cpp
             test/util/crc32_test.cpp
             test/engine/engine_test.cpp
+            test/util/cpu_features_test.cpp
     )
 
     add_executable(cabe_test ${TEST_SOURCES})
