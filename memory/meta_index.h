@@ -15,8 +15,15 @@
 class MetaIndex {
 public:
     MetaIndex() = default;
-
     ~MetaIndex() = default;
+
+    // 索引层是 Engine 内部的可变状态，复制 / 移动语义无业务含义
+    // （两个 MetaIndex 持同样 key 的两份独立 KeyMeta 会立刻分裂）。
+    // 与项目内其他持状态的类保持一致的 = delete 纪律。
+    MetaIndex(const MetaIndex&) = delete;
+    MetaIndex& operator=(const MetaIndex&) = delete;
+    MetaIndex(MetaIndex&&) = delete;
+    MetaIndex& operator=(MetaIndex&&) = delete;
 
     int32_t Put(const std::string& key, const KeyMeta& meta);
 

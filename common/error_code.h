@@ -3,8 +3,8 @@
  * Created Time: 2025-05-16 17:37
  * Created by: CodeFarmerPK
  */
-#ifndef ERROR_CODE_H
-#define ERROR_CODE_H
+#ifndef CABE_ERROR_CODE_H
+#define CABE_ERROR_CODE_H
 
 #include <cstdint>
 
@@ -46,4 +46,4 @@
 #define POOL_EXHAUSTED           (-700004)
 #define POOL_INVALID_POINTER     (-700005)
 #define POOL_INVALID_PARAMS      (-700006)
-#endif // ERROR_CODE_H
+#endif // CABE_ERROR_CODE_H

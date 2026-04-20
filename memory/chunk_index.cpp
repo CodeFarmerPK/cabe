@@ -39,22 +39,30 @@ int32_t ChunkIndex::GetRange(const ChunkId firstChunkId, const uint32_t count, s
         return MEMORY_NULL_POINTER_EXCEPTION;
     }
 
-    metas->clear();
-    metas->reserve(count);
+    // 契约：失败时 *metas 保持调用前的状态，不留下"半填充"的脏数据；
+    //       且一律返回 int32_t 错误码，不把异常泄到调用方。
+    // 实现：单遍扫到局部 tmp，成功后 swap 进 *metas。
+    //   - reserve 抛 bad_alloc 被 try/catch 转成 MEMORY_INSERT_FAIL
+    //   - 检测到缺口直接 CHUNK_NOT_FOUND，*metas 原样（尚未被触碰）
+    //   - ChunkMeta 是 trivial，reserve 之后的 push_back 是 noexcept
+    //   - swap 本身 noexcept，且把原来的两次 lower_bound 合成一次
+    std::vector<ChunkMeta> tmp;
+    try {
+        tmp.reserve(count);
+    } catch (...) {
+        return MEMORY_INSERT_FAIL;
+    }
 
-
-    // lower_bound 一次定位，然后 iterator++ 顺序扫描
-    // 等价于 B+ 树: 定位叶子节点后沿链表遍历，复杂度 O(log N + count)
     auto it = chunkMap_.lower_bound(firstChunkId);
-
     for (uint32_t i = 0; i < count; ++i) {
         if (it == chunkMap_.end() || it->first != firstChunkId + i) {
             return CHUNK_NOT_FOUND;
         }
-        metas->push_back(it->second);
+        tmp.push_back(it->second);
         ++it;
     }
 
+    metas->swap(tmp);
     return SUCCESS;
 }
 
@@ -73,12 +81,19 @@ int32_t ChunkIndex::Delete(const ChunkId chunkId) {
 }
 
 int32_t ChunkIndex::DeleteRange(const ChunkId firstChunkId, const uint32_t count) {
+    // 两遍扫：先验证所有 chunk 存在，再批量 mutation，避免中途失败
+    // 留下"一半改了一半没改"的部分失败状态。
     auto it = chunkMap_.lower_bound(firstChunkId);
-
     for (uint32_t i = 0; i < count; ++i) {
         if (it == chunkMap_.end() || it->first != firstChunkId + i) {
             return CHUNK_NOT_FOUND;
         }
+        ++it;
+    }
+
+    // 第二遍 mutation，此时保证每一个 id 都命中
+    it = chunkMap_.lower_bound(firstChunkId);
+    for (uint32_t i = 0; i < count; ++i) {
         it->second.state = DataState::Deleted;
         ++it;
     }
@@ -93,11 +108,19 @@ int32_t ChunkIndex::Remove(const ChunkId chunkId) {
 }
 
 int32_t ChunkIndex::RemoveRange(const ChunkId firstChunkId, const uint32_t count) {
+    // 两遍扫：先验证再 erase，避免中途失败残留"前半被删、后半还在"
+    auto it = chunkMap_.lower_bound(firstChunkId);
     for (uint32_t i = 0; i < count; ++i) {
-        const ChunkId id = firstChunkId + i;
-        if (const auto erased = chunkMap_.erase(id); erased == 0) {
+        if (it == chunkMap_.end() || it->first != firstChunkId + i) {
             return CHUNK_NOT_FOUND;
         }
+        ++it;
+    }
+    // 第二遍物理移除。erase(key) 对 std::map 来说是 O(log N)，
+    // 也可以用保留的迭代器走 erase(it++) 做到 O(count)，但 count 通常很小，
+    // 此处取更易读的写法。
+    for (uint32_t i = 0; i < count; ++i) {
+        chunkMap_.erase(firstChunkId + i);
     }
     return SUCCESS;
 }

@@ -86,12 +86,14 @@ namespace cabe::util {
             // if (cpu::HasARMCRC()) return HardwareCRC32C_ARM;   // 未来
             return SoftwareCRC32C;
         }
-
-        const CRCFunc kCRC32Impl = SelectImpl();
-
     } // namespace
 
     uint32_t CRC32(const DataView data) {
+        // 函数内 static：C++11 保证线程安全 + 首次调用时初始化。
+        // 这里用真正的 function-scope static（而非 namespace-scope），
+        // 与 cpu_features 的 GetFeatures() 保持同样的延迟初始化模式，
+        // 整条 dispatch 链 SIOF-safe，且不依赖 cpu_features 实现细节。
+        static const CRCFunc kCRC32Impl = SelectImpl();
         return kCRC32Impl(data);
     }
 

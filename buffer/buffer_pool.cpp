@@ -35,6 +35,17 @@ int32_t BufferPool::Init(const size_t bufferSize, const uint32_t bufferCount) {
         return POOL_INVALID_PARAMS;
     }
 
+    // O_DIRECT 对单次 I/O 的地址和长度都有对齐要求（典型 512 字节）。
+    // mmap 返回的 basePtr_ 是 4 KiB 页对齐，基址不是问题；但每个 buffer
+    // 的偏移 = index * bufferSize_，如果 bufferSize_ 不是 512 的倍数，
+    // 偏移 buffer 的地址就可能破坏对齐 → O_DIRECT 返回 EINVAL。
+    // 当前唯一调用点用 1 MiB 天然满足；P3 引入小尺寸 buffer（如 4 KiB
+    // SQE 数据缓冲）时这条检查会兜住潜在 bug。
+    constexpr size_t kDirectIOAlignment = 512;
+    if (bufferSize < kDirectIOAlignment || (bufferSize & (kDirectIOAlignment - 1)) != 0) {
+        return POOL_INVALID_PARAMS;
+    }
+
     bufferSize_ = bufferSize;
     bufferCount_ = bufferCount;
     totalSize_ = bufferSize_ * bufferCount_;
@@ -57,10 +68,24 @@ int32_t BufferPool::Init(const size_t bufferSize, const uint32_t bufferCount) {
 
     basePtr_ = static_cast<char*>(ptr);
 
-    // 初始化空闲栈：倒序压入，使 pop_back 按地址顺序分配
-    freeStack_.reserve(bufferCount_);
-    for (uint32_t i = bufferCount_; i > 0; --i) {
-        freeStack_.push_back(i - 1);
+    // 初始化空闲栈：倒序压入，使 pop_back 按地址顺序分配。
+    // reserve 在内存极度紧张时可能抛 bad_alloc。Init 的契约是"返回错误码、
+    // 不抛异常"，所以这里 try/catch 兜住，并把已 mmap 的内存释放掉，
+    // 否则 mmap 区会一直挂在进程地址空间里直到 Engine 析构。
+    try {
+        freeStack_.reserve(bufferCount_);
+        for (uint32_t i = bufferCount_; i > 0; --i) {
+            freeStack_.push_back(i - 1);  // reserve 之后对 uint32_t 是 noexcept
+        }
+    } catch (...) {
+        munmap(basePtr_, totalSize_);
+        basePtr_ = nullptr;
+        bufferSize_ = 0;
+        bufferCount_ = 0;
+        totalSize_ = 0;
+        freeStack_.clear();
+        freeStack_.shrink_to_fit();
+        return POOL_MMAP_FAILED;
     }
 
     return SUCCESS;
@@ -74,7 +99,10 @@ int32_t BufferPool::Destroy() {
         return POOL_NOT_INITIALIZED;
     }
 
-    munmap(basePtr_, totalSize_);
+    // munmap 在合理使用下不会失败，但失败的话 mmap 区仍然有效，
+    // 我们却把 basePtr_ 清零会让 BufferPool 永久失去对该内存的句柄
+    // → 永久泄漏。把失败码透传给调用方，由它决定是否报警 / abort。
+    const int rc = munmap(basePtr_, totalSize_);
 
     basePtr_ = nullptr;
     bufferSize_ = 0;
@@ -83,6 +111,10 @@ int32_t BufferPool::Destroy() {
     freeStack_.clear();
     freeStack_.shrink_to_fit(); // 释放 vector 自身的堆内存
 
+    if (rc != 0) {
+        // 复用 POOL_MMAP_FAILED 表示 mmap 系列调用失败
+        return POOL_MMAP_FAILED;
+    }
     return SUCCESS;
 }
 
@@ -134,6 +166,16 @@ int32_t BufferPool::Release(char* ptr) {
     }
 
     const auto index = static_cast<uint32_t>(offset / bufferSize_);
+    // Double-release 检测：若 index 已在 freeStack_ 里，说明调用方重复
+    // 释放同一 buffer。放过去会导致后续两个 Acquire 拿到同一块内存，
+    // 造成静默 data corruption。
+    // O(N) 扫描，N = bufferCount（默认 8），开销可忽略。
+    for (const uint32_t existing : freeStack_) {
+        if (existing == index) {
+            return POOL_INVALID_POINTER;
+        }
+    }
+
     freeStack_.push_back(index);
 
     return SUCCESS;

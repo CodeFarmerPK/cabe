@@ -4,7 +4,7 @@
  * Created by: CodeFarmerPK
  */
 
-#include "buffer//buffer_pool.h"
+#include "buffer/buffer_pool.h"
 #include "common/error_code.h"
 #include "common/structs.h"
 #include <gtest/gtest.h>
@@ -361,4 +361,35 @@ TEST(BufferPoolTest, CountersConsistency) {
     pool.Release(buf2);
     EXPECT_EQ(pool.FreeCount(), TEST_BUFFER_COUNT);
     EXPECT_EQ(pool.UsedCount(), 0u);
+}
+
+// Double-release 检测：同一 buffer 释放两次必须被拒绝，
+// 否则后续两个 Acquire 会拿到同一块内存 → 静默数据损坏
+TEST(BufferPoolTest, DoubleReleaseFails) {
+    BufferPool pool;
+    ASSERT_EQ(SUCCESS, pool.Init(TEST_BUFFER_SIZE, TEST_BUFFER_COUNT));
+
+    char* p = pool.Acquire();
+    ASSERT_NE(nullptr, p);
+    EXPECT_EQ(pool.UsedCount(), 1u);
+
+    EXPECT_EQ(SUCCESS, pool.Release(p));
+    EXPECT_EQ(pool.UsedCount(), 0u);
+    EXPECT_EQ(pool.FreeCount(), TEST_BUFFER_COUNT);
+
+    // 第二次释放同一指针应当被拒绝
+    EXPECT_EQ(POOL_INVALID_POINTER, pool.Release(p));
+
+    // freeStack 不应因为 double-release 膨胀
+    EXPECT_EQ(pool.FreeCount(), TEST_BUFFER_COUNT);
+    EXPECT_EQ(pool.UsedCount(), 0u);
+
+    // 验证被拒绝后池依然可用：连续 Acquire 四次应得到四个不同指针
+    std::set<char*> seen;
+    for (uint32_t i = 0; i < TEST_BUFFER_COUNT; ++i) {
+        char* q = pool.Acquire();
+        ASSERT_NE(nullptr, q);
+        EXPECT_TRUE(seen.insert(q).second) << "double-handout after double-release";
+    }
+    EXPECT_EQ(pool.UsedCount(), TEST_BUFFER_COUNT);
 }

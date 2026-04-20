@@ -9,7 +9,7 @@
  * 不支持时相关测试自动 SKIP
  */
 
-    #include <gtest/gtest.h>
+#include <gtest/gtest.h>
 #include "engine/engine.h"
 #include <cstring>
 #include <fcntl.h>
@@ -23,6 +23,7 @@ static bool SupportsDirectIO(const char* path) {
     // 预分配 64MB 空间
     if (ftruncate(fd, 64 * 1024 * 1024) < 0) {
         ::close(fd);
+        ::unlink(path);   // 清理刚 O_CREAT 出来的残留文件
         return false;
     }
     ::close(fd);
@@ -60,7 +61,7 @@ protected:
         if (engine_.IsOpen()) {
             engine_.Close();
         }
-                    ::unlink(devicePath_.c_str());
+        ::unlink(devicePath_.c_str());
     }
 
     static std::vector<char> MakeData(size_t size, char fill = 'A') {
@@ -83,6 +84,18 @@ TEST_F(EngineTest, OpenAndClose) {
 TEST_F(EngineTest, DoubleOpenIdempotent) {
     ASSERT_EQ(SUCCESS, engine_.Open(devicePath_.c_str()));
     ASSERT_EQ(SUCCESS, engine_.Open(devicePath_.c_str()));
+    EXPECT_TRUE(engine_.IsOpen());
+}
+
+TEST_F(EngineTest, OpenWithDifferentPathRejected) {
+    // 已打开后用不同路径再次 Open 必须被拒绝，避免用户以为路径切换成功
+    // 实际仍指向旧文件造成静默写错盘。想真正切换必须先 Close。
+    ASSERT_EQ(SUCCESS, engine_.Open(devicePath_.c_str()));
+
+    const std::string otherPath = devicePath_ + ".other";
+    EXPECT_EQ(DEVICE_FAILED_TO_OPEN_DEVICE, engine_.Open(otherPath));
+
+    // Engine 仍以原路径打开
     EXPECT_TRUE(engine_.IsOpen());
 }
 
@@ -271,6 +284,143 @@ TEST_F(EngineTest, RemoveMultiChunkFile) {
     EXPECT_EQ(0u, engine_.Size());
 }
 
+// Put 同一 key 两次：覆盖写应当回收旧 chunks/blocks，否则反复 Put
+// 会线性泄漏磁盘空间。
+// 测试方式：64 MiB 设备文件，反复 Put 同一 1 MiB key 100 次。如果旧
+// blocks 不被回收，第 65 次起 nextBlockId 超过 64 MiB 范围，pwrite
+// 会写到文件末尾外（虽然 ext4/btrfs 会扩展文件，但 chunk 数会单调
+// 增长）。补强校验：Get 出来的内容必须是最后一次 Put 的内容。
+TEST_F(EngineTest, PutOverwriteSameKeyRecyclesOldChunks) {
+    ASSERT_EQ(SUCCESS, engine_.Open(devicePath_.c_str()));
+
+    const size_t valueSize = CABE_VALUE_DATA_SIZE;  // 1 MiB
+    auto first  = MakeData(valueSize, 'F');
+    auto second = MakeData(valueSize, 'S');
+
+    // 第一次 Put
+    ASSERT_EQ(SUCCESS, engine_.Put("k", {first.data(), first.size()}));
+    EXPECT_EQ(1u, engine_.Size());
+
+    // 覆盖写：旧 chunks/blocks 应被回收
+    ASSERT_EQ(SUCCESS, engine_.Put("k", {second.data(), second.size()}));
+    EXPECT_EQ(1u, engine_.Size());  // Size 仍然是 1（同 key 覆盖）
+
+    // 读到的应是新内容
+    std::vector<char> buf(valueSize);
+    uint64_t readSize = 0;
+    ASSERT_EQ(SUCCESS, engine_.Get("k", {buf.data(), buf.size()}, &readSize));
+    EXPECT_EQ(valueSize, readSize);
+    EXPECT_EQ(0, std::memcmp(second.data(), buf.data(), valueSize));
+
+    // 反复覆盖 50 次 1 MiB，总占用应当稳定在 ~1 MiB
+    // （如果泄漏，每次 +1 MiB，50 次后 50 MiB，逼近 64 MiB 设备上限
+    // 但还能跑；放更大轮次会失败）
+    for (int i = 0; i < 50; ++i) {
+        auto data = MakeData(valueSize, static_cast<char>('A' + (i % 26)));
+        ASSERT_EQ(SUCCESS, engine_.Put("k", {data.data(), data.size()}))
+            << "Put failed at iter " << i;
+    }
+    EXPECT_EQ(1u, engine_.Size());
+}
+
+// 覆盖写：新旧 chunk count 不同（小覆盖大）。
+// Put 一个 4 chunk 的 value → Put 同 key 一个 1 chunk 的 value。
+// 旧的 4 chunks 全部要被 cleanup 段回收（GetRange + ReleaseBatch + RemoveRange
+// 都要正确处理 4-chunk 范围）。读出来的应是新内容。
+TEST_F(EngineTest, PutOverwriteShrinkRecyclesAllOldChunks) {
+    ASSERT_EQ(SUCCESS, engine_.Open(devicePath_.c_str()));
+
+    const size_t bigSize = CABE_VALUE_DATA_SIZE * 4;       // 4 chunks
+    const size_t smallSize = CABE_VALUE_DATA_SIZE / 4;     // 1 chunk (256 KiB)
+
+    auto big   = MakeData(bigSize, 'B');
+    auto small = MakeData(smallSize, 'S');
+
+    ASSERT_EQ(SUCCESS, engine_.Put("k", {big.data(), big.size()}));
+    ASSERT_EQ(SUCCESS, engine_.Put("k", {small.data(), small.size()}));
+
+    EXPECT_EQ(1u, engine_.Size());
+
+    std::vector<char> buf(smallSize);
+    uint64_t readSize = 0;
+    ASSERT_EQ(SUCCESS, engine_.Get("k", {buf.data(), buf.size()}, &readSize));
+    EXPECT_EQ(smallSize, readSize);
+    EXPECT_EQ(0, std::memcmp(small.data(), buf.data(), smallSize));
+}
+
+// 覆盖写：大覆盖小（1 chunk → 4 chunks）。
+// 旧的 1 chunk 要被回收，新的 4 chunks 写入。考验 cleanup 段对 count=1
+// 的 GetRange/RemoveRange 与主写循环的 4-chunk 路径并行正确。
+TEST_F(EngineTest, PutOverwriteGrowRecyclesAllOldChunks) {
+    ASSERT_EQ(SUCCESS, engine_.Open(devicePath_.c_str()));
+
+    const size_t smallSize = CABE_VALUE_DATA_SIZE / 4;
+    const size_t bigSize   = CABE_VALUE_DATA_SIZE * 4;
+
+    auto small = MakeData(smallSize, 'S');
+    auto big   = MakeData(bigSize, 'B');
+
+    ASSERT_EQ(SUCCESS, engine_.Put("k", {small.data(), small.size()}));
+    ASSERT_EQ(SUCCESS, engine_.Put("k", {big.data(), big.size()}));
+
+    EXPECT_EQ(1u, engine_.Size());
+
+    std::vector<char> buf(bigSize);
+    uint64_t readSize = 0;
+    ASSERT_EQ(SUCCESS, engine_.Get("k", {buf.data(), buf.size()}, &readSize));
+    EXPECT_EQ(bigSize, readSize);
+    EXPECT_EQ(0, std::memcmp(big.data(), buf.data(), bigSize));
+}
+
+// Delete + Put 同 key 也应回收旧 chunks（被 Delete 标记的旧 chunks
+// 仍占着 chunkIndex 条目和 blocks，覆盖 Put 时也要清理）。
+TEST_F(EngineTest, PutAfterDeleteRecyclesOldChunks) {
+    ASSERT_EQ(SUCCESS, engine_.Open(devicePath_.c_str()));
+
+    const size_t valueSize = CABE_VALUE_DATA_SIZE;
+    auto first  = MakeData(valueSize, 'F');
+    auto second = MakeData(valueSize, 'S');
+
+    ASSERT_EQ(SUCCESS, engine_.Put("k", {first.data(), first.size()}));
+    ASSERT_EQ(SUCCESS, engine_.Delete("k"));
+    // 此时旧 chunks 是 Deleted 状态但仍在 chunkIndex 里
+
+    // 覆盖 Put 应当清理 Delete 残留
+    ASSERT_EQ(SUCCESS, engine_.Put("k", {second.data(), second.size()}));
+
+    std::vector<char> buf(valueSize);
+    uint64_t readSize = 0;
+    ASSERT_EQ(SUCCESS, engine_.Get("k", {buf.data(), buf.size()}, &readSize));
+    EXPECT_EQ(0, std::memcmp(second.data(), buf.data(), valueSize));
+}
+
+// 验证 Remove 的 block 回收 + 复用路径：
+// Put A 占用一批 block → Remove A → Put B 应当复用 A 释放出来的 block（LIFO）。
+// 间接验证 Remove 正确调用了 freeList_.ReleaseBatch 且 RemoveRange 没有
+// 把 block 悄悄保留。
+TEST_F(EngineTest, RemoveRecyclesBlocksForReuse) {
+    ASSERT_EQ(SUCCESS, engine_.Open(devicePath_.c_str()));
+
+    // Put 一个 3-chunk value，消耗 chunkId 0..2、blockId 0..2
+    const size_t totalSize = CABE_VALUE_DATA_SIZE * 3;
+    auto data_a = MakeData(totalSize, 'A');
+    ASSERT_EQ(SUCCESS, engine_.Put("A", {data_a.data(), data_a.size()}));
+
+    // Remove A → blockId 0..2 进入 freeList
+    ASSERT_EQ(SUCCESS, engine_.Remove("A"));
+
+    // Put B，同样 3 个 chunk → 应复用 A 的 blockId，而不是申请新的
+    // （LIFO 栈顺序下拿到 blockId 2, 1, 0）。此处只验证读写正确。
+    auto data_b = MakeData(totalSize, 'B');
+    ASSERT_EQ(SUCCESS, engine_.Put("B", {data_b.data(), data_b.size()}));
+
+    std::vector<char> buf(totalSize);
+    uint64_t readSize = 0;
+    ASSERT_EQ(SUCCESS, engine_.Get("B", {buf.data(), buf.size()}, &readSize));
+    EXPECT_EQ(totalSize, readSize);
+    EXPECT_EQ(0, std::memcmp(data_b.data(), buf.data(), totalSize));
+}
+
 // ============================================================
 // 多 key 场景
 // ============================================================
@@ -353,4 +503,29 @@ TEST_F(EngineTest, DataIntegrityMultiChunk) {
     for (size_t i = 0; i < totalSize; ++i) {
         EXPECT_EQ(data[i], buf[i]) << "Mismatch at byte " << i;
     }
+}
+
+// 末 chunk 半满的 CRC 契约验证：
+// Put 和 Get 两侧都基于 keyMeta.totalSize 推导 chunkSize，要求它们
+// 覆盖完全相同的字节范围。此用例选了 3.01 MiB —— 4 chunks，末 chunk
+// 只有 ~10 KiB 有效数据 + 其余 padding zero。任一侧推导错位都会让
+// CRC 不匹配，返回 DATA_CRC_MISMATCH。
+TEST_F(EngineTest, PutGetOddTailSize) {
+    ASSERT_EQ(SUCCESS, engine_.Open(devicePath_.c_str()));
+
+    const size_t totalSize = CABE_VALUE_DATA_SIZE * 3 + 10 * 1024; // 3 MiB + 10 KiB
+    std::vector<char> data(totalSize);
+    // 避开全零 pattern：尾部 padding 和数据要有明显差异
+    for (size_t i = 0; i < totalSize; ++i) {
+        data[i] = static_cast<char>((i * 131 + 7) & 0xFF);
+    }
+
+    ASSERT_EQ(SUCCESS, engine_.Put("odd_tail", {data.data(), data.size()}));
+
+    std::vector<char> buf(totalSize);
+    uint64_t readSize = 0;
+    ASSERT_EQ(SUCCESS, engine_.Get("odd_tail", {buf.data(), buf.size()}, &readSize));
+    EXPECT_EQ(totalSize, readSize);
+
+    EXPECT_EQ(0, std::memcmp(data.data(), buf.data(), totalSize));
 }

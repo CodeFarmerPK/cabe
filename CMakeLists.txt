@@ -105,6 +105,18 @@ endif()
 # 通用警告
 add_compile_options(-Wall -Wextra -Wpedantic -Wno-unused-parameter)
 
+# 把"一旦触发基本等于 UB"的几条警告升级为硬错误。
+# 这些不是"风格警告"，而是"代码写错了"的信号：
+#   -Werror=return-type        非 void 函数漏 return → 调用处读到未定义值
+#   -Werror=uninitialized      读未初始化变量 → 未定义值
+#   -Werror=implicit-fallthrough switch fallthrough 未标注 → 逻辑 bug
+# 不全开 -Werror，避免 third-party header 的警告拖垮构建
+add_compile_options(
+        -Werror=return-type
+        -Werror=uninitialized
+        -Werror=implicit-fallthrough
+)
+
 # ============================================================
 # 项目源文件（不含 main.cpp）
 # ============================================================
@@ -164,4 +176,41 @@ if(CABE_BUILD_TESTS)
 
     include(GoogleTest)
     gtest_discover_tests(cabe_test)
+endif()
+
+
+# ============================================================
+# 基准测试（google-benchmark）
+# ============================================================
+option(CABE_BUILD_BENCH "Build performance benchmarks" OFF)
+
+if(CABE_BUILD_BENCH)
+    find_package(benchmark QUIET)
+    if(NOT benchmark_FOUND)
+        include(FetchContent)
+        set(BENCHMARK_ENABLE_TESTING  OFF CACHE BOOL "" FORCE)
+        set(BENCHMARK_ENABLE_INSTALL  OFF CACHE BOOL "" FORCE)
+        set(BENCHMARK_ENABLE_GTEST_TESTS OFF CACHE BOOL "" FORCE)
+        FetchContent_Declare(
+                googlebenchmark
+                GIT_REPOSITORY https://github.com/google/benchmark.git
+                GIT_TAG        v1.8.3
+        )
+        FetchContent_MakeAvailable(googlebenchmark)
+    endif()
+
+    set(BENCH_SOURCES
+            bench/buffer_pool_bench.cpp
+            bench/meta_index_bench.cpp
+            bench/chunk_index_bench.cpp
+            bench/free_list_bench.cpp
+            bench/crc32_bench.cpp
+            bench/engine_bench.cpp
+    )
+
+    add_executable(cabe_bench ${BENCH_SOURCES})
+    target_link_libraries(cabe_bench
+            PRIVATE cabe_lib benchmark::benchmark_main)
+    target_include_directories(cabe_bench
+            PRIVATE ${CMAKE_SOURCE_DIR})
 endif()

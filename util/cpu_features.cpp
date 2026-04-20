@@ -1,7 +1,12 @@
-//
-// Created by root on 4/18/26.
-//
-
+/*
+ * Project: Cabe
+ * Created Time: 2026-04-18
+ * Created by: CodeFarmerPK
+ *
+ * CPU 能力检测实现 —— 唯一一处直接调 CPUID / HWCAP 的地方。
+ * 业务模块通过 cabe::util::cpu::HasXxx() 间接查询，将来扩展
+ * 新平台只改这一个文件。
+ */
 #include "cpu_features.h"
 
 #if defined(__x86_64__) || defined(__i386__)
@@ -14,7 +19,9 @@
 namespace cabe::util::cpu {
     namespace {
 
-        // Detected at static-init time; const afterwards → lock-free reads.
+        // Detect 一次后 const，读路径无锁。
+        // 包装成函数内 static 的 Construct-On-First-Use，避免与
+        // 其他 TU 的全局初始化产生顺序依赖（SIOF）。
         struct Features {
             bool sse42   = false;
             bool avx2    = false;
@@ -40,7 +47,12 @@ namespace cabe::util::cpu {
             }
         };
 
-        const Features g_features{};
+        const Features& GetFeatures() noexcept {
+            // C++11 保证线程安全 + 首次调用时初始化，
+            // 调用者不用关心初始化发生在何时
+            static const Features kFeatures{};
+            return kFeatures;
+        }
 
     } // namespace
 
@@ -54,8 +66,7 @@ namespace cabe::util::cpu {
 #endif
     }
 
-    bool HasSSE42()  noexcept { return g_features.sse42;   }
-    bool HasAVX2()   noexcept { return g_features.avx2;    }
-    bool HasARMCRC() noexcept { return g_features.arm_crc; }
-
+    bool HasSSE42()  noexcept { return GetFeatures().sse42;   }
+    bool HasAVX2()   noexcept { return GetFeatures().avx2;    }
+    bool HasARMCRC() noexcept { return GetFeatures().arm_crc; }
 } // namespace cabe::util::cpu

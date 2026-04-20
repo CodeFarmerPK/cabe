@@ -1,6 +1,11 @@
-//
-// Created by root on 4/18/26.
-//
+/*
+ * Project: Cabe
+ * Created Time: 2026-04-18
+ * Created by: CodeFarmerPK
+ *
+ * CPU 能力检测 —— 统一入口，所有 SIMD / 硬件加速模块都从这里
+ * 查询特性位，禁止业务代码直接调用 __get_cpuid / __builtin_cpu_*。
+ */
 
 #ifndef CABE_CPU_FEATURES_H
 #define CABE_CPU_FEATURES_H

@@ -4,16 +4,14 @@
  * Created by: CodeFarmerPK
  */
 
-#ifndef CRC32_H
-#define CRC32_H
+#ifndef CABE_CRC32_H
+#define CABE_CRC32_H
 
-#include "common/error_code.h"
 #include "common/structs.h"
-#include <span>
 
 namespace cabe::util {
     uint32_t CRC32(DataView data);
 }
 
 
-#endif
+#endif // CABE_CRC32_H

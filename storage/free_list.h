@@ -17,6 +17,15 @@ public:
     FreeList() = default;
     ~FreeList() = default;
 
+    // FreeList 是 Engine 内部的可变状态，复制语义没有意义 ——
+    // 两个 FreeList 各自管理同样的 blockId 序列会立刻分裂出冲突。
+    // 与 Storage / BufferPool 保持一致的 = delete 纪律，
+    // 避免被无意按值传递。
+    FreeList(const FreeList&) = delete;
+    FreeList& operator=(const FreeList&) = delete;
+    FreeList(FreeList&&) = delete;
+    FreeList& operator=(FreeList&&) = delete;
+
     // 分配一个 block
     int32_t Allocate(BlockId* blockId);
 

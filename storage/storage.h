@@ -17,6 +17,12 @@ public:
     Storage() = default;
     ~Storage();
 
+    // Storage 持有独占资源 fd_，默认拷贝/移动会让两个对象共享同一 fd，
+    // 析构时 double-close → UB。显式 delete 让错误调用在编译期就暴露。
+    Storage(const Storage&) = delete;
+    Storage& operator=(const Storage&) = delete;
+    Storage(Storage&&) = delete;
+    Storage& operator=(Storage&&) = delete;
     // 打开块设备
     int32_t Open(const std::string& devicePath);
 

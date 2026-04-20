@@ -206,16 +206,26 @@ TEST_F(ChunkIndexTest, DeleteRangeWithGapReturnsNotFound) {
     EXPECT_EQ(CHUNK_NOT_FOUND, index_.DeleteRange(0, 3));
 }
 
-TEST_F(ChunkIndexTest, DeleteRangePartiallyApplied) {
-    // DeleteRange 遇到 gap 时提前返回，已遍历的节点已被标记
+TEST_F(ChunkIndexTest, DeleteRangeIsAtomicOnFailure) {
+    // 事务性契约：DeleteRange 若检测到范围不完整（有缺口），应返回
+    // CHUNK_NOT_FOUND 且**不修改任何 chunk 状态**，避免留下"前半
+    // Deleted、后半 Active"的中间态。
+    // 实现：两遍扫 —— 第一遍全量验证存在性，第二遍才 mutation。
+    // 此契约在单线程下已经成立，不依赖锁；P1.2 加锁后锁只是把
+    // 两遍扫"打包"成外部不可见的原子区间，语义层面不变。
     InsertRange(0, 2);
     // chunkId 0,1 存在，2 不存在
     EXPECT_EQ(CHUNK_NOT_FOUND, index_.DeleteRange(0, 3));
 
-    // 0 和 1 已被标记为 Deleted
+    // 失败时 0 和 1 应保持 Active（未被意外标记）
     ChunkMeta out{};
-    EXPECT_EQ(CHUNK_DELETED, index_.Get(0, &out));
-    EXPECT_EQ(CHUNK_DELETED, index_.Get(1, &out));
+    EXPECT_EQ(SUCCESS, index_.Get(0, &out));
+    EXPECT_EQ(DataState::Active, out.state);
+    EXPECT_EQ(SUCCESS, index_.Get(1, &out));
+    EXPECT_EQ(DataState::Active, out.state);
+
+    // Size 不变
+    EXPECT_EQ(2u, index_.Size());
 }
 
 // ============================================================
@@ -245,12 +255,21 @@ TEST_F(ChunkIndexTest, RemoveRangeBasic) {
     EXPECT_EQ(0u, index_.Size());
 }
 
-TEST_F(ChunkIndexTest, RemoveRangePartialFailsAndStops) {
+TEST_F(ChunkIndexTest, RemoveRangeIsAtomicOnFailure) {
+    // 事务性契约：RemoveRange 若范围不完整应整体失败，不 erase 任何
+    // chunk。避免出现"前半被 erase、后半还在"的中间态，让上层
+    // engine.Remove 在 rollback 时无需补偿。
     InsertRange(10, 2);
     // 尝试移除 3 个，第 3 个不存在
     EXPECT_EQ(CHUNK_NOT_FOUND, index_.RemoveRange(10, 3));
-    // 前 2 个已被移除
-    EXPECT_EQ(0u, index_.Size());
+
+    // 失败后 Size 应保持不变
+    EXPECT_EQ(2u, index_.Size());
+
+    // chunk 10 和 11 都应仍然可查
+    ChunkMeta out{};
+    EXPECT_EQ(SUCCESS, index_.Get(10, &out));
+    EXPECT_EQ(SUCCESS, index_.Get(11, &out));
 }
 
 // ============================================================

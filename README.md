@@ -28,6 +28,23 @@
 
 ---
 
+## 设计定位
+
+Cabe 是一个**面向大 value 的 KV 存储引擎**，性能优化目标是
+value 大小在 **1 MiB 附近及以上**的场景。
+
+- **"支持"与"保证性能"是两件事**：API 层面对 value 大小没有下限，
+  任意 size ≥ 1 字节的 value 都能被正确 Put / Get / Delete；但只有
+  ≥ 1 MiB 的 value 能吃到全部优化（硬件 CRC32C、BufferPool 复用、
+  O_DIRECT 对齐路径等）。
+- **小 value 场景不推荐**：小于 1 MiB 的 value 仍然会占用整个
+  1 MiB 定长块（写放大不变），且 QPS 会被 `O_DIRECT + O_SYNC` 延迟
+  主导，不适合做高频小 KV 读写。
+- **典型适用场景**：对象存储后端、模型权重切片、日志段、大 blob
+  缓存等以 MiB/GiB 为单位的数据单元。
+
+---
+
 ## Quick Start
 
 ### 1. 安装依赖
@@ -73,6 +90,28 @@ cabe/
 ├── engine/       Engine —— 顶层门面：Open/Put/Get/Delete/Remove/Close
 ├── test/         gtest 套件（与模块布局对称）
 └── scripts/      开发环境脚本
+```
+
+
+---
+
+## Benchmarks
+
+Cabe ships with a Google Benchmark harness for single-threaded
+measurement at the module and engine level.
+
+### Running
+
+```bash
+# All benchmarks, terminal output
+./scripts/run-bench.sh
+
+# Filter (POSIX regex)
+./scripts/run-bench.sh --filter 'CRC32'
+./scripts/run-bench.sh --filter 'BM_Engine_Put'
+
+# Archive: generates bench/baselines/LABEL-YYYYMMDD-HHMMSS.json
+./scripts/run-bench.sh --archive p1.0-post
 ```
 
 ---

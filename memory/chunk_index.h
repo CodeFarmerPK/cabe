@@ -18,6 +18,13 @@ public:
     ChunkIndex() = default;
     ~ChunkIndex() = default;
 
+    // 索引层是 Engine 内部的可变状态，复制 / 移动语义无业务含义。
+    // 与项目内其他持状态的类保持一致的 = delete 纪律。
+    ChunkIndex(const ChunkIndex&) = delete;
+    ChunkIndex& operator=(const ChunkIndex&) = delete;
+    ChunkIndex(ChunkIndex&&) = delete;
+    ChunkIndex& operator=(ChunkIndex&&) = delete;
+
     // 插入单个 chunk
     int32_t Put(ChunkId chunkId, const ChunkMeta& meta);
 
