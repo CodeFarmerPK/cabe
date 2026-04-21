@@ -22,6 +22,14 @@ int32_t FreeList::Allocate(BlockId* blockId) {
 }
 
 int32_t FreeList::Release(const BlockId blockId) {
+    // Double-release 检测：同一 blockId 出现两次会让两次 Allocate 返回同一
+    // 物理块 → 两个 key 共享磁盘块 → 静默数据损坏。
+    // O(N) 扫描，N = freeBlocks_.size()（正常运行时较小，可接受）。
+    for (const BlockId existing : freeBlocks_) {
+        if (existing == blockId) {
+            return FREE_LIST_DOUBLE_RELEASE;
+        }
+    }
     // 先 reserve 保证容量，之后的 push_back 对 trivially-copyable
     // 类型（BlockId = uint64_t）是 noexcept。bad_alloc 只可能在 reserve
     // 阶段抛出，此时 blockId 还没被吞，返回错误后调用方能决定重试或
@@ -31,7 +39,7 @@ int32_t FreeList::Release(const BlockId blockId) {
     } catch (...) {
         return MEMORY_INSERT_FAIL;
     }
-    freeBlocks_.push_back(blockId);   // noexcept for BlockId
+    freeBlocks_.push_back(blockId); // noexcept for BlockId
     return SUCCESS;
 }
 

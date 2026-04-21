@@ -112,6 +112,7 @@ int32_t Engine::Put(const std::string& key, const DataView data) {
 
     // 记录已成功写入的 chunk 数量，用于失败时回滚
     uint32_t writtenCount = 0;
+    int32_t failRet = SUCCESS;
 
     // 逐 chunk 写入
     for (uint32_t i = 0; i < chunkCount; ++i) {
@@ -123,6 +124,7 @@ int32_t Engine::Put(const std::string& key, const DataView data) {
         BlockId blockId;
         int32_t ret = freeList_.Allocate(&blockId);
         if (ret != SUCCESS) {
+            failRet = ret;
             goto rollback;
         }
 
@@ -131,6 +133,7 @@ int32_t Engine::Put(const std::string& key, const DataView data) {
             char* alignedBuffer = bufferPool_.Acquire();
             if (alignedBuffer == nullptr) {
                 freeList_.Release(blockId);
+                failRet = POOL_EXHAUSTED;
                 goto rollback;
             }
             std::memcpy(alignedBuffer, data.data() + offset, chunkSize);
@@ -140,6 +143,7 @@ int32_t Engine::Put(const std::string& key, const DataView data) {
             if (ret != SUCCESS) {
                 bufferPool_.Release(alignedBuffer);
                 freeList_.Release(blockId);
+                failRet = ret;
                 goto rollback;
             }
 
@@ -153,6 +157,7 @@ int32_t Engine::Put(const std::string& key, const DataView data) {
             ret = chunkIndex_.Put(firstChunkId + i, chunkMeta);
             if (ret != SUCCESS) {
                 freeList_.Release(blockId);
+                failRet = ret;
                 goto rollback;
             }
         }
@@ -172,6 +177,7 @@ int32_t Engine::Put(const std::string& key, const DataView data) {
         if (metaRet != SUCCESS) {
             // metaIndex.Put 失败（典型是 bad_alloc）：刚写好的所有
             // chunks + blocks 必须回滚，否则永久泄漏。复用 rollback 路径。
+            failRet = metaRet;
             goto rollback;
         }
     }
@@ -183,13 +189,17 @@ int32_t Engine::Put(const std::string& key, const DataView data) {
     if (hasOld) {
         std::vector<ChunkMeta> oldChunks;
         if (chunkIndex_.GetRange(oldMeta.firstChunkId, oldMeta.chunkCount, &oldChunks) == SUCCESS) {
-            std::vector<BlockId> oldBlocks;
-            oldBlocks.reserve(oldChunks.size());
-            for (const auto& cm : oldChunks) {
-                oldBlocks.push_back(cm.blockId);
+            try {
+                std::vector<BlockId> oldBlocks;
+                oldBlocks.reserve(oldChunks.size());
+                for (const auto& cm : oldChunks) {
+                    oldBlocks.push_back(cm.blockId);
+                }
+                freeList_.ReleaseBatch(oldBlocks);
+                chunkIndex_.RemoveRange(oldMeta.firstChunkId, oldMeta.chunkCount);
+            } catch (...) {
+                // OOM：旧 blocks 泄漏，但新 entry 已落地，不影响正确性
             }
-            freeList_.ReleaseBatch(oldBlocks);
-            chunkIndex_.RemoveRange(oldMeta.firstChunkId, oldMeta.chunkCount);
         }
         // 若 GetRange 失败（chunkIndex 与 metaIndex 不一致），旧 chunks
         // 已不可达（metaIndex 已被覆盖），无法清理。属于前置不变式被
@@ -203,32 +213,33 @@ rollback:
     // 新 metaIndex.Put 失败的场景下也走这里，保证新 chunks/blocks 被清。
     for (uint32_t j = 0; j < writtenCount; ++j) {
         ChunkMeta written{};
-        if (chunkIndex_.Get(firstChunkId + j, &written) == SUCCESS) {
+        if (const int32_t gr = chunkIndex_.Get(firstChunkId + j, &written); gr == SUCCESS || gr == CHUNK_DELETED) {
             freeList_.Release(written.blockId);
         }
         chunkIndex_.Remove(firstChunkId + j);
     }
-    return MEMORY_INSERT_FAIL;
+    return failRet;
 }
 
 // ============================================================
 // Get: 通过两层索引定位并合并所有 chunk
 // ============================================================
 int32_t Engine::Get(const std::string& key, DataBuffer buffer, uint64_t* readSize) const {
+    // 契约：任何非 SUCCESS 返回前，*readSize 都会被置零。
+    // readSize 必须最先检查，之后立即置零，确保后续所有早返回路径都满足契约。
+    if (readSize == nullptr) {
+        return MEMORY_NULL_POINTER_EXCEPTION;
+    }
+    *readSize = 0;
     if (!isOpen_) {
         return DEVICE_FAILED_TO_OPEN_DEVICE;
     }
     if (key.empty()) {
         return CABE_EMPTY_KEY;
     }
-    if (buffer.empty() || readSize == nullptr) {
-        return MEMORY_NULL_POINTER_EXCEPTION;
+    if (buffer.empty()) {
+        return CABE_INVALID_DATA_SIZE;
     }
-
-    // 契约：任何非 SUCCESS 返回前，*readSize 都会被置零。
-    // 目的是让调用方即使忘记检查返回值，读到的也是明确的 "0 字节"
-    // 而非未初始化内存。
-    *readSize = 0;
 
     // 第一层: key → KeyMeta{firstChunkId, chunkCount, totalSize}
     KeyMeta keyMeta{};
@@ -330,8 +341,7 @@ int32_t Engine::Remove(const std::string& key) {
     // 2. 原子拉取所有 ChunkMeta。GetRange 若发现缺口整体失败不 push，
     //    此时直接返回错误，底层状态未改动
     std::vector<ChunkMeta> metas;
-    const int32_t rangeRet = chunkIndex_.GetRange(keyMeta.firstChunkId,
-                                                  keyMeta.chunkCount, &metas);
+    const int32_t rangeRet = chunkIndex_.GetRange(keyMeta.firstChunkId, keyMeta.chunkCount, &metas);
     if (rangeRet != SUCCESS) {
         // chunkIndex 与 metaIndex 已经不一致（正常路径不会出现，可能由
         // 未来的 race / 外部污染引起）。此处选择 early-fail，让调用方看到
@@ -362,7 +372,9 @@ int32_t Engine::Remove(const std::string& key) {
     }
 
     // 5. 物理移除第二层。GetRange 刚验证过完整性，这里保证成功
-    chunkIndex_.RemoveRange(keyMeta.firstChunkId, keyMeta.chunkCount);
+    if (const int32_t rc = chunkIndex_.RemoveRange(keyMeta.firstChunkId, keyMeta.chunkCount); rc != SUCCESS) {
+        return rc;
+    }
 
     // 6. 物理移除第一层
     return metaIndex_.Remove(key);

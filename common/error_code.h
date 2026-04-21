@@ -46,4 +46,7 @@
 #define POOL_EXHAUSTED           (-700004)
 #define POOL_INVALID_POINTER     (-700005)
 #define POOL_INVALID_PARAMS      (-700006)
+
+// free list codes
+#define FREE_LIST_DOUBLE_RELEASE (-800001)
 #endif // CABE_ERROR_CODE_H
