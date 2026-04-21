@@ -14,7 +14,10 @@
 #include "memory/meta_index.h"
 #include "storage/free_list.h"
 #include "storage/storage.h"
+
+#include <atomic>
 #include <cstdint>
+#include <shared_mutex>
 #include <string>
 
 class Engine {
@@ -64,6 +67,12 @@ private:
     ChunkId AllocateChunkIds(uint32_t count);
 
 
+    // 粗粒度 RW 锁：保护所有 Engine 状态的组合操作原子性。
+    // 写操作（Put/Delete/Remove/Open/Close）持 unique_lock；
+    // 读操作（Get/Size/IsOpen）持 shared_lock，允许多读并发。
+    // P3 引入 io_uring 后，Put 的 I/O 阶段将脱离锁保护，届时锁持有时间大幅缩短。
+    // mutable：Get/Size/IsOpen 是 const 方法，但仍需获取 shared_lock。
+    mutable std::shared_mutex mutex_;
     MetaIndex metaIndex_; // 第一层: key(string) → KeyMeta{firstChunkId, chunkCount}
     ChunkIndex chunkIndex_; // 第二层: chunkId → ChunkMeta (std::map, 有序)
     FreeList freeList_; // 磁盘块分配
@@ -71,9 +80,11 @@ private:
 
     // mutable: Get() 是 const 方法，但需要 Acquire/Release 修改池内部状态
     // 语义正确：Get 不改变引擎的「逻辑状态」，池是内部实现细节
+    // BufferPool 内部持有独立 mutex，不依赖 Engine mutex 保护。
     mutable BufferPool bufferPool_;
 
-    ChunkId nextChunkId_ = 0; // chunkId 全局自增
+    // fetch_add 原子自增，P3 并行写入时无需持 Engine 锁即可分配 chunkId
+    std::atomic<ChunkId> nextChunkId_{0};
     bool isOpen_ = false;
 
     // 记录 Open 时使用的路径，用于检测"已打开后用不同路径再次 Open"

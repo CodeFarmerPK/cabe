@@ -92,6 +92,34 @@ TEST_F(FreeListTest, ReleaseBatchEmpty) {
     EXPECT_EQ(0u, freeList_.FreeCount());
 }
 
+// batch 内部含重复 blockId → 检测为 double-release
+TEST_F(FreeListTest, ReleaseBatchDuplicateWithinBatch) {
+    BlockId b0, b1, b2;
+    freeList_.Allocate(&b0);
+    freeList_.Allocate(&b1);
+    freeList_.Allocate(&b2);
+
+    std::vector<BlockId> batch = {b0, b1, b0};  // b0 重复
+    EXPECT_EQ(FREE_LIST_DOUBLE_RELEASE, freeList_.ReleaseBatch(batch));
+    // 失败后 freeBlocks_ 不应被修改（原子性）
+    EXPECT_EQ(0u, freeList_.FreeCount());
+}
+
+// batch 中含已在 freeBlocks_ 中的 blockId → 检测为 double-release
+TEST_F(FreeListTest, ReleaseBatchDuplicateWithExisting) {
+    BlockId b0, b1;
+    freeList_.Allocate(&b0);
+    freeList_.Allocate(&b1);
+
+    ASSERT_EQ(SUCCESS, freeList_.Release(b0));   // b0 已在 freeBlocks_
+    EXPECT_EQ(1u, freeList_.FreeCount());
+
+    std::vector<BlockId> batch = {b1, b0};       // b0 重复
+    EXPECT_EQ(FREE_LIST_DOUBLE_RELEASE, freeList_.ReleaseBatch(batch));
+    // 失败后 freeBlocks_ 仍只有 b0，b1 未被插入
+    EXPECT_EQ(1u, freeList_.FreeCount());
+}
+
 // ============================================================
 // FreeCount / NextBlockId
 // ============================================================

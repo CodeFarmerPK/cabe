@@ -116,11 +116,12 @@ int32_t ChunkIndex::RemoveRange(const ChunkId firstChunkId, const uint32_t count
         }
         ++it;
     }
-    // 第二遍物理移除。erase(key) 对 std::map 来说是 O(log N)，
-    // 也可以用保留的迭代器走 erase(it++) 做到 O(count)，但 count 通常很小，
-    // 此处取更易读的写法。
+
+    // 第二遍物理移除：从 lower_bound 重新定位起点，用 erase(it++) 线性推进
+    // O(count)，与 DeleteRange 第二遍一致，避免每次 erase(key) 的 O(log N) 查找。
+    it = chunkMap_.lower_bound(firstChunkId);
     for (uint32_t i = 0; i < count; ++i) {
-        chunkMap_.erase(firstChunkId + i);
+        it = chunkMap_.erase(it);
     }
     return SUCCESS;
 }

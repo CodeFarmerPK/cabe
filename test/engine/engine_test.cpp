@@ -240,6 +240,11 @@ TEST_F(EngineTest, DeleteNonExistentFails) {
     EXPECT_EQ(INDEX_KEY_NOT_FOUND, engine_.Delete("missing"));
 }
 
+TEST_F(EngineTest, DeleteEmptyKeyFails) {
+    ASSERT_EQ(SUCCESS, engine_.Open(devicePath_.c_str()));
+    EXPECT_EQ(CABE_EMPTY_KEY, engine_.Delete(""));
+}
+
 // ============================================================
 // Remove（物理移除 + 回收磁盘块）
 // ============================================================
@@ -271,6 +276,11 @@ TEST_F(EngineTest, RemoveAfterDelete) {
 TEST_F(EngineTest, RemoveNonExistentFails) {
     ASSERT_EQ(SUCCESS, engine_.Open(devicePath_.c_str()));
     EXPECT_EQ(INDEX_KEY_NOT_FOUND, engine_.Remove("missing"));
+}
+
+TEST_F(EngineTest, RemoveEmptyKeyFails) {
+    ASSERT_EQ(SUCCESS, engine_.Open(devicePath_.c_str()));
+    EXPECT_EQ(CABE_EMPTY_KEY, engine_.Remove(""));
 }
 
 TEST_F(EngineTest, RemoveMultiChunkFile) {
@@ -476,6 +486,27 @@ TEST_F(EngineTest, SizeTracksCorrectly) {
 
     engine_.Remove("a");
     EXPECT_EQ(1u, engine_.Size());
+}
+
+// Delete 是逻辑删除，Size() 不应计入已删除但未 Remove 的条目。
+// 曾因 Size() 返回 indexMap_.size()（含 Deleted 条目）而存在 bug。
+TEST_F(EngineTest, SizeDoesNotCountDeletedKeys) {
+    ASSERT_EQ(SUCCESS, engine_.Open(devicePath_.c_str()));
+    auto data = MakeData(100);
+
+    engine_.Put("a", {data.data(), data.size()});
+    engine_.Put("b", {data.data(), data.size()});
+    EXPECT_EQ(2u, engine_.Size());
+
+    engine_.Delete("a");
+    // Delete 是逻辑删除：Size 应立即降为 1，而非保持 2
+    EXPECT_EQ(1u, engine_.Size());
+
+    engine_.Remove("a");
+    EXPECT_EQ(1u, engine_.Size());  // Remove 后仍是 1（b 还在）
+
+    engine_.Delete("b");
+    EXPECT_EQ(0u, engine_.Size());  // 全部逻辑删除，Size 应为 0
 }
 
 // ============================================================

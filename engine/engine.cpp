@@ -16,12 +16,13 @@
 constexpr uint32_t DEFAULT_POOL_BUFFER_COUNT = 8;
 
 Engine::~Engine() {
-    if (isOpen_) {
-        Close();
-    }
+    // Close() 在 unique_lock 内检查 isOpen_，避免析构函数裸读 isOpen_
+    // 被 TSAN 标记为数据竞争（析构时要求调用方已无其他线程在使用 Engine）
+    Close();
 }
 
 int32_t Engine::Open(const std::string& devicePath) {
+    std::unique_lock lock(mutex_);
     if (isOpen_) {
         // 同路径再次 Open → 幂等返回 SUCCESS
         // 不同路径再次 Open → 拒绝，避免静默忽略导致用户以为切换成功
@@ -50,6 +51,7 @@ int32_t Engine::Open(const std::string& devicePath) {
 }
 
 int32_t Engine::Close() {
+    std::unique_lock lock(mutex_);
     if (!isOpen_) {
         return SUCCESS;
     }
@@ -79,6 +81,7 @@ int32_t Engine::Close() {
 // 和 chunkIndex 条目都会被释放；旧 entry 不动。
 // ============================================================
 int32_t Engine::Put(const std::string& key, const DataView data) {
+    std::unique_lock lock(mutex_);
     if (!isOpen_) {
         return DEVICE_FAILED_TO_OPEN_DEVICE;
     }
@@ -227,10 +230,12 @@ rollback:
 int32_t Engine::Get(const std::string& key, DataBuffer buffer, uint64_t* readSize) const {
     // 契约：任何非 SUCCESS 返回前，*readSize 都会被置零。
     // readSize 必须最先检查，之后立即置零，确保后续所有早返回路径都满足契约。
+    // 这两步不涉及 Engine 状态，在加锁前完成，避免空指针解引用持锁。
     if (readSize == nullptr) {
         return MEMORY_NULL_POINTER_EXCEPTION;
     }
     *readSize = 0;
+    std::shared_lock lock(mutex_);
     if (!isOpen_) {
         return DEVICE_FAILED_TO_OPEN_DEVICE;
     }
@@ -299,8 +304,13 @@ int32_t Engine::Get(const std::string& key, DataBuffer buffer, uint64_t* readSiz
 // Delete: 标记删除（两层都标记）
 // ============================================================
 int32_t Engine::Delete(const std::string& key) {
+    std::unique_lock lock(mutex_);
     if (!isOpen_) {
         return DEVICE_FAILED_TO_OPEN_DEVICE;
+    }
+
+    if (key.empty()) {
+        return CABE_EMPTY_KEY;
     }
 
     // 获取 chunk 范围
@@ -327,8 +337,13 @@ int32_t Engine::Delete(const std::string& key) {
 // 要么完全不改任何状态。任一环节失败立即 early return，避免
 // "blocks 已回收但 chunkIndex 还在"这种不一致。
 int32_t Engine::Remove(const std::string& key) {
+    std::unique_lock lock(mutex_);
     if (!isOpen_) {
         return DEVICE_FAILED_TO_OPEN_DEVICE;
+    }
+
+    if (key.empty()) {
+        return CABE_EMPTY_KEY;
     }
 
     // 1. 获取 KeyMeta（允许已 Delete 过的 key，需要它的 chunk 范围）
@@ -381,15 +396,17 @@ int32_t Engine::Remove(const std::string& key) {
 }
 
 size_t Engine::Size() const {
+    std::shared_lock lock(mutex_);
     return metaIndex_.Size();
 }
 
 bool Engine::IsOpen() const {
+    std::shared_lock lock(mutex_);
     return isOpen_;
 }
 
 ChunkId Engine::AllocateChunkIds(const uint32_t count) {
-    const ChunkId first = nextChunkId_;
-    nextChunkId_ += count;
-    return first;
+    // fetch_add 原子操作；调用方已持 unique_lock，但 atomic 保留此语义
+    // 供未来 P3 并行写入时在无锁路径下分配 chunkId 使用。
+    return nextChunkId_.fetch_add(count, std::memory_order_relaxed);
 }

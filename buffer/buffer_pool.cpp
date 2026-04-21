@@ -124,16 +124,23 @@ int32_t BufferPool::Destroy() {
 // 复杂度: O(1) (pop_back) + O(N) (memset, N=bufferSize)
 // ============================================================
 char* BufferPool::Acquire() {
-    if (basePtr_ == nullptr || freeStack_.empty()) {
+    if (basePtr_ == nullptr ) {
         return nullptr;
     }
 
-    const uint32_t index = freeStack_.back();
-    freeStack_.pop_back();
+    uint32_t index;
+    {
+        std::lock_guard<std::mutex> lock(stackMutex_);
+        if (freeStack_.empty()) {
+            return nullptr;
+        }
+        index = freeStack_.back();
+        freeStack_.pop_back();
+    }
 
+    // memset 在锁外执行：清零耗时，不应持锁阻塞其他线程 Acquire/Release
     char* buffer = basePtr_ + static_cast<size_t>(index) * bufferSize_;
-    std::memset(buffer, 0, bufferSize_); // 清零，与原 AllocateAlignedBuffer 行为一致
-
+    std::memset(buffer, 0, bufferSize_);
     return buffer;
 }
 
@@ -166,6 +173,7 @@ int32_t BufferPool::Release(char* ptr) {
     }
 
     const auto index = static_cast<uint32_t>(offset / bufferSize_);
+    std::lock_guard<std::mutex> lock(stackMutex_);
     // Double-release 检测：若 index 已在 freeStack_ 里，说明调用方重复
     // 释放同一 buffer。放过去会导致后续两个 Acquire 拿到同一块内存，
     // 造成静默 data corruption。
@@ -175,8 +183,6 @@ int32_t BufferPool::Release(char* ptr) {
             return POOL_INVALID_POINTER;
         }
     }
-
     freeStack_.push_back(index);
-
     return SUCCESS;
 }

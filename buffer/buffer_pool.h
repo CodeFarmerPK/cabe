@@ -18,6 +18,7 @@
 #include "common/error_code.h"
 #include <cstddef>
 #include <cstdint>
+#include <mutex>
 #include <vector>
 
 class BufferPool {
@@ -51,16 +52,19 @@ public:
         return bufferCount_;
     }
     uint32_t FreeCount() const {
+        std::lock_guard<std::mutex> lock(stackMutex_);
         return static_cast<uint32_t>(freeStack_.size());
     }
     uint32_t UsedCount() const {
-        return bufferCount_ - FreeCount();
+        std::lock_guard<std::mutex> lock(stackMutex_);
+        return bufferCount_ - static_cast<uint32_t>(freeStack_.size());
     }
     size_t BufferSize() const {
         return bufferSize_;
     }
 
 private:
+    mutable std::mutex stackMutex_; // 保护 freeStack_ 的并发 Acquire/Release
     char* basePtr_ = nullptr; // mmap 返回的基地址
     size_t bufferSize_ = 0; // 单个缓冲区大小
     uint32_t bufferCount_ = 0; // 缓冲区总数

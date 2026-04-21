@@ -39,6 +39,7 @@ public:
 
 private:
     std::unordered_map<std::string, KeyMeta> indexMap_;
+    size_t activeCount_ = 0; // 仅计活跃（非 Deleted）条目，修正 Size() 语义
 };
 
 #endif // CABE_META_INDEX_H

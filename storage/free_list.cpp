@@ -44,8 +44,23 @@ int32_t FreeList::Release(const BlockId blockId) {
 }
 
 int32_t FreeList::ReleaseBatch(const std::vector<BlockId>& blockIds) {
-    // 同上：先整体 reserve，再一次性 insert，避免 insert 中途
-    // bad_alloc 造成"前半被插入、后半丢失"的部分失败。
+    if (blockIds.empty()) {
+        return SUCCESS;
+    }
+
+    // 先完整验证，再 reserve + insert，保证原子性：
+    //   - 与已有 freeBlocks_ 无重叠（batch 外 double-release）
+    //   - batch 内部无重复（batch 内 double-release）
+    // 与 Release() 的 O(N) 扫描保持一致的防护强度。
+    for (size_t i = 0; i < blockIds.size(); ++i) {
+        for (const BlockId existing : freeBlocks_) {
+            if (existing == blockIds[i]) return FREE_LIST_DOUBLE_RELEASE;
+        }
+        for (size_t j = i + 1; j < blockIds.size(); ++j) {
+            if (blockIds[i] == blockIds[j]) return FREE_LIST_DOUBLE_RELEASE;
+        }
+    }
+
     try {
         freeBlocks_.reserve(freeBlocks_.size() + blockIds.size());
     } catch (...) {

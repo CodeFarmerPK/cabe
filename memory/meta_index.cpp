@@ -8,7 +8,14 @@
 
 int32_t MetaIndex::Put(const std::string& key, const KeyMeta& meta) {
     try {
-        indexMap_[key] = meta;
+        auto [it, inserted] = indexMap_.try_emplace(key, meta);
+        if (inserted) {
+            ++activeCount_;
+        } else {
+            // 覆盖写：若旧条目是 Deleted，激活计数要补回来
+            if (it->second.state == DataState::Deleted) ++activeCount_;
+            it->second = meta;
+        }
     } catch (...) {
         return MEMORY_INSERT_FAIL;
     }
@@ -45,18 +52,22 @@ int32_t MetaIndex::Delete(const std::string& key) {
     }
 
     it->second.state = DataState::Deleted;
+    --activeCount_;
     return SUCCESS;
 }
 
 int32_t MetaIndex::Remove(const std::string& key) {
-    if (const auto count = indexMap_.erase(key); count == 0) {
+    const auto it = indexMap_.find(key);
+    if (it == indexMap_.end()) {
         return INDEX_KEY_NOT_FOUND;
     }
+    if (it->second.state == DataState::Active) --activeCount_;
+    indexMap_.erase(it);
     return SUCCESS;
 }
 
 size_t MetaIndex::Size() const {
-    return indexMap_.size();
+    return activeCount_;
 }
 
 bool MetaIndex::Contains(const std::string& key) const {

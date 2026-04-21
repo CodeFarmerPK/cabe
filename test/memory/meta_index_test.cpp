@@ -141,11 +141,11 @@ TEST_F(MetaIndexTest, SizeTracksInsertAndRemove) {
     index_.Put("b", MakeKeyMeta(1, 1, 100));
     EXPECT_EQ(2u, index_.Size());
 
-    // Delete 是逻辑删除，不减 Size
+    // Delete 是逻辑删除，activeCount_ 立即递减，Size 也减少
     index_.Delete("a");
-    EXPECT_EQ(2u, index_.Size());
+    EXPECT_EQ(1u, index_.Size());
 
-    // Remove 物理删除，减 Size
+    // Remove 物理删除："a" 已是 Deleted 状态，activeCount_ 不再变动
     index_.Remove("a");
     EXPECT_EQ(1u, index_.Size());
 }

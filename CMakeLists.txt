@@ -168,6 +168,7 @@ if(CABE_BUILD_TESTS)
             test/util/crc32_test.cpp
             test/engine/engine_test.cpp
             test/util/cpu_features_test.cpp
+            test/engine/engine_thread_test.cpp
     )
 
     add_executable(cabe_test ${TEST_SOURCES})

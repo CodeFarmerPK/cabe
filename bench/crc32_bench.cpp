@@ -27,7 +27,7 @@ namespace {
         }
 
         for (auto _ : state) {
-            const uint32_t crc = cabe::util::CRC32({data.data(), data.size()});
+            uint32_t crc = cabe::util::CRC32({data.data(), data.size()});
             benchmark::DoNotOptimize(crc);
         }
         state.SetBytesProcessed(state.iterations() * size);
