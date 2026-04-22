@@ -9,11 +9,25 @@
 int32_t MetaIndex::Put(const std::string& key, const KeyMeta& meta) {
     try {
         auto [it, inserted] = indexMap_.try_emplace(key, meta);
+        const bool newActive = (meta.state == DataState::Active);
         if (inserted) {
-            ++activeCount_;
+            // 新插入：仅当新 entry 是 Active 才计入活跃数。
+            // P2 ::Engine::Put 总传 Active，此处 if 必然为真；
+            // 但 P4 WAL 重放可能直接 Put(state=Deleted) 重建已删条目，那时
+            // 这条 if 守住了"Deleted entry 不算 active"的不变式。
+            if (newActive) ++activeCount_;
         } else {
-            // 覆盖写：若旧条目是 Deleted，激活计数要补回来
-            if (it->second.state == DataState::Deleted) ++activeCount_;
+            // 覆盖写：根据 state 跃迁四种组合调整 activeCount_
+            //   Active → Active   : 不变
+            //   Active → Deleted  : --（被删）
+            //   Deleted → Active  : ++（复活）
+            //   Deleted → Deleted : 不变
+            const bool oldActive = (it->second.state == DataState::Active);
+            if (!oldActive && newActive) {
+                ++activeCount_;
+            } else if (oldActive && !newActive) {
+                --activeCount_;
+            }
             it->second = meta;
         }
     } catch (...) {

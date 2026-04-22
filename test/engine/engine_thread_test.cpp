@@ -18,11 +18,11 @@
  * 普通构建也能捕获数据竞争导致的崩溃或错误内容。
  */
 
-#include <gtest/gtest.h>
 #include "engine/engine.h"
 #include <atomic>
 #include <cstring>
 #include <fcntl.h>
+#include <gtest/gtest.h>
 #include <latch>
 #include <thread>
 #include <unistd.h>
@@ -30,7 +30,9 @@
 
 static bool ThreadTestSupportsDirectIO(const char* path) {
     int fd = ::open(path, O_RDWR | O_CREAT | O_TRUNC, 0644);
-    if (fd < 0) return false;
+    if (fd < 0) {
+        return false;
+    }
     // 256 MiB：线程测试并发写多 key，需要更大的空间
     if (ftruncate(fd, 256 * 1024 * 1024) < 0) {
         ::close(fd);
@@ -54,9 +56,8 @@ protected:
 
     void SetUp() override {
         const auto* info = ::testing::UnitTest::GetInstance()->current_test_info();
-        devicePath_ = std::string("/var/tmp/cabe_thread_")
-                    + info->test_suite_name() + "_" + info->name()
-                    + "_" + std::to_string(::getpid()) + ".dat";
+        devicePath_ = std::string("/var/tmp/cabe_thread_") + info->test_suite_name() + "_" + info->name() + "_"
+            + std::to_string(::getpid()) + ".dat";
 
         if (!ThreadTestSupportsDirectIO(devicePath_.c_str())) {
             GTEST_SKIP() << "O_DIRECT not supported at " << devicePath_;
@@ -89,7 +90,7 @@ TEST_F(EngineThreadTest, ConcurrentGetSameKey) {
 
     // 6 线程：留 2 个 BufferPool slot 作为裕量（池大小 = 8）
     constexpr int kThreads = 6;
-    constexpr int kIters   = 30;
+    constexpr int kIters = 30;
     std::latch start(kThreads);
     std::atomic<int> errors{0};
     std::vector<std::thread> threads;
@@ -117,7 +118,9 @@ TEST_F(EngineThreadTest, ConcurrentGetSameKey) {
         });
     }
 
-    for (auto& th : threads) th.join();
+    for (auto& th : threads) {
+        th.join();
+    }
     EXPECT_EQ(0, errors.load());
 }
 
@@ -128,7 +131,7 @@ TEST_F(EngineThreadTest, ConcurrentGetSameKey) {
 // ============================================================
 TEST_F(EngineThreadTest, ConcurrentPutDifferentKeys) {
     constexpr int kThreads = 6;
-    constexpr int kIters   = 5;
+    constexpr int kIters = 5;
     std::latch start(kThreads);
     std::atomic<int> putErrors{0};
     std::vector<std::thread> threads;
@@ -148,20 +151,24 @@ TEST_F(EngineThreadTest, ConcurrentPutDifferentKeys) {
         });
     }
 
-    for (auto& th : threads) th.join();
+    for (auto& th : threads) {
+        th.join();
+    }
     ASSERT_EQ(0, putErrors.load());
 
     // 串行验证：每个 key 的最终内容必须是对应线程的 fill 字节
     for (int t = 0; t < kThreads; ++t) {
-        const std::string key  = "pk_key_" + std::to_string(t);
-        const char         fill = static_cast<char>('A' + t);
-        std::vector<char>  buf(CABE_VALUE_DATA_SIZE);
+        const std::string key = "pk_key_" + std::to_string(t);
+        const char fill = static_cast<char>('A' + t);
+        std::vector<char> buf(CABE_VALUE_DATA_SIZE);
         uint64_t readSize = 0;
         ASSERT_EQ(SUCCESS, engine_.Get(key, {buf.data(), buf.size()}, &readSize));
         EXPECT_EQ(static_cast<uint64_t>(CABE_VALUE_DATA_SIZE), readSize);
         for (size_t b = 0; b < readSize; ++b) {
             EXPECT_EQ(fill, buf[b]) << "key=" << key << " byte=" << b;
-            if (buf[b] != fill) break;
+            if (buf[b] != fill) {
+                break;
+            }
         }
     }
 }
@@ -174,7 +181,7 @@ TEST_F(EngineThreadTest, ConcurrentPutDifferentKeys) {
 // ============================================================
 TEST_F(EngineThreadTest, ConcurrentPutSameKey) {
     constexpr int kThreads = 4;
-    constexpr int kIters   = 15;
+    constexpr int kIters = 15;
     std::latch start(kThreads);
     std::atomic<int> errors{0};
     std::vector<std::thread> threads;
@@ -193,7 +200,9 @@ TEST_F(EngineThreadTest, ConcurrentPutSameKey) {
         });
     }
 
-    for (auto& th : threads) th.join();
+    for (auto& th : threads) {
+        th.join();
+    }
     EXPECT_EQ(0, errors.load());
 
     // 最终内容必须是某线程完整写入的 fill（无撕裂）
@@ -203,11 +212,12 @@ TEST_F(EngineThreadTest, ConcurrentPutSameKey) {
     EXPECT_EQ(static_cast<uint64_t>(CABE_VALUE_DATA_SIZE), readSize);
 
     const char first = buf[0];
-    EXPECT_TRUE(first >= 'A' && first < 'A' + kThreads)
-        << "unexpected fill: " << static_cast<int>(first);
+    EXPECT_TRUE(first >= 'A' && first < 'A' + kThreads) << "unexpected fill: " << static_cast<int>(first);
     for (size_t b = 1; b < readSize; ++b) {
         EXPECT_EQ(first, buf[b]) << "torn read at byte " << b;
-        if (buf[b] != first) break;
+        if (buf[b] != first) {
+            break;
+        }
     }
 }
 
@@ -224,7 +234,7 @@ TEST_F(EngineThreadTest, ConcurrentPutAndGet) {
     ASSERT_EQ(SUCCESS, engine_.Put("rw_key", {initData.data(), initData.size()}));
 
     // 4 reader + 1 writer（共 5 个 BufferPool slot，池有 8，留裕量）
-    constexpr int kReaders     = 4;
+    constexpr int kReaders = 4;
     constexpr int kWriterIters = 40;
     constexpr int kReaderIters = 60;
     std::latch start(kReaders + 1);
@@ -266,7 +276,9 @@ TEST_F(EngineThreadTest, ConcurrentPutAndGet) {
         });
     }
 
-    for (auto& th : threads) th.join();
+    for (auto& th : threads) {
+        th.join();
+    }
     EXPECT_EQ(0, readErrors.load());
 }
 
@@ -278,7 +290,7 @@ TEST_F(EngineThreadTest, ConcurrentPutAndGet) {
 // ============================================================
 TEST_F(EngineThreadTest, ConcurrentLifecyclePerKey) {
     constexpr int kThreads = 6;
-    constexpr int kIters   = 8;
+    constexpr int kIters = 8;
     std::latch start(kThreads);
     std::atomic<int> errors{0};
     std::vector<std::thread> threads;
@@ -293,19 +305,24 @@ TEST_F(EngineThreadTest, ConcurrentLifecyclePerKey) {
 
             for (int i = 0; i < kIters; ++i) {
                 if (engine_.Put(key, {data.data(), data.size()}) != SUCCESS) {
-                    errors.fetch_add(1, std::memory_order_relaxed); continue;
+                    errors.fetch_add(1, std::memory_order_relaxed);
+                    continue;
                 }
                 if (engine_.Delete(key) != SUCCESS) {
-                    errors.fetch_add(1, std::memory_order_relaxed); continue;
+                    errors.fetch_add(1, std::memory_order_relaxed);
+                    continue;
                 }
                 if (engine_.Remove(key) != SUCCESS) {
-                    errors.fetch_add(1, std::memory_order_relaxed); continue;
+                    errors.fetch_add(1, std::memory_order_relaxed);
+                    continue;
                 }
             }
         });
     }
 
-    for (auto& th : threads) th.join();
+    for (auto& th : threads) {
+        th.join();
+    }
     EXPECT_EQ(0, errors.load());
     EXPECT_EQ(0u, engine_.Size());
 }
@@ -317,7 +334,7 @@ TEST_F(EngineThreadTest, ConcurrentLifecyclePerKey) {
 // ============================================================
 TEST_F(EngineThreadTest, ConcurrentMultiChunkPutGet) {
     constexpr int kThreads = 4;
-    const size_t  valueSize = CABE_VALUE_DATA_SIZE * 2;
+    const size_t valueSize = CABE_VALUE_DATA_SIZE * 2;
     std::latch start(kThreads);
     std::atomic<int> errors{0};
     std::vector<std::thread> threads;
@@ -326,8 +343,8 @@ TEST_F(EngineThreadTest, ConcurrentMultiChunkPutGet) {
     for (int t = 0; t < kThreads; ++t) {
         threads.emplace_back([&, t] {
             start.arrive_and_wait();
-            const std::string key  = "mc_key_" + std::to_string(t);
-            const char         fill = static_cast<char>('A' + t);
+            const std::string key = "mc_key_" + std::to_string(t);
+            const char fill = static_cast<char>('A' + t);
             auto data = MakeData(valueSize, fill);
 
             if (engine_.Put(key, {data.data(), data.size()}) != SUCCESS) {
@@ -337,8 +354,7 @@ TEST_F(EngineThreadTest, ConcurrentMultiChunkPutGet) {
 
             std::vector<char> buf(valueSize);
             uint64_t readSize = 0;
-            if (engine_.Get(key, {buf.data(), buf.size()}, &readSize) != SUCCESS
-                || readSize != valueSize) {
+            if (engine_.Get(key, {buf.data(), buf.size()}, &readSize) != SUCCESS || readSize != valueSize) {
                 errors.fetch_add(1, std::memory_order_relaxed);
                 return;
             }
@@ -351,21 +367,143 @@ TEST_F(EngineThreadTest, ConcurrentMultiChunkPutGet) {
         });
     }
 
-    for (auto& th : threads) th.join();
+    for (auto& th : threads) {
+        th.join();
+    }
     EXPECT_EQ(0, errors.load());
     EXPECT_EQ(static_cast<size_t>(kThreads), engine_.Size());
 }
 
 // ============================================================
-// 7. 并发 Size() 读取（shared_lock 下多线程并发读状态）
+// 7. 并发 Delete + Get 同一 key（race between Remove 完成和 Get 看到）
+//
+// 1 个 deleter 反复 Put→Remove 同一 key；N 个 reader 持续 Get。
+// 每次 Get 要么 SUCCESS（值完整且无撕裂），要么 INDEX_KEY_NOT_FOUND。
+// 不允许出现"读到一半被删导致部分数据"或者其他错误码。
+// ============================================================
+TEST_F(EngineThreadTest, ConcurrentDeleteAndGet) {
+    constexpr int kReaders = 4;
+    constexpr int kDeleterIters = 30;
+    constexpr int kReaderIters = 60;
+    auto data = MakeData(CABE_VALUE_DATA_SIZE / 2, 'D'); // 512 KiB
+    // 初始写入，让 reader 一开始有内容可读
+    ASSERT_EQ(SUCCESS, engine_.Put("dg_key", {data.data(), data.size()}));
+
+    std::latch start(kReaders + 1);
+    std::atomic<int> readErrors{0};
+    std::vector<std::thread> threads;
+    threads.reserve(kReaders + 1);
+
+    // deleter
+    threads.emplace_back([&] {
+        start.arrive_and_wait();
+        for (int i = 0; i < kDeleterIters; ++i) {
+            engine_.Put("dg_key", {data.data(), data.size()});
+            engine_.Remove("dg_key");
+        }
+        // 收尾：确保最终状态可预测
+        engine_.Put("dg_key", {data.data(), data.size()});
+    });
+
+    // readers
+    for (int t = 0; t < kReaders; ++t) {
+        threads.emplace_back([&] {
+            start.arrive_and_wait();
+            std::vector<char> buf(CABE_VALUE_DATA_SIZE / 2);
+            uint64_t readSize = 0;
+            for (int i = 0; i < kReaderIters; ++i) {
+                const int32_t rc = engine_.Get("dg_key", {buf.data(), buf.size()}, &readSize);
+                if (rc != SUCCESS && rc != INDEX_KEY_NOT_FOUND && rc != INDEX_KEY_DELETED) {
+                    readErrors.fetch_add(1, std::memory_order_relaxed);
+                    continue;
+                }
+                if (rc == SUCCESS) {
+                    if (readSize != CABE_VALUE_DATA_SIZE / 2) {
+                        readErrors.fetch_add(1, std::memory_order_relaxed);
+                        continue;
+                    }
+                    for (size_t b = 0; b < readSize; ++b) {
+                        if (buf[b] != 'D') {
+                            readErrors.fetch_add(1, std::memory_order_relaxed);
+                            break;
+                        }
+                    }
+                }
+            }
+        });
+    }
+
+    for (auto& th : threads) {
+        th.join();
+    }
+    EXPECT_EQ(0, readErrors.load());
+}
+
+// ============================================================
+// 8. 并发 Put 不同 key + 并发 Delete 其他 key（FreeList 并发回收）
+//
+// 一组线程持续 Put pk_X，另一组持续 Put→Remove dk_X。
+// 验证 FreeList 在 unique_lock 下的回收路径在并发下不会 double-release。
+// ============================================================
+TEST_F(EngineThreadTest, ConcurrentPutAndDeleteDifferentKeys) {
+    constexpr int kPutThreads = 3;
+    constexpr int kDeleteThreads = 3;
+    constexpr int kIters = 8;
+    std::latch start(kPutThreads + kDeleteThreads);
+    std::atomic<int> errors{0};
+    std::vector<std::thread> threads;
+    threads.reserve(kPutThreads + kDeleteThreads);
+
+    // Put threads
+    for (int t = 0; t < kPutThreads; ++t) {
+        threads.emplace_back([&, t] {
+            start.arrive_and_wait();
+            const std::string key = "pk_" + std::to_string(t);
+            auto data = MakeData(CABE_VALUE_DATA_SIZE / 2, static_cast<char>('A' + t));
+            for (int i = 0; i < kIters; ++i) {
+                if (engine_.Put(key, {data.data(), data.size()}) != SUCCESS) {
+                    errors.fetch_add(1, std::memory_order_relaxed);
+                }
+            }
+        });
+    }
+
+    // Delete threads（与 Put 不同 key，避免误伤）
+    for (int t = 0; t < kDeleteThreads; ++t) {
+        threads.emplace_back([&, t] {
+            start.arrive_and_wait();
+            const std::string key = "dk_" + std::to_string(t);
+            auto data = MakeData(CABE_VALUE_DATA_SIZE / 2, static_cast<char>('X' + t));
+            for (int i = 0; i < kIters; ++i) {
+                if (engine_.Put(key, {data.data(), data.size()}) != SUCCESS) {
+                    errors.fetch_add(1, std::memory_order_relaxed);
+                    continue;
+                }
+                if (engine_.Remove(key) != SUCCESS) {
+                    errors.fetch_add(1, std::memory_order_relaxed);
+                }
+            }
+        });
+    }
+
+    for (auto& th : threads) {
+        th.join();
+    }
+    EXPECT_EQ(0, errors.load());
+    // 最终：Put 组的 key 全部存活，Delete 组的 key 全部消失
+    EXPECT_EQ(static_cast<size_t>(kPutThreads), engine_.Size());
+}
+
+// ============================================================
+// 9. 并发 Size() 读取（shared_lock 下多线程并发读状态）
 //
 // 先写入若干 key，再用 N 线程并发调用 Size()。
 // 不崩溃，返回值始终在 [0, kKeys] 范围内。
 // ============================================================
 TEST_F(EngineThreadTest, ConcurrentSizeRead) {
-    constexpr int kKeys    = 5;
+    constexpr int kKeys = 5;
     constexpr int kThreads = 8;
-    constexpr int kIters   = 50;
+    constexpr int kIters = 50;
 
     for (int i = 0; i < kKeys; ++i) {
         auto data = MakeData(512, static_cast<char>('A' + i));
@@ -389,7 +527,9 @@ TEST_F(EngineThreadTest, ConcurrentSizeRead) {
         });
     }
 
-    for (auto& th : threads) th.join();
+    for (auto& th : threads) {
+        th.join();
+    }
     EXPECT_EQ(0, errors.load());
     EXPECT_EQ(static_cast<size_t>(kKeys), engine_.Size());
 }

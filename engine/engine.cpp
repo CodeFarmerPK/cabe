@@ -6,14 +6,11 @@
 
 #include "engine.h"
 
+#include "common/logger.h"
 #include "util/crc32.h"
 #include "util/util.h"
 #include <algorithm>
 #include <cstring>
-
-// 缓冲池默认缓冲区数量
-// 设为 8：为未来 io_uring 批量提交留出裕量
-constexpr uint32_t DEFAULT_POOL_BUFFER_COUNT = 8;
 
 Engine::~Engine() {
     // Close() 在 unique_lock 内检查 isOpen_，避免析构函数裸读 isOpen_
@@ -21,7 +18,7 @@ Engine::~Engine() {
     Close();
 }
 
-int32_t Engine::Open(const std::string& devicePath) {
+int32_t Engine::Open(const std::string& devicePath, const uint32_t bufferPoolCount) {
     std::unique_lock lock(mutex_);
     if (isOpen_) {
         // 同路径再次 Open → 幂等返回 SUCCESS
@@ -38,14 +35,27 @@ int32_t Engine::Open(const std::string& devicePath) {
         return ret;
     }
 
-    // 初始化缓冲池：预分配 DEFAULT_POOL_BUFFER_COUNT 个 1MB 缓冲区
-    const int32_t poolRet = bufferPool_.Init(CABE_VALUE_DATA_SIZE, DEFAULT_POOL_BUFFER_COUNT);
+    // 初始化缓冲池：预分配 bufferPoolCount 个 1 MiB 对齐缓冲区
+    const int32_t poolRet = bufferPool_.Init(CABE_VALUE_DATA_SIZE, bufferPoolCount);
+
     if (poolRet != SUCCESS) {
         storage_.Close();
         return poolRet;
     }
 
-    devicePath_ = devicePath;
+    // string 赋值在 OOM 下可能抛 bad_alloc（短路径走 SSO 不抛，长路径触发堆分配）。
+    // 必须包 try/catch：
+    //   1. ::Engine::Open 的契约是返回 int32_t 错误码，不能让异常穿透到 cabe::Engine::Open
+    //   2. 若异常穿透：cabe::Engine::Open 的 `if (rc != SUCCESS) ::unlink(...)` 清理路径
+    //      根本到不了，磁盘上残留新建的空文件 → 下次 create_if_missing=false 误判
+    //   3. Storage::Open 已对同类 devicePath_ 赋值做了同样防护，此处补齐对称性
+    try {
+        devicePath_ = devicePath;
+    } catch (...) {
+        bufferPool_.Destroy();
+        storage_.Close();
+        return MEMORY_INSERT_FAIL;
+    }
     isOpen_ = true;
     return SUCCESS;
 }
@@ -187,21 +197,39 @@ int32_t Engine::Put(const std::string& key, const DataView data) {
 
     // 走到这里：新 entry 已落地，key 已指向新 KeyMeta。
     // 现在清理旧 entry 的 chunks + blocks（覆盖写场景）。
-    // 这一段是 best-effort：任何一步失败只会让旧资源泄漏，不影响
-    // 新 entry 的正确性，因此不再返回错误。
+    //
+    // 这一段是 best-effort：任何一步失败只会让旧资源泄漏，不影响新 entry 的
+    // 正确性，因此不再返回错误。但要保证 freeList 与 chunkIndex 状态一致：
+    // 必须 ReleaseBatch 成功后才 RemoveRange。否则 blocks 既不在 freeList
+    // 也无 chunkIndex 引用 → 永久泄漏（无法被任何 GC 路径回收）。
     if (hasOld) {
         std::vector<ChunkMeta> oldChunks;
         if (chunkIndex_.GetRange(oldMeta.firstChunkId, oldMeta.chunkCount, &oldChunks) == SUCCESS) {
+            std::vector<BlockId> oldBlocks;
             try {
-                std::vector<BlockId> oldBlocks;
                 oldBlocks.reserve(oldChunks.size());
-                for (const auto& cm : oldChunks) {
-                    oldBlocks.push_back(cm.blockId);
-                }
-                freeList_.ReleaseBatch(oldBlocks);
-                chunkIndex_.RemoveRange(oldMeta.firstChunkId, oldMeta.chunkCount);
             } catch (...) {
-                // OOM：旧 blocks 泄漏，但新 entry 已落地，不影响正确性
+                // reserve 抛 bad_alloc：旧 chunkIndex 条目和 blocks 都保持原样
+                // （metaIndex 已经覆盖，旧 chunks 不可达，但至少状态自洽）
+                CABE_LOG_ERROR("Put: oldBlocks.reserve OOM, %u old chunks leaked", oldMeta.chunkCount);
+                return SUCCESS;
+            }
+            for (const auto& cm : oldChunks) {
+                oldBlocks.push_back(cm.blockId); // BlockId trivially-copyable, noexcept
+            }
+
+            const int32_t releaseRc = freeList_.ReleaseBatch(oldBlocks);
+            if (releaseRc == SUCCESS) {
+                // ReleaseBatch 已通过两层验证（无 batch 内/外重复），RemoveRange
+                // 此处仅删除 oldMeta 范围内的条目，前面 GetRange 验证过完整性。
+                (void) chunkIndex_.RemoveRange(oldMeta.firstChunkId, oldMeta.chunkCount);
+            } else {
+                // ReleaseBatch 失败：保留 chunkIndex 条目作为 "ghost"，至少
+                // blockId 仍可从 chunkIndex 反向恢复（人工运维或未来 GC 工具）。
+                // 不调用 RemoveRange，避免双重丢失。
+                CABE_LOG_ERROR("Put: ReleaseBatch failed (code=%d), %u old chunks kept "
+                               "as ghosts in chunkIndex (blockIds recoverable)",
+                    releaseRc, oldMeta.chunkCount);
             }
         }
         // 若 GetRange 失败（chunkIndex 与 metaIndex 不一致），旧 chunks
@@ -214,12 +242,17 @@ int32_t Engine::Put(const std::string& key, const DataView data) {
 rollback:
     // 回滚已成功写入的 0 ~ writtenCount-1 个 chunk。
     // 新 metaIndex.Put 失败的场景下也走这里，保证新 chunks/blocks 被清。
+    //
+    // 这些 chunk 都是当前 Put 在 unique_lock 保护下刚 chunkIndex_.Put(state=Active)
+    // 成功的；持锁期间不可能被改成 Deleted（外部代码无法越过 mutex_ 改 ChunkMeta）。
+    // 因此 Get 必然返回 SUCCESS——历史代码里的 `gr == CHUNK_DELETED` 防御分支
+    // 在 P2 路径下是死代码，已删除。
     for (uint32_t j = 0; j < writtenCount; ++j) {
         ChunkMeta written{};
-        if (const int32_t gr = chunkIndex_.Get(firstChunkId + j, &written); gr == SUCCESS || gr == CHUNK_DELETED) {
-            freeList_.Release(written.blockId);
+        if (chunkIndex_.Get(firstChunkId + j, &written) == SUCCESS) {
+            (void)freeList_.Release(written.blockId);
         }
-        chunkIndex_.Remove(firstChunkId + j);
+        (void)chunkIndex_.Remove(firstChunkId + j);
     }
     return failRet;
 }
@@ -297,6 +330,89 @@ int32_t Engine::Get(const std::string& key, DataBuffer buffer, uint64_t* readSiz
     }
 
     *readSize = keyMeta.totalSize;
+    return SUCCESS;
+}
+
+// ============================================================
+// GetIntoVector: 读取数据到 vector（P2 API 层专用）
+//
+// 与 Get() 的核心逻辑相同，差异点：
+//   1. 自行从 MetaIndex 取 totalSize，在单次 shared_lock 内 resize + 填充 vector，
+//      消除"先查 size 再调 Get"两次加锁之间的 TOCTOU 竞态。
+//   2. 输出类型为 std::vector<std::byte>（公开 API 的二进制语义），
+//      memcpy 从 char* 到 std::byte* 合法（两者均为单字节类型）。
+//   3. 失败时 *out 被清空，调用方无需额外清理。
+// ============================================================
+int32_t Engine::GetIntoVector(const std::string& key, std::vector<std::byte>* out) const {
+    if (out == nullptr) {
+        return MEMORY_NULL_POINTER_EXCEPTION;
+    }
+    // 契约：除 nullptr 外的任何失败路径都 clear *out，避免调用方拿到 stale data。
+    //
+    // 前置 clear 覆盖 resize 之前的所有 early-return（!isOpen_ / key.empty /
+    // metaIndex.Get 失败）；resize **之后**的失败路径（GetRange / ReadBlock /
+    // CRC mismatch / pool exhausted）必须各自再 clear，因为此时 *out 已被
+    // resize 到 totalSize 且可能部分填充，下方 4 处 out->clear() 就是为此保留。
+    out->clear();
+    std::shared_lock lock(mutex_);
+    if (!isOpen_) {
+        return DEVICE_FAILED_TO_OPEN_DEVICE;
+    }
+    if (key.empty()) {
+        return CABE_EMPTY_KEY;
+    }
+
+    KeyMeta keyMeta{};
+    int32_t ret = metaIndex_.Get(key, &keyMeta);
+    if (ret != SUCCESS) {
+        return ret;
+    }
+
+    try {
+        out->resize(keyMeta.totalSize);
+    } catch (...) {
+        return MEMORY_INSERT_FAIL;
+    }
+
+    std::vector<ChunkMeta> chunkMetas;
+    ret = chunkIndex_.GetRange(keyMeta.firstChunkId, keyMeta.chunkCount, &chunkMetas);
+    if (ret != SUCCESS) {
+        out->clear();
+        return ret;
+    }
+
+    for (uint32_t i = 0; i < keyMeta.chunkCount; ++i) {
+        const ChunkMeta& meta = chunkMetas[i];
+
+        char* alignedBuffer = bufferPool_.Acquire();
+        if (alignedBuffer == nullptr) {
+            out->clear();
+            return POOL_EXHAUSTED;
+        }
+
+        ret = storage_.ReadBlock(meta.blockId, {alignedBuffer, CABE_VALUE_DATA_SIZE});
+        if (ret != SUCCESS) {
+            bufferPool_.Release(alignedBuffer);
+            out->clear();
+            return ret;
+        }
+
+        const uint64_t offset = static_cast<uint64_t>(i) * CABE_VALUE_DATA_SIZE;
+        const uint64_t remaining = keyMeta.totalSize - offset;
+        const uint64_t chunkSize = std::min(static_cast<uint64_t>(CABE_VALUE_DATA_SIZE), remaining);
+
+        // CRC 校验：与 Put 侧契约一致，只覆盖 [0, chunkSize) 的有效数据
+        if (const uint32_t crc = cabe::util::CRC32({alignedBuffer, chunkSize}); crc != meta.crc) {
+            bufferPool_.Release(alignedBuffer);
+            out->clear();
+            return DATA_CRC_MISMATCH;
+        }
+
+        // char* → std::byte*：两者均为单字节类型，memcpy 合法无 UB
+        std::memcpy(out->data() + offset, alignedBuffer, chunkSize);
+        bufferPool_.Release(alignedBuffer);
+    }
+
     return SUCCESS;
 }
 

@@ -84,7 +84,10 @@ int32_t BufferPool::Init(const size_t bufferSize, const uint32_t bufferCount) {
         bufferCount_ = 0;
         totalSize_ = 0;
         freeStack_.clear();
-        freeStack_.shrink_to_fit();
+        // 不调 freeStack_.shrink_to_fit()：标准未保证 shrink_to_fit 是 noexcept
+        // （理论上可能再次 bad_alloc 重新分配到 0 容量），catch 块内 throw 会
+        // terminate。clear 之后保留少量 capacity 对接下来"BufferPool 实例本身
+        // 也将被销毁/重置"无害。
         return POOL_MMAP_FAILED;
     }
 
@@ -109,7 +112,10 @@ int32_t BufferPool::Destroy() {
     bufferCount_ = 0;
     totalSize_ = 0;
     freeStack_.clear();
-    freeStack_.shrink_to_fit(); // 释放 vector 自身的堆内存
+    // 不调 freeStack_.shrink_to_fit()：标准未保证 noexcept（理论上可能再次
+    // bad_alloc 重新分配到 0 容量）。Destroy 由 ~BufferPool 调用，析构期 throw
+    // → terminate。clear 后 vector 自身的堆内存在 BufferPool 实例销毁时由
+    // vector 自己的析构释放，无需提前 shrink。
 
     if (rc != 0) {
         // 复用 POOL_MMAP_FAILED 表示 mmap 系列调用失败

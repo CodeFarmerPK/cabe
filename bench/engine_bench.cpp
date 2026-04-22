@@ -14,11 +14,13 @@
 
 #include <benchmark/benchmark.h>
 #include <algorithm>
+#include <atomic>
 #include <fcntl.h>
 #include <unistd.h>
 #include <sys/stat.h>
 #include <cstdint>
 #include <cstring>
+#include <mutex>
 #include <string>
 #include <vector>
 
@@ -88,9 +90,12 @@ BENCHMARK_DEFINE_F(EngineFixture, Put)(benchmark::State& state) {
     }
 
     // 预生成 key 池：把 std::string 构造从计时循环里移走。
-    // 迭代数超过 kKeyPoolSize 之后循环复用 key（变成覆盖写），
-    // 对 baseline 用途可以接受。
-    constexpr size_t kKeyPoolSize = 1'000'000;
+    // kKeyPoolSize 故意取小：1 KiB Put 在 Cabe 里仍占满 1 MiB chunk（定长块），
+    // 8 GiB backing file 只能容纳 8192 个 chunk。如果 key 池太大永不循环，
+    // 高 iter 会撑爆磁盘（500K iter × 1 MiB = 500 GiB）。
+    // 用 4096 让 iter 数超过此值后立刻进入"覆盖写 + FreeList 回收"稳态，
+    // 既测到了覆盖写路径，也避免磁盘耗尽。
+    constexpr size_t kKeyPoolSize = 4096;
     std::vector<std::string> keys;
     keys.reserve(kKeyPoolSize);
     for (size_t k = 0; k < kKeyPoolSize; ++k) {

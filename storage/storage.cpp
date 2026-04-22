@@ -5,6 +5,8 @@
  */
 
 #include "storage.h"
+
+#include "common/logger.h"
 #include <cerrno>
 #include <fcntl.h>
 #include <unistd.h>
@@ -17,10 +19,11 @@ namespace {
         const auto* p = static_cast<const char*>(buf);
         size_t done = 0;
         while (done < len) {
-            const ssize_t w = ::pwrite(fd, p + done, len - done,
-                                       offset + static_cast<off_t>(done));
+            const ssize_t w = ::pwrite(fd, p + done, len - done, offset + static_cast<off_t>(done));
             if (w < 0) {
-                if (errno == EINTR) continue;
+                if (errno == EINTR) {
+                    continue;
+                }
                 return -1;
             }
             if (w == 0) {
@@ -39,10 +42,11 @@ namespace {
         auto* p = static_cast<char*>(buf);
         size_t done = 0;
         while (done < len) {
-            const ssize_t r = ::pread(fd, p + done, len - done,
-                                      offset + static_cast<off_t>(done));
+            const ssize_t r = ::pread(fd, p + done, len - done, offset + static_cast<off_t>(done));
             if (r < 0) {
-                if (errno == EINTR) continue;
+                if (errno == EINTR) {
+                    continue;
+                }
                 return -1;
             }
             if (r == 0) {
@@ -59,7 +63,12 @@ namespace {
 
 Storage::~Storage() {
     if (fd_ >= 0) {
-        Close();
+        // 析构无法把错误码 propagate 给调用方；O_DIRECT + O_SYNC 下数据已落盘，
+        // close() 失败极罕见（通常是 EIO / EBADF），但若发生应至少留下诊断日志，
+        // 否则故障会被静默吞掉。需要确认关闭成功的调用方应显式调 Close()。
+        if (const int32_t rc = Close(); rc != SUCCESS) {
+            CABE_LOG_ERROR("Storage::~Storage: Close failed (code=%d)", rc);
+        }
     }
 }
 
@@ -105,7 +114,7 @@ int32_t Storage::Close() {
     return SUCCESS;
 }
 
-int32_t Storage::WriteBlock(const BlockId blockId,const DataView data) const {
+int32_t Storage::WriteBlock(const BlockId blockId, const DataView data) const {
     if (fd_ < 0) {
         return DEVICE_FAILED_TO_OPEN_DEVICE;
     }

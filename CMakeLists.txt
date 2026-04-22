@@ -127,13 +127,22 @@ set(CABE_LIB_SOURCES
         storage/free_list.cpp
         storage/storage.cpp
         engine/engine.cpp
+        engine/engine_api.cpp
         buffer/buffer_pool.cpp
         util/cpu_features.cpp
 )
 
 # 静态库，供 main 和 test 共用
 add_library(cabe_lib STATIC ${CABE_LIB_SOURCES})
-target_include_directories(cabe_lib PUBLIC ${CMAKE_SOURCE_DIR})
+# Pimpl 隔离：
+#   PUBLIC  ${CMAKE_SOURCE_DIR}/include  → 仅暴露 cabe/* 公开头给下游 link
+#   PRIVATE ${CMAKE_SOURCE_DIR}          → 内部头(buffer/, memory/, storage/, engine/)
+#                                          仅 cabe_lib 自身可见，下游绕过 Pimpl 会编译失败
+# cabe_test / cabe_bench 显式声明 PRIVATE 内部头权限，不受影响。
+target_include_directories(cabe_lib
+        PUBLIC  ${CMAKE_SOURCE_DIR}/include
+        PRIVATE ${CMAKE_SOURCE_DIR}
+)
 
 # ============================================================
 # 主可执行文件
@@ -169,12 +178,18 @@ if(CABE_BUILD_TESTS)
             test/engine/engine_test.cpp
             test/util/cpu_features_test.cpp
             test/engine/engine_thread_test.cpp
+            test/engine/engine_api_test.cpp
+            test/engine/cabe_engine_thread_test.cpp
     )
 
     add_executable(cabe_test ${TEST_SOURCES})
     target_link_libraries(cabe_test PRIVATE cabe_lib GTest::gtest_main)
-    target_include_directories(cabe_test PRIVATE ${CMAKE_SOURCE_DIR})
-
+    # cabe_lib 已将 include/ 通过 PUBLIC 暴露，cabe_test 通过 transitive 依赖自动继承；
+    # 此处显式补充保持声明清晰。
+    target_include_directories(cabe_test PRIVATE
+            ${CMAKE_SOURCE_DIR}
+            ${CMAKE_SOURCE_DIR}/include
+    )
     include(GoogleTest)
     gtest_discover_tests(cabe_test)
 endif()
@@ -207,6 +222,7 @@ if(CABE_BUILD_BENCH)
             bench/free_list_bench.cpp
             bench/crc32_bench.cpp
             bench/engine_bench.cpp
+            bench/cabe_engine_bench.cpp
     )
 
     add_executable(cabe_bench ${BENCH_SOURCES})

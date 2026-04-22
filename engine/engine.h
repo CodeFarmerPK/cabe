@@ -16,9 +16,11 @@
 #include "storage/storage.h"
 
 #include <atomic>
+#include <cstddef>
 #include <cstdint>
 #include <shared_mutex>
 #include <string>
+#include <vector>
 
 class Engine {
 public:
@@ -32,9 +34,17 @@ public:
     Engine& operator=(const Engine&) = delete;
     Engine(Engine&&) = delete;
     Engine& operator=(Engine&&) = delete;
-    // 初始化引擎
-    int32_t Open(const std::string& devicePath);
 
+    // bufferPoolCount：BufferPool 中的 1 MiB 对齐缓冲区数量（默认 8）
+    //
+    // 生命周期约束（P3 前）：
+    //   每个 ::Engine 实例的 Open / Close 是 **一次性** 的。Close 后再 Open
+    //   （同实例）不会重置 metaIndex_ / chunkIndex_ / freeList_ / nextChunkId_，
+    //   会导致内存索引与新磁盘内容不一致 → 静默 corruption。
+    //   想"重新打开"必须销毁 Engine 实例后构造新实例。
+    //   cabe::Engine 公开 API 已通过工厂方法 + unique_ptr 强制此约束。
+    //   P4 持久化引入后会重新设计该生命周期。
+    int32_t Open(const std::string& devicePath, uint32_t bufferPoolCount = 8);
     // 关闭引擎
     int32_t Close();
 
@@ -49,6 +59,12 @@ public:
 
     // 读取数据（自动合并多个 chunk）。性能特性同 Put。
     int32_t Get(const std::string& key, DataBuffer buffer, uint64_t* readSize) const;
+
+    // 读取数据到 vector（P2 API 层专用）。
+    // 在单次 shared_lock 内完成：查 MetaIndex → resize vector → 读磁盘 → CRC 校验。
+    // 避免"先查 size 再 Get"两次加锁之间的竞态（TOCTOU）。
+    // 失败时 *out 被清空（clear()），调用方无需额外处理。
+    int32_t GetIntoVector(const std::string& key, std::vector<std::byte>* out) const;
 
     // 删除数据（标记删除）
     int32_t Delete(const std::string& key);
@@ -72,6 +88,14 @@ private:
     // 读操作（Get/Size/IsOpen）持 shared_lock，允许多读并发。
     // P3 引入 io_uring 后，Put 的 I/O 阶段将脱离锁保护，届时锁持有时间大幅缩短。
     // mutable：Get/Size/IsOpen 是 const 方法，但仍需获取 shared_lock。
+    //
+    // TODO(P3 多 NVMe)：当前 mutex_ 同时保护 metaIndex_/chunkIndex_/freeList_/storage_。
+    //   多 NVMe 路线（roadmap）需要：
+    //     1. freeList_ / storage_ 改为 std::vector<FreeList> / std::vector<Storage>，每设备一个
+    //     2. 每个 FreeList / Storage 持自己的 mutex（去除对 Engine mutex 的依赖）
+    //     3. ChunkId → DeviceIndex 的策略层加在 AllocateChunkIds 上
+    //     4. mutex_ 缩小到只保护 metaIndex_ / chunkIndex_
+    //   这样单 NVMe 性能不变，多 NVMe 时各设备的 I/O / FreeList 操作可真并行。
     mutable std::shared_mutex mutex_;
     MetaIndex metaIndex_; // 第一层: key(string) → KeyMeta{firstChunkId, chunkCount}
     ChunkIndex chunkIndex_; // 第二层: chunkId → ChunkMeta (std::map, 有序)

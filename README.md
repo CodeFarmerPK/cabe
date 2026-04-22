@@ -119,12 +119,12 @@ measurement at the module and engine level.
 ## Roadmap
 
 | 阶段 | 主题 | 状态 |
-|---|---|---|
+|---|---|--|
 | P-1 | Fedora 43 开发环境 | ✅ 完成 |
 | P0  | BufferPool（mmap + O_DIRECT 对齐） | ✅ 完成 |
-| P1  | 线程安全（shared_mutex + atomic）+ Google Benchmark 骨架 | 🚧 下一步 |
-| P2  | C API 契约定型 | 计划 |
-| P3  | io_uring 异步 I/O + 异步 API | 计划 |
+| P1  | 线程安全（shared_mutex + atomic）+ Google Benchmark 骨架 | ✅ 完成 |
+| P2  | C API 契约定型 | ✅ 完成 |
+| P3  | io_uring 异步 I/O + 异步 API | 🚧 下一步 |
 | P4  | WAL + 崩溃恢复 | 计划 |
 | P5  | 多线程 reactor 引擎 | 计划 |
 | P6  | 自研 B+ 树 + 细粒度并发 | 计划 |
