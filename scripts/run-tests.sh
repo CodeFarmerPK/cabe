@@ -62,6 +62,22 @@ export TSAN_OPTIONS="${TSAN_OPTIONS:-halt_on_error=1:abort_on_error=1:second_dea
 export ASAN_OPTIONS="${ASAN_OPTIONS:-halt_on_error=1:abort_on_error=1:detect_leaks=1}"
 export UBSAN_OPTIONS="${UBSAN_OPTIONS:-halt_on_error=1:abort_on_error=1:print_stacktrace=1}"
 
-CTEST_ARGS=(--output-on-failure --parallel "$JOBS")
+# ---------- 裸设备依赖提示 ----------
+# Cabe 是裸块设备引擎,Engine 集成测试需要 CABE_TEST_DEVICE 指向真实块设备。
+# 未设置时 Engine* 测试会自动 SKIP,但纯 unit 测试(util / memory / buffer / freelist)
+# 仍会跑。开发期推荐用 scripts/mkloop.sh 创建 loop device。
+if [[ -z "${CABE_TEST_DEVICE:-}" ]]; then
+    echo ""
+    echo "[hint] CABE_TEST_DEVICE not set. Engine integration tests will be SKIPPED."
+    echo "       To enable them:"
+    echo "         sudo ./scripts/mkloop.sh create"
+    echo "         export CABE_TEST_DEVICE=/dev/loopX  # see mkloop output"
+    echo "         ./scripts/run-tests.sh"
+    echo ""
+fi
+
+# 串行执行:同一裸设备不能被多个 Engine test 并发占用(它们都会 Open 同一
+# 设备,nextBlockId_ / FreeList 互相覆盖)。fixture 内的多线程并发不受影响。
+CTEST_ARGS=(--output-on-failure --parallel 1)
 [[ -n "$FILTER" ]] && CTEST_ARGS+=(-R "$FILTER")
 ctest "${CTEST_ARGS[@]}"

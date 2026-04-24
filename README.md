@@ -53,26 +53,44 @@ value 大小在 **1 MiB 附近及以上**的场景。
 ./scripts/setup-dev.sh
 ```
 
-### 2. 构建 + 测试
+### 2. 准备块设备（必需）
+
+Cabe 直接操作裸块设备,**不接受普通文件**作为 backing。Engine 全程不创建、
+不 truncate、不 unlink backing 路径——backing 必须是已存在的块设备节点
+（通过 `S_ISBLK` + `BLKGETSIZE64` 校验）。
+
+生产场景直接用 NVMe / SATA 设备(`/dev/nvme0n1` / `/dev/sda`)。
+开发 / CI 场景用 loop device 替身：
 
 ```bash
-./scripts/run-tests.sh                # Debug，无 sanitizer
+sudo ./scripts/mkloop.sh create      # 默认 512 MiB 于 /var/tmp/cabe_test.img
+export CABE_TEST_DEVICE=/dev/loop0   # 以 mkloop 输出为准
+
+# bench 需要更大空间(覆盖 BM_Engine_Put 16 MiB 的长 iteration):
+# sudo SIZE_MB=16384 ./scripts/mkloop.sh create
+# export CABE_BENCH_DEVICE=/dev/loop0
+```
+
+### 3. 构建 + 测试
+
+```bash
+./scripts/run-tests.sh                # Debug,无 sanitizer
 ./scripts/run-tests.sh --release      # Release
 ./scripts/run-tests.sh --asan         # Debug + AddressSanitizer
 ./scripts/run-tests.sh --tsan         # Debug + ThreadSanitizer
 ./scripts/run-tests.sh --filter 'BufferPool'
 ```
 
-每个 sanitizer 使用独立 build 目录（`build-asan/` `build-tsan/`），切换不触发全量重编。
+每个 sanitizer 使用独立 build 目录(`build-asan/` `build-tsan/`),切换不触发全量重编。
 
-### 3. 使用真实块设备（可选）
+未设置 `CABE_TEST_DEVICE` 时 Engine 集成测试自动 SKIP,纯 unit 测试
+(util / memory / buffer / freelist)仍会跑。Engine 测试串行执行
+(同一裸设备不能被多 test 并发占用)。
 
-集成测试依赖 `O_DIRECT`，tmpfs / overlayfs 不支持。创建 loop device：
+### 4. 用完清理 loop device
+
 
 ```bash
-sudo ./scripts/mkloop.sh create      # 默认 512 MiB 于 /var/tmp/cabe_test.img
-export CABE_TEST_DEVICE=/dev/loop0   # （以 mkloop 输出为准）
-./scripts/run-tests.sh
 sudo ./scripts/mkloop.sh cleanup
 ```
 
@@ -86,7 +104,7 @@ cabe/
 ├── util/         CRC32、时间戳
 ├── buffer/       BufferPool —— mmap + O_DIRECT 对齐缓冲
 ├── memory/       MetaIndex（key→meta）+ ChunkIndex（chunkId→meta）
-├── storage/      FreeList（块分配）+ Storage（O_DIRECT pread/pwrite）
+├── storage/      FreeList(块分配 + 设备容量上限)+ Storage(O_DIRECT pread/pwrite + S_ISBLK 校验)
 ├── engine/       Engine —— 顶层门面：Open/Put/Get/Delete/Remove/Close
 ├── test/         gtest 套件（与模块布局对称）
 └── scripts/      开发环境脚本
@@ -123,7 +141,7 @@ measurement at the module and engine level.
 | P-1 | Fedora 43 开发环境 | ✅ 完成 |
 | P0  | BufferPool（mmap + O_DIRECT 对齐） | ✅ 完成 |
 | P1  | 线程安全（shared_mutex + atomic）+ Google Benchmark 骨架 | ✅ 完成 |
-| P2  | C API 契约定型 | ✅ 完成 |
+| P2  | C++ API 契约定型(Pimpl + Status)+ 裸设备语义重构 | ✅ 完成 |
 | P3  | io_uring 异步 I/O + 异步 API | 🚧 下一步 |
 | P4  | WAL + 崩溃恢复 | 计划 |
 | P5  | 多线程 reactor 引擎 | 计划 |

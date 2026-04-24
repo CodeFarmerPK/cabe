@@ -7,13 +7,20 @@
  *
  * 职责：
  *   1. 类型适配：string_view / span<const byte> → string / DataView（内部类型）
- *   2. 文件管理：处理 create_if_missing / error_if_exists 语义（基于 POSIX stat）
- *   3. 错误翻译：int32_t 内部错误码 → cabe::Status（调用方可感知的语义分类）
- *   4. 错误日志：翻译前按严重程度记录内部码（内部码不泄漏给调用方）
+ *   2. 错误翻译:int32_t 内部错误码 → cabe::Status(调用方可感知的语义分类)
+ *   3. 错误日志:翻译前按严重程度记录内部码(内部码不泄漏给调用方)
+ *
+ * 裸设备语义:
+ *   早期版本曾在 Open 中通过 ::stat + ::open(O_CREAT|O_TRUNC) + ::ftruncate
+ *   做"文件不存在则创建"的语义,失败时还会 ::unlink 路径——这些操作对
+ *   裸块设备节点都是危险或无意义的(unlink 删除 udev 节点;O_TRUNC 在
+ *   部分内核路径上会清前缀)。本文件已删除全部文件创建/截断/删除路径,
+ *   严格执行"backing 必须是已存在的块设备节点"语义,backing 生命周期
+ *   由调用方(sysadmin / scripts/mkloop.sh)管理。
  *
  * 边界原则：
- *   - 内部错误码（CHUNK_NOT_FOUND、FREE_LIST_DOUBLE_RELEASE 等）止步于 TranslateStatus
- *   - 公开 Status 的消息字符串面向调用方，不含内部实现细节
+ *   - 内部错误码(CHUNK_NOT_FOUND、FREE_LIST_DOUBLE_RELEASE 等)止步于 TranslateStatus
+ *   - 公开 Status 的消息字符串面向调用方,不含内部实现细节
  */
 
 #include "cabe/engine.h"
@@ -21,9 +28,6 @@
 #include "common/logger.h"
 #include "common/structs.h"
 #include "engine/engine.h"
-#include <fcntl.h>
-#include <sys/stat.h>
-#include <unistd.h>
 
 namespace cabe {
 
@@ -75,13 +79,19 @@ namespace cabe {
         case POOL_ALREADY_INITIALIZED:
             return Status::InvalidArgument();
 
-        // 磁盘 I/O 失败
+        // 设备 I/O 失败
         case DEVICE_FAILED_TO_OPEN_DEVICE:
         case DEVICE_FAILED_TO_CLOSE_DEVICE:
         case DEVICE_FAILED_TO_SEEK_OFFSET:
         case DEVICE_FAILED_TO_WRITE_DATA:
         case DEVICE_FAILED_TO_READ_DATA:
+        case DEVICE_QUERY_FAILED: // fstat / ioctl(BLKGETSIZE64) 失败
             return Status::IOError();
+
+        // 调用方传错了设备路径(裸设备语义校验失败)
+        case DEVICE_NOT_BLOCK_DEVICE: // 不是块设备节点
+        case DEVICE_TOO_SMALL: // 设备容量 < 1 chunk
+            return Status::InvalidArgument();
 
         // 数据损坏 / 内部不变式被破坏
         // 注意：CHUNK_RANGE_INVALID 当前路径未使用，但 error_code.h 已 reserve；
@@ -98,9 +108,17 @@ namespace cabe {
         case MEMORY_INSERT_FAIL:
         case POOL_MMAP_FAILED:
         case POOL_EXHAUSTED:
+        case DEVICE_NO_SPACE: // FreeList nextBlockId_ 达设备容量上限,或 Storage 越界写
             return Status::ResourceExhausted();
 
-        // 引擎未初始化等操作前置条件不满足
+        // Engine 状态机违规(不是 I/O 故障):
+        //   ENGINE_NOT_OPEN       — Put/Get/Delete 在未 Open 或已 Close 状态下调用
+        //   ENGINE_ALREADY_OPEN   — Open 时 path / buffer_pool_count 与首次不一致
+        //   ENGINE_INSTANCE_USED  — 此 Engine 实例走过 Open→Close,不允许再 Open
+        //   POOL_NOT_INITIALIZED  — BufferPool 未 Init 就 Acquire/Release
+        case ENGINE_NOT_OPEN:
+        case ENGINE_ALREADY_OPEN:
+        case ENGINE_INSTANCE_USED:
         case POOL_NOT_INITIALIZED:
             return Status::NotSupported();
 
@@ -117,67 +135,33 @@ namespace cabe {
             CABE_LOG_WARN("Engine::Open: result pointer is null");
             return Status::InvalidArgument("result pointer must not be null");
         }
-        if (opts.path.empty()) {
-            CABE_LOG_WARN("Engine::Open: opts.path is empty");
-            return Status::InvalidArgument("Options.path must not be empty");
+        if (opts.device_path.empty()) {
+            CABE_LOG_WARN("Engine::Open: opts.device_path is empty");
+            return Status::InvalidArgument("Options.device_path must not be empty");
         }
         if (opts.buffer_pool_count == 0) {
             CABE_LOG_WARN("Engine::Open: buffer_pool_count is 0");
             return Status::InvalidArgument("Options.buffer_pool_count must be greater than 0");
         }
 
-        // ---- 文件存在性检查 ----
-        struct stat st{};
-        const bool file_exists = (::stat(opts.path.c_str(), &st) == 0);
-
-        if (file_exists && opts.error_if_exists) {
-            CABE_LOG_WARN("Engine::Open: path exists but error_if_exists=true, path=%s", opts.path.c_str());
-            return Status::InvalidArgument("database already exists: " + opts.path);
-        }
-
-        if (!file_exists) {
-            if (!opts.create_if_missing) {
-                CABE_LOG_WARN("Engine::Open: path not found and create_if_missing=false, path=%s", opts.path.c_str());
-                return Status::NotFound("database does not exist: " + opts.path);
-            }
-
-            // ---- 创建文件并预分配空间 ----
-            // Storage::Open 使用 O_RDWR|O_DIRECT|O_SYNC（无 O_CREAT），
-            // 文件创建与预分配在此处通过普通 open/ftruncate 完成，
-            // 不修改 Storage 的职责边界。
-            // 块设备场景：initial_file_size=0 即可跳过 ftruncate。
-            const int fd = ::open(opts.path.c_str(), O_RDWR | O_CREAT | O_TRUNC, 0644);
-            if (fd < 0) {
-                CABE_LOG_ERROR("Engine::Open: failed to create file, path=%s", opts.path.c_str());
-                return Status::IOError("failed to create database file: " + opts.path);
-            }
-            if (opts.initial_file_size > 0) {
-                if (::ftruncate(fd, static_cast<off_t>(opts.initial_file_size)) < 0) {
-                    ::close(fd);
-                    ::unlink(opts.path.c_str());
-                    CABE_LOG_ERROR("Engine::Open: ftruncate failed, path=%s size=%llu", opts.path.c_str(),
-                        static_cast<unsigned long long>(opts.initial_file_size));
-                    return Status::IOError("failed to allocate space for database file: " + opts.path);
-                }
-            }
-            ::close(fd);
-        }
+        // 裸设备语义:Engine 不创建、不 truncate、不 unlink device_path。
+        //   - device_path 必须是已存在的块设备节点(/dev/nvmeXn1, /dev/loopX, ...)
+        //   - 不存在 → ::open(2) 返回 ENOENT → DEVICE_FAILED_TO_OPEN_DEVICE → IOError
+        //   - 不是块设备(普通文件 / 目录 / 字符设备) → S_ISBLK 拒绝 → InvalidArgument
+        //   - 容量过小 → BLKGETSIZE64 < CABE_VALUE_DATA_SIZE → InvalidArgument
+        //   - 内部 Open 失败时无文件系统残留需要清理(从未创建过任何文件)
 
         // ---- 构造并初始化引擎 ----
-        // Engine() 为 private，只有静态成员函数可访问
+        // Engine() 为 private,只有静态成员函数可访问
         auto engine_ptr = std::unique_ptr<Engine>(new Engine());
         engine_ptr->impl_ = std::make_unique<Impl>();
 
-        const int32_t rc = engine_ptr->impl_->engine.Open(opts.path, opts.buffer_pool_count);
+        const int32_t rc = engine_ptr->impl_->engine.Open(opts.device_path, opts.buffer_pool_count);
         if (rc != SUCCESS) {
-            CABE_LOG_ERROR("Engine::Open: internal Open failed with code %d, path=%s", rc, opts.path.c_str());
-            // 若本次 Open 创建了新文件（!file_exists），内部初始化失败后需清理，
-            // 避免留下半初始化的空文件让下次 create_if_missing=false 误判为已存在。
-            // 配合 ::Engine::Open 已在 devicePath_ 赋值失败时返回 MEMORY_INSERT_FAIL，
-            // 共同确保 Open 失败 → 磁盘干净。
-            if (!file_exists) {
-                ::unlink(opts.path.c_str());
-            }
+            CABE_LOG_ERROR("Engine::Open: internal Open failed with code %d, device_path=%s",
+                rc, opts.device_path.c_str());
+            // 不做磁盘清理:裸设备语义下 Engine 从未在该路径上创建任何东西,
+            // 失败时 backing 设备状态保持调用前不变,无副作用。
             return TranslateStatus(rc);
         }
 

@@ -143,14 +143,19 @@ if [[ -r "/sys/devices/system/cpu/cpu${CPU_PIN}/cpufreq/scaling_governor" ]]; th
     fi
 fi
 
-# ---------- 启动前清理上一轮可能崩溃残留的稀疏文件 ----------
-# Engine bench fixture 在 /var/tmp 下创建 8 GiB sparse 文件；
-# bench 崩溃后不会进入 TearDown，文件会残留。这里兜底清理。
-shopt -s nullglob
-for stale in /var/tmp/cabe_bench_*.dat; do
-    rm -f "$stale"
-done
-shopt -u nullglob
+# ---------- 裸设备依赖提示 ----------
+# Cabe 是裸块设备引擎,Engine bench 需要 CABE_BENCH_DEVICE 指向真实块设备。
+# 未设置时 Engine bench 会自动 SkipWithError,但 micro bench(crc32 / freelist /
+# meta_index / chunk_index / buffer_pool)仍会正常跑。
+if [[ -z "${CABE_BENCH_DEVICE:-}" ]]; then
+    echo ""
+    echo "[hint] CABE_BENCH_DEVICE not set. Engine end-to-end bench will be SKIPPED."
+    echo "       To enable them (recommend >= 16 GiB device for full BM_Engine_Put coverage):"
+    echo "         sudo SIZE_MB=16384 ./scripts/mkloop.sh create"
+    echo "         export CABE_BENCH_DEVICE=/dev/loopX  # see mkloop output"
+    echo "         ./scripts/run-bench.sh"
+    echo ""
+fi
 
 # ---------- run with CPU pinning ----------
 echo "=== Running on CPU $CPU_PIN ==="

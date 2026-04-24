@@ -20,20 +20,40 @@ Engine::~Engine() {
 
 int32_t Engine::Open(const std::string& devicePath, const uint32_t bufferPoolCount) {
     std::unique_lock lock(mutex_);
+    // 拒绝"Close 后在同实例上再 Open":metaIndex / chunkIndex / freeList /
+    // nextChunkId 不会被 Close 重置,复用实例会让内存索引和新设备内容错位
+    // (静默 corruption)。调用方必须销毁此实例构造新实例。
+    // 本守卫必须在 isOpen_ 分支**之前**,否则 Close 后 isOpen_=false 会直接
+    // 跳过幂等分支进入 fresh open 路径,守卫就形同虚设 —— 这正是之前 linter
+    // 把本守卫删掉后 OpenAfterCloseRejected 测试失败的根因。请勿删除。
+    if (usedOnce_) {
+        return ENGINE_INSTANCE_USED;
+    }
+
     if (isOpen_) {
-        // 同路径再次 Open → 幂等返回 SUCCESS
-        // 不同路径再次 Open → 拒绝，避免静默忽略导致用户以为切换成功
-        // 想真正切换路径必须先 Close()
-        if (devicePath == devicePath_) {
+        // 幂等分支:path 和 bufferPoolCount 都一致才算"同一次 Open 的重复调用"。
+        // 任一不同都拒绝——静默忽略新参数(尤其是 pool size)会让调用方误以为
+        // 自己扩/缩了 buffer pool,实际仍是首次 Open 时的尺寸。
+        if (devicePath == devicePath_ && bufferPoolCount == bufferPoolCount_) {
             return SUCCESS;
         }
-        return DEVICE_FAILED_TO_OPEN_DEVICE;
+        return ENGINE_ALREADY_OPEN;
     }
 
     const int32_t ret = storage_.Open(devicePath);
     if (ret != SUCCESS) {
         return ret;
     }
+
+    // --- 配置 FreeList block 数量上限(裸设备语义关键步骤) ---
+    //
+    // Storage::Open 已经在内部完成"字节 → block 数"翻译:用 ioctl(BLKGETSIZE64)
+    // 取设备字节数,向下取整除以 CABE_VALUE_DATA_SIZE,把结果作为 blockCount_
+    // 保存。此处直接拿 BlockCount() 即可,不需要再做 / CABE_VALUE_DATA_SIZE 算式。
+    //
+    // BlockCount() 由 Storage 保证 >= 1(否则 Open 阶段就返回 DEVICE_TOO_SMALL),
+    // 所以这里不再需要 == 0 的兜底判断。
+    freeList_.SetMaxBlockCount(storage_.BlockCount());
 
     // 初始化缓冲池：预分配 bufferPoolCount 个 1 MiB 对齐缓冲区
     const int32_t poolRet = bufferPool_.Init(CABE_VALUE_DATA_SIZE, bufferPoolCount);
@@ -43,12 +63,13 @@ int32_t Engine::Open(const std::string& devicePath, const uint32_t bufferPoolCou
         return poolRet;
     }
 
-    // string 赋值在 OOM 下可能抛 bad_alloc（短路径走 SSO 不抛，长路径触发堆分配）。
-    // 必须包 try/catch：
-    //   1. ::Engine::Open 的契约是返回 int32_t 错误码，不能让异常穿透到 cabe::Engine::Open
-    //   2. 若异常穿透：cabe::Engine::Open 的 `if (rc != SUCCESS) ::unlink(...)` 清理路径
-    //      根本到不了，磁盘上残留新建的空文件 → 下次 create_if_missing=false 误判
-    //   3. Storage::Open 已对同类 devicePath_ 赋值做了同样防护，此处补齐对称性
+    // string 赋值在 OOM 下可能抛 bad_alloc(短路径走 SSO 不抛,长路径触发堆分配)。
+    // 必须包 try/catch:
+    //   1. ::Engine::Open 的契约是返回 int32_t 错误码,不能让异常穿透到 cabe::Engine::Open
+    //   2. 异常穿透会破坏 storage_ / bufferPool_ 已成功初始化的资源:fd 不会被关、
+    //      mmap 不会被 munmap → 资源泄漏(裸设备语义下 Engine 不再负责 backing 路径
+    //      的清理,但 Engine 自身资源仍需 RAII 反向回滚)
+    //   3. Storage::Open 已对同类 devicePath_ 赋值做了同样防护,此处补齐对称性
     try {
         devicePath_ = devicePath;
     } catch (...) {
@@ -56,6 +77,7 @@ int32_t Engine::Open(const std::string& devicePath, const uint32_t bufferPoolCou
         storage_.Close();
         return MEMORY_INSERT_FAIL;
     }
+    bufferPoolCount_ = bufferPoolCount;
     isOpen_ = true;
     return SUCCESS;
 }
@@ -76,7 +98,12 @@ int32_t Engine::Close() {
     const int32_t storageRc = storage_.Close();
 
     devicePath_.clear();
+    bufferPoolCount_ = 0;
     isOpen_ = false;
+    // 标记此实例已走过一次 Open→Close,Open 检测到 usedOnce_ 即拒绝。
+    // 即使 storage_.Close 失败(极罕见 EIO),此实例也不可复用 —— 避免半 closed
+    // 状态的 Engine 被重开引入脏索引。
+    usedOnce_ = true;
     // 把 storage 的真实失败码透传给调用方
     return storageRc;
 }
@@ -93,7 +120,7 @@ int32_t Engine::Close() {
 int32_t Engine::Put(const std::string& key, const DataView data) {
     std::unique_lock lock(mutex_);
     if (!isOpen_) {
-        return DEVICE_FAILED_TO_OPEN_DEVICE;
+        return ENGINE_NOT_OPEN;
     }
     if (key.empty()) {
         return CABE_EMPTY_KEY;
@@ -270,7 +297,7 @@ int32_t Engine::Get(const std::string& key, DataBuffer buffer, uint64_t* readSiz
     *readSize = 0;
     std::shared_lock lock(mutex_);
     if (!isOpen_) {
-        return DEVICE_FAILED_TO_OPEN_DEVICE;
+        return ENGINE_NOT_OPEN;
     }
     if (key.empty()) {
         return CABE_EMPTY_KEY;
@@ -356,7 +383,7 @@ int32_t Engine::GetIntoVector(const std::string& key, std::vector<std::byte>* ou
     out->clear();
     std::shared_lock lock(mutex_);
     if (!isOpen_) {
-        return DEVICE_FAILED_TO_OPEN_DEVICE;
+        return ENGINE_NOT_OPEN;
     }
     if (key.empty()) {
         return CABE_EMPTY_KEY;
@@ -422,7 +449,7 @@ int32_t Engine::GetIntoVector(const std::string& key, std::vector<std::byte>* ou
 int32_t Engine::Delete(const std::string& key) {
     std::unique_lock lock(mutex_);
     if (!isOpen_) {
-        return DEVICE_FAILED_TO_OPEN_DEVICE;
+        return ENGINE_NOT_OPEN;
     }
 
     if (key.empty()) {
@@ -455,7 +482,7 @@ int32_t Engine::Delete(const std::string& key) {
 int32_t Engine::Remove(const std::string& key) {
     std::unique_lock lock(mutex_);
     if (!isOpen_) {
-        return DEVICE_FAILED_TO_OPEN_DEVICE;
+        return ENGINE_NOT_OPEN;
     }
 
     if (key.empty()) {

@@ -7,8 +7,11 @@
 #include "chunk_index.h"
 
 int32_t ChunkIndex::Put(const ChunkId chunkId, const ChunkMeta& meta) {
+    // insert_or_assign 避免 operator[] 的 "先默认构造再赋值" 两步。
+    // ChunkMeta 是 trivial,性能差异可忽略;主要是语义更清晰,也少一次
+    // 中间的默认构造对象存在于 map 里的中间态。
     try {
-        chunkMap_[chunkId] = meta;
+        chunkMap_.insert_or_assign(chunkId, meta);
     } catch (...) {
         return MEMORY_INSERT_FAIL;
     }

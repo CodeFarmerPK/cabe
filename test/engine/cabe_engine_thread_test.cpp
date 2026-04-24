@@ -29,29 +29,19 @@
 #include "common/structs.h"
 
 #include <atomic>
+#include <cstdlib>
 #include <cstring>
-#include <fcntl.h>
 #include <latch>
 #include <thread>
-#include <unistd.h>
 #include <vector>
 
 namespace {
 
-bool SupportsDirectIO(const char* path) {
-    int fd = ::open(path, O_RDWR | O_CREAT | O_TRUNC, 0644);
-    if (fd < 0) return false;
-    if (::ftruncate(fd, 256 * 1024 * 1024) < 0) {
-        ::close(fd);
-        ::unlink(path);
-        return false;
-    }
-    ::close(fd);
-    fd = ::open(path, O_RDWR | O_DIRECT | O_SYNC);
-    ::unlink(path);
-    if (fd < 0) return false;
-    ::close(fd);
-    return true;
+    // 裸设备语义:读 CABE_TEST_DEVICE 环境变量。空字符串视作未设置。
+    std::string GetTestDevice() {
+        const char* env = std::getenv("CABE_TEST_DEVICE");
+        if (env == nullptr || *env == '\0') return {};
+        return env;
 }
 
 class CabeEngineThreadTest : public ::testing::Test {
@@ -60,19 +50,15 @@ protected:
     std::string                   devicePath_;
 
     void SetUp() override {
-        const auto* info = ::testing::UnitTest::GetInstance()->current_test_info();
-        devicePath_ = std::string("/var/tmp/cabe_api_thread_")
-                    + info->test_suite_name() + "_" + info->name()
-                    + "_" + std::to_string(::getpid()) + ".dat";
-
-        if (!SupportsDirectIO(devicePath_.c_str())) {
-            GTEST_SKIP() << "O_DIRECT not supported at " << devicePath_;
+        devicePath_ = GetTestDevice();
+        if (devicePath_.empty()) {
+            GTEST_SKIP() << "CABE_TEST_DEVICE not set; "
+                            "use scripts/mkloop.sh to create a loop device "
+                            "and `export CABE_TEST_DEVICE=/dev/loopX`";
         }
         cabe::Options opts;
-        opts.path              = devicePath_;
-        opts.create_if_missing = true;
+        opts.device_path       = devicePath_;
         opts.buffer_pool_count = 8;
-        opts.initial_file_size = 256ULL * 1024 * 1024;
         ASSERT_TRUE(cabe::Engine::Open(opts, &engine_).ok());
     }
 
@@ -81,7 +67,7 @@ protected:
             (void) engine_->Close();
             engine_.reset();
         }
-        ::unlink(devicePath_.c_str());
+        // 不 unlink:裸设备节点由 sysadmin / mkloop.sh 管理
     }
 
     static std::vector<std::byte> MakeBytes(size_t n, uint8_t fill) {

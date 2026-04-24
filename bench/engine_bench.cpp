@@ -1,13 +1,21 @@
 /*
  * Project: Cabe
- * Engine end-to-end benchmark.
+ * Engine end-to-end benchmark(裸设备语义)。
  *
  * Exercises the full Put/Get path including BufferPool, CRC32C,
  * O_DIRECT pwrite/pread, FreeList, and both index layers.
  *
- * Each benchmark uses its own backing file (sparse-allocated 8 GiB
- * on /var/tmp) to avoid cross-benchmark contamination and to have
- * headroom for long iteration runs.
+ * 裸设备依赖:Cabe 直接操作裸块设备,bench 通过 CABE_BENCH_DEVICE 环境变量
+ * 指定 backing。建议用足够大的设备(>= 16 GiB)以便 BM_Engine_Put 16 MiB
+ * 长迭代不耗尽空间——FreeList 复用路径在覆盖写到达 keyPool 上限后才会激活。
+ *
+ *   sudo CABE_BENCH_DEVICE=/dev/loop0 ./scripts/run-bench.sh
+ *
+ * 未设置时所有 bench 自动 SkipWithError。
+ *
+ * 注意:所有 bench 共享同一设备(只有一个真实 backing)。每个 bench 的
+ * SetUp 都新建 Engine 并 Open,内存索引从空开始,nextBlockId_ 从 0 重新
+ * 覆盖写设备,bench 之间不残留逻辑状态。
  */
 #include "engine/engine.h"
 #include "common/structs.h"
@@ -15,68 +23,59 @@
 #include <benchmark/benchmark.h>
 #include <algorithm>
 #include <atomic>
-#include <fcntl.h>
-#include <unistd.h>
-#include <sys/stat.h>
 #include <cstdint>
+#include <cstdio>
+#include <cstdlib>
 #include <cstring>
+#include <memory>
 #include <mutex>
 #include <string>
 #include <vector>
 
 namespace {
 
-constexpr off_t kBackingFileBytes = 8LL * 1024 * 1024 * 1024; // 8 GiB sparse
-
-bool PrepareBackingFile(const std::string& path) {
-    int fd = ::open(path.c_str(), O_RDWR | O_CREAT | O_TRUNC, 0644);
-    if (fd < 0) return false;
-    if (::ftruncate(fd, kBackingFileBytes) < 0) {
-        ::close(fd);
-        ::unlink(path.c_str());
-        return false;
-    }
-    ::close(fd);
-    // Sanity-check O_DIRECT support on the hosting filesystem.
-    fd = ::open(path.c_str(), O_RDWR | O_DIRECT | O_SYNC);
-    if (fd < 0) {
-        ::unlink(path.c_str());
-        return false;
-    }
-    ::close(fd);
-    return true;
+    std::string GetBenchDevice() {
+        const char* env = std::getenv("CABE_BENCH_DEVICE");
+        if (env == nullptr || *env == '\0') return {};
+        return env;
 }
 
 class EngineFixture : public benchmark::Fixture {
 public:
+    // 为什么用 unique_ptr<Engine> 而不是值类型:
+    //   ::Engine 的生命周期契约是 Open/Close **一次性**(Close 后 usedOnce_
+    //   置 true,后续同实例 Open 会返回 ENGINE_INSTANCE_USED)。
+    //   Google Benchmark 在单个 Arg 的一次测量里,会为了校准迭代次数多次
+    //   调用 Fixture::SetUp / TearDown 到同一个 fixture 实例上。若 engine_
+    //   是值成员,第一次 TearDown 的 Close 就让后续所有 SetUp 的 Open 挂掉。
+    //   改用 unique_ptr 后,每次 SetUp 都 make_unique 出一个**全新的** Engine
+    //   实例,usedOnce_ 重新从 false 开始;TearDown 显式 reset 销毁。这和
+    //   cabe_engine_bench.cpp 的 CabeEngineFixture 模式一致。
     void SetUp(benchmark::State& state) override {
-        // 用规范化后的 benchmark 名作为文件唯一化后缀，
-        // 崩溃后残留在 /var/tmp 的文件也能一眼对应回哪次跑的
-        std::string name = state.name();
-        std::replace(name.begin(), name.end(), '/', '_');
-        devicePath_ = "/var/tmp/cabe_bench_" +
-                      std::to_string(::getpid()) + "_" +
-                      name + ".dat";
-
-        if (!PrepareBackingFile(devicePath_)) {
-            state.SkipWithError("backing file prep failed");
+        devicePath_ = GetBenchDevice();
+        if (devicePath_.empty()) {
+            state.SkipWithError("CABE_BENCH_DEVICE not set; "
+                                "use scripts/mkloop.sh and `export CABE_BENCH_DEVICE=/dev/loopX`");
             return;
         }
-        if (engine_.Open(devicePath_) != SUCCESS) {
-            ::unlink(devicePath_.c_str());
-            state.SkipWithError("Engine::Open failed");
-            return;
+        engine_ = std::make_unique<Engine>();
+        if (const int32_t rc = engine_->Open(devicePath_); rc != SUCCESS) {
+            char msg[128];
+            std::snprintf(msg, sizeof(msg), "Engine::Open failed, code=%d path=%s",
+                          rc, devicePath_.c_str());
+            state.SkipWithError(msg);
         }
     }
 
     void TearDown(benchmark::State&) override {
-        if (engine_.IsOpen()) engine_.Close();
-        ::unlink(devicePath_.c_str());
+        if (engine_ && engine_->IsOpen()) engine_->Close();
+        engine_.reset();   // 销毁当前 Engine 实例,下次 SetUp 拿到全新的
+        // 不 unlink:裸设备由调用方管理(/dev/loop0 的生命周期由 mkloop.sh 负责)
     }
 
 protected:
-    Engine      engine_;
-    std::string devicePath_;
+    std::unique_ptr<Engine> engine_;
+    std::string             devicePath_;
 };
 
 // ----------------------------------------------------------------
@@ -102,10 +101,16 @@ BENCHMARK_DEFINE_F(EngineFixture, Put)(benchmark::State& state) {
         keys.push_back("k_" + std::to_string(k));
     }
 
+    // SetUp 失败时 engine_ 可能是 nullptr(CABE_BENCH_DEVICE 未设)或
+    // 非空但未 Open(Open 返错)。Google Benchmark 在 SkipWithError 后仍会
+    // 进到 body,所以 state 循环前先判断,避免解引用空指针。
+    if (!engine_ || !engine_->IsOpen()) {
+        return;
+    }
     size_t i = 0;
     for (auto _ : state) {
-        const int32_t rc = engine_.Put(keys[i++ % kKeyPoolSize],
-                                        {data.data(), data.size()});
+        const int32_t rc = engine_->Put(keys[i++ % kKeyPoolSize],
+                                         {data.data(), data.size()});
         if (rc != SUCCESS) {
             state.SkipWithError("Put returned non-SUCCESS");
             break;
@@ -128,6 +133,11 @@ BENCHMARK_REGISTER_F(EngineFixture, Put)
 constexpr size_t kPreload = 64;
 
 BENCHMARK_DEFINE_F(EngineFixture, Get)(benchmark::State& state) {
+    // SetUp 失败时 engine_ 为 nullptr 或未 Open。preload 在 state 循环之前,
+    // SkipWithError 挡不住 —— 显式判空,直接 return。
+    if (!engine_ || !engine_->IsOpen()) {
+        return;
+    }
     const size_t size = static_cast<size_t>(state.range(0));
     std::vector<char> data(size);
     for (size_t i = 0; i < size; ++i) {
@@ -142,7 +152,7 @@ BENCHMARK_DEFINE_F(EngineFixture, Get)(benchmark::State& state) {
 
     // 预写入（不计时）
     for (size_t k = 0; k < kPreload; ++k) {
-        if (engine_.Put(keys[k], {data.data(), data.size()}) != SUCCESS) {
+        if (engine_->Put(keys[k], {data.data(), data.size()}) != SUCCESS) {
             state.SkipWithError("preload Put failed");
             return;
         }
@@ -152,8 +162,8 @@ BENCHMARK_DEFINE_F(EngineFixture, Get)(benchmark::State& state) {
     uint64_t readSize = 0;
     size_t i = 0;
     for (auto _ : state) {
-        const int32_t rc = engine_.Get(keys[i++ % kPreload],
-                                        {buf.data(), buf.size()}, &readSize);
+        const int32_t rc = engine_->Get(keys[i++ % kPreload],
+                                         {buf.data(), buf.size()}, &readSize);
         benchmark::DoNotOptimize(buf);
         if (rc != SUCCESS) {
             state.SkipWithError("Get returned non-SUCCESS");

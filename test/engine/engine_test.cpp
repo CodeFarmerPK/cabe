@@ -3,38 +3,38 @@
  * Created Time: 2026-04-03
  * Created by: CodeFarmerPK
  *
- * Engine 集成测试
- * 依赖 Storage 的 O_DIRECT，需要在支持 direct IO 的文件系统上运行
- * （ext4, xfs 等；tmpfs 不支持）
- * 不支持时相关测试自动 SKIP
+ * Engine 集成测试(裸设备语义)
+ *
+ * Cabe 是直接操作裸块设备的存储引擎,测试需要一个真实的块设备节点。
+ * 通过环境变量 CABE_TEST_DEVICE 指定:
+ *   export CABE_TEST_DEVICE=/dev/loop0   # 由 scripts/mkloop.sh 创建
+ * 未设置时所有 Engine 测试 SKIP。
+ *
+ * 注意:测试串行执行(ctest --parallel 1)——同一设备不能被多 test 并发占用,
+ * 否则 nextBlockId_ / FreeList 会互相覆盖。fixture 内的多线程并发测试
+ * 不受此限制(在同一 Engine 实例下)。
+ *
+ * 数据隔离:每个 test 的 SetUp 都新建 Engine 并 Open 同一设备,内存
+ * 索引(MetaIndex / ChunkIndex / FreeList)从空开始,nextBlockId_ 从 0
+ * 开始覆盖写之前测试用过的设备区域。每个 test 的 key 互不冲突,
+ * 即使读到旧 block 数据也不会被 metaIndex 找到。
  */
 
 #include <gtest/gtest.h>
 #include "engine/engine.h"
+#include <cstdlib>
 #include <cstring>
-#include <fcntl.h>
-#include <unistd.h>
 #include <vector>
 
-static bool SupportsDirectIO(const char* path) {
-    int fd = ::open(path, O_RDWR | O_CREAT | O_TRUNC, 0644);
-    if (fd < 0) return false;
-
-    // 预分配 64MB 空间
-    if (ftruncate(fd, 64 * 1024 * 1024) < 0) {
-        ::close(fd);
-        ::unlink(path);   // 清理刚 O_CREAT 出来的残留文件
-        return false;
+namespace {
+    // 读取环境变量 CABE_TEST_DEVICE,空字符串视作未设置。
+    std::string GetTestDevice() {
+        const char* env = std::getenv("CABE_TEST_DEVICE");
+        if (env == nullptr || *env == '\0') {
+            return {};
+        }
+        return env;
     }
-    ::close(fd);
-
-    fd = ::open(path, O_RDWR | O_DIRECT | O_SYNC);
-    if (fd < 0) {
-        ::unlink(path);
-        return false;
-    }
-    ::close(fd);
-    return true;
 }
 
 class EngineTest : public ::testing::Test {
@@ -43,17 +43,11 @@ protected:
     std::string devicePath_;
 
     void SetUp() override {
-        // 唯一路径: test_suite + test_name + pid
-        // 防止 ctest -j N 时多个测试并行走同一文件，在 SetUp() 里
-        // 通过 O_TRUNC 互相清零对方的数据
-        const auto* info =
-            ::testing::UnitTest::GetInstance()->current_test_info();
-        devicePath_ = std::string("/var/tmp/cabe_")
-                    + info->test_suite_name() + "_" + info->name()
-                    + "_" + std::to_string(::getpid()) + ".dat";
-
-        if (!SupportsDirectIO(devicePath_.c_str())) {
-            GTEST_SKIP() << "O_DIRECT not supported at " << devicePath_;
+        devicePath_ = GetTestDevice();
+        if (devicePath_.empty()) {
+            GTEST_SKIP() << "CABE_TEST_DEVICE not set; "
+                            "use scripts/mkloop.sh to create a loop device "
+                            "and `export CABE_TEST_DEVICE=/dev/loopX`";
         }
     }
 
@@ -61,7 +55,7 @@ protected:
         if (engine_.IsOpen()) {
             engine_.Close();
         }
-        ::unlink(devicePath_.c_str());
+        // 不 unlink:裸设备节点由 sysadmin / mkloop.sh 管理,Engine 全程无写删权
     }
 
     static std::vector<char> MakeData(size_t size, char fill = 'A') {
@@ -88,15 +82,48 @@ TEST_F(EngineTest, DoubleOpenIdempotent) {
 }
 
 TEST_F(EngineTest, OpenWithDifferentPathRejected) {
-    // 已打开后用不同路径再次 Open 必须被拒绝，避免用户以为路径切换成功
-    // 实际仍指向旧文件造成静默写错盘。想真正切换必须先 Close。
+    // 已打开后用不同路径再次 Open 必须被拒绝,避免用户以为路径切换成功
+    // 实际仍指向旧设备造成静默写错盘。想真正切换必须先 Close。
+    //
+    // 内部 ::Engine::Open 在 isOpen_ 状态下用不同 path 直接返回错误码,
+    // 不会真去 open(2) 第二个路径——所以这里的 "/dev/null" 只是个不同
+    // 字符串,不需要真存在/真是块设备。
     ASSERT_EQ(SUCCESS, engine_.Open(devicePath_.c_str()));
 
-    const std::string otherPath = devicePath_ + ".other";
-    EXPECT_EQ(DEVICE_FAILED_TO_OPEN_DEVICE, engine_.Open(otherPath));
+    const std::string otherPath = "/dev/null";
+    EXPECT_EQ(ENGINE_ALREADY_OPEN, engine_.Open(otherPath));
 
     // Engine 仍以原路径打开
     EXPECT_TRUE(engine_.IsOpen());
+}
+
+// 同 path,不同 buffer_pool_count:幂等分支必须两个参数都一致才算同一次 Open。
+// 不然新 pool 参数会被静默忽略,用户以为调整了并发深度实际没生效。
+TEST_F(EngineTest, OpenSamePathDifferentPoolCountRejected) {
+    ASSERT_EQ(SUCCESS, engine_.Open(devicePath_.c_str(), 8));
+    EXPECT_EQ(ENGINE_ALREADY_OPEN, engine_.Open(devicePath_.c_str(), 16));
+    // 仍以首次配置保持打开
+    EXPECT_TRUE(engine_.IsOpen());
+}
+
+// 同 path + 同 pool:必须幂等 SUCCESS(不能被新加的 ALREADY_OPEN 守卫误伤)
+TEST_F(EngineTest, OpenSamePathSamePoolCountIdempotent) {
+    ASSERT_EQ(SUCCESS, engine_.Open(devicePath_.c_str(), 8));
+    ASSERT_EQ(SUCCESS, engine_.Open(devicePath_.c_str(), 8));
+    EXPECT_TRUE(engine_.IsOpen());
+}
+
+// Close 后在同实例上再 Open 必须被拒绝——内存索引不会被 Close 重置,
+// 复用实例会让 metaIndex 与新设备内容错位,静默 corruption。
+// 想重开必须销毁此实例构造新的(公开 API 通过 unique_ptr 自然满足此约束)。
+TEST_F(EngineTest, OpenAfterCloseRejected) {
+    ASSERT_EQ(SUCCESS, engine_.Open(devicePath_.c_str()));
+    ASSERT_EQ(SUCCESS, engine_.Close());
+    EXPECT_FALSE(engine_.IsOpen());
+
+    EXPECT_EQ(ENGINE_INSTANCE_USED, engine_.Open(devicePath_.c_str()));
+    // 仍然处于 closed 状态(Open 被拒没有副作用)
+    EXPECT_FALSE(engine_.IsOpen());
 }
 
 TEST_F(EngineTest, DoubleCloseIdempotent) {
@@ -208,15 +235,15 @@ TEST_F(EngineTest, GetNullReadSizeFails) {
 
 TEST_F(EngineTest, OperationsBeforeOpenFail) {
     auto data = MakeData(100);
-    EXPECT_EQ(DEVICE_FAILED_TO_OPEN_DEVICE,
+    EXPECT_EQ(ENGINE_NOT_OPEN,
               engine_.Put("key1", {data.data(), data.size()}));
 
     std::vector<char> buf(CABE_VALUE_DATA_SIZE);
     uint64_t readSize = 0;
-    EXPECT_EQ(DEVICE_FAILED_TO_OPEN_DEVICE,
+    EXPECT_EQ(ENGINE_NOT_OPEN,
               engine_.Get("key1", {buf.data(), buf.size()}, &readSize));
-    EXPECT_EQ(DEVICE_FAILED_TO_OPEN_DEVICE, engine_.Delete("key1"));
-    EXPECT_EQ(DEVICE_FAILED_TO_OPEN_DEVICE, engine_.Remove("key1"));
+    EXPECT_EQ(ENGINE_NOT_OPEN, engine_.Delete("key1"));
+    EXPECT_EQ(ENGINE_NOT_OPEN, engine_.Remove("key1"));
 }
 
 // ============================================================
@@ -294,12 +321,10 @@ TEST_F(EngineTest, RemoveMultiChunkFile) {
     EXPECT_EQ(0u, engine_.Size());
 }
 
-// Put 同一 key 两次：覆盖写应当回收旧 chunks/blocks，否则反复 Put
-// 会线性泄漏磁盘空间。
-// 测试方式：64 MiB 设备文件，反复 Put 同一 1 MiB key 100 次。如果旧
-// blocks 不被回收，第 65 次起 nextBlockId 超过 64 MiB 范围，pwrite
-// 会写到文件末尾外（虽然 ext4/btrfs 会扩展文件，但 chunk 数会单调
-// 增长）。补强校验：Get 出来的内容必须是最后一次 Put 的内容。
+// Put 同一 key 两次:覆盖写应当回收旧 chunks/blocks,否则反复 Put
+// 会线性泄漏设备空间。裸设备上 FreeList 有硬上限,不像 regular file
+// 那样会被 ext4/btrfs 自动扩展——泄漏立即触发 DEVICE_NO_SPACE。
+// 补强校验:Get 出来的内容必须是最后一次 Put 的内容。
 TEST_F(EngineTest, PutOverwriteSameKeyRecyclesOldChunks) {
     ASSERT_EQ(SUCCESS, engine_.Open(devicePath_.c_str()));
 
@@ -322,9 +347,10 @@ TEST_F(EngineTest, PutOverwriteSameKeyRecyclesOldChunks) {
     EXPECT_EQ(valueSize, readSize);
     EXPECT_EQ(0, std::memcmp(second.data(), buf.data(), valueSize));
 
-    // 反复覆盖 50 次 1 MiB，总占用应当稳定在 ~1 MiB
-    // （如果泄漏，每次 +1 MiB，50 次后 50 MiB，逼近 64 MiB 设备上限
-    // 但还能跑；放更大轮次会失败）
+    // 反复覆盖 50 次 1 MiB,若 FreeList 正确回收旧 block,nextBlockId_
+    // 不会增长,总占用稳定在 ~1 MiB。若泄漏,裸设备达到容量上限后
+    // Allocate 会直接返回 DEVICE_NO_SPACE,Put 失败——无 ext4/btrfs
+    // 自扩展兜底,泄漏立即可见。
     for (int i = 0; i < 50; ++i) {
         auto data = MakeData(valueSize, static_cast<char>('A' + (i % 26)));
         ASSERT_EQ(SUCCESS, engine_.Put("k", {data.data(), data.size()}))

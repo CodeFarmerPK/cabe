@@ -21,44 +21,35 @@
 #include <algorithm>
 #include <cstddef>
 #include <cstdint>
-#include <fcntl.h>
+#include <cstdio>
+#include <cstdlib>
 #include <string>
-#include <sys/stat.h>
-#include <unistd.h>
 #include <vector>
 
 namespace {
 
-constexpr uint64_t kBackingFileBytes = 8ULL * 1024 * 1024 * 1024; // 8 GiB
-constexpr size_t   kKeyPoolSize      = 4096;                       // 同 engine_bench：避免磁盘耗尽
-constexpr size_t   kPreloadKeys      = 256;                        // 并发 bench 共享 key 池
+// 裸设备 bench:同 engine_bench,需要 CABE_BENCH_DEVICE 环境变量
+constexpr size_t kKeyPoolSize = 4096;
+constexpr size_t kPreloadKeys = 256;
 
-bool SupportsDirectIO(const std::string& path) {
-    int fd = ::open(path.c_str(), O_RDWR | O_CREAT | O_TRUNC, 0644);
-    if (fd < 0) return false;
-    if (::ftruncate(fd, static_cast<off_t>(kBackingFileBytes)) < 0) {
-        ::close(fd);
-        ::unlink(path.c_str());
-        return false;
-    }
-    ::close(fd);
-    fd = ::open(path.c_str(), O_RDWR | O_DIRECT | O_SYNC);
-    if (fd < 0) {
-        ::unlink(path.c_str());
-        return false;
-    }
-    ::close(fd);
-    ::unlink(path.c_str()); // cabe::Engine::Open 会重新创建
-    return true;
+// 并发 bench 的 BufferPool 容量 = 2 × ThreadRange 上限。
+// 当前 BM_CabeEngine_ConcurrentGet 用 ThreadRange(1, 16),上限 16 线程,
+// pool 取 32 给足 headroom —— 避免 16 个线程同时 Acquire 时后半部分撞上
+// POOL_EXHAUSTED 把 bench 打死(BufferPool::Acquire 目前是非阻塞语义)。
+// 如果未来 ThreadRange 扩到 32 线程,记得同步更新此常量。
+constexpr uint32_t kConcurrentPoolSize = 32;
+
+
+std::string GetBenchDevice() {
+    const char* env = std::getenv("CABE_BENCH_DEVICE");
+    if (env == nullptr || *env == '\0') return {};
+    return env;
 }
 
-cabe::Options DefaultOptions(const std::string& path) {
+    cabe::Options DefaultOptions(const std::string& devicePath) {
     cabe::Options opts;
-    opts.path              = path;
-    opts.create_if_missing = true;
-    opts.error_if_exists   = false;
+    opts.device_path       = devicePath;
     opts.buffer_pool_count = 8;
-    opts.initial_file_size = kBackingFileBytes;
     return opts;
 }
 
@@ -71,25 +62,23 @@ std::vector<std::byte> MakeBytes(size_t n, uint8_t seed = 0x41) {
 }
 
 // ----------------------------------------------------------------
-// Fixture：每个 benchmark 用独立 backing file 与 cabe::Engine 实例
+// Fixture:所有 bench 共享 CABE_BENCH_DEVICE 指定的裸设备
 // ----------------------------------------------------------------
 class CabeEngineFixture : public benchmark::Fixture {
 public:
     void SetUp(benchmark::State& state) override {
-        std::string name = state.name();
-        std::replace(name.begin(), name.end(), '/', '_');
-        path_ = "/var/tmp/cabe_api_bench_" +
-                std::to_string(::getpid()) + "_" + name + ".dat";
-
-        if (!SupportsDirectIO(path_)) {
-            state.SkipWithError("O_DIRECT not supported on hosting filesystem");
+        path_ = GetBenchDevice();
+        if (path_.empty()) {
+            state.SkipWithError("CABE_BENCH_DEVICE not set; "
+                                "use scripts/mkloop.sh and `export CABE_BENCH_DEVICE=/dev/loopX`");
             return;
         }
         const cabe::Status s = cabe::Engine::Open(DefaultOptions(path_), &engine_);
         if (!s.ok()) {
-            ::unlink(path_.c_str());
-            state.SkipWithError("cabe::Engine::Open failed");
-            return;
+            char msg[256];
+            std::snprintf(msg, sizeof(msg), "cabe::Engine::Open failed: %s, path=%s",
+                          s.ToString().c_str(), path_.c_str());
+            state.SkipWithError(msg);
         }
     }
 
@@ -98,7 +87,7 @@ public:
             (void) engine_->Close();
             engine_.reset();
         }
-        ::unlink(path_.c_str());
+        // 不 unlink:裸设备由调用方管理
     }
 
 protected:
@@ -142,6 +131,13 @@ BENCHMARK_REGISTER_F(CabeEngineFixture, Put)
 // API_Get: 公开 API 读取（GetIntoVector + clear 契约）开销
 // ----------------------------------------------------------------
 BENCHMARK_DEFINE_F(CabeEngineFixture, Get)(benchmark::State& state) {
+    // SetUp SkipWithError 后 Google Benchmark 会跳过 state 循环体,但
+    // **state 循环之前的预填充代码仍会执行** —— engine_ 仍是 nullptr,
+    // 下面 engine_->Put 会 segfault。显式判空,直接 return。
+    if (!engine_) {
+        return;
+    }
+
     const size_t size  = static_cast<size_t>(state.range(0));
     const auto   value = MakeBytes(size, 0x55);
 
@@ -209,27 +205,38 @@ struct CabeConcurrentSetup {
     std::vector<std::string>      keys;
     std::vector<std::byte>        value;
 
+    // 构造失败(CABE_BENCH_DEVICE 未设置 / Open 失败 / 预填充失败)时
+    // **不** abort,而是把 engine 置空 —— 让 BM_CabeEngine_ConcurrentGet
+    // 在首次访问时自己判空并 SkipWithError,避免 SIGABRT 打断整个 bench 进程。
+    //
+    // pool 容量取 kConcurrentPoolSize(见文件顶部常量定义及注释)。
     CabeConcurrentSetup() {
-        path = "/var/tmp/cabe_api_bench_concurrent_" + std::to_string(::getpid()) + ".dat";
-        if (!SupportsDirectIO(path)) std::abort();
+        path = GetBenchDevice();
+        if (path.empty()) return;
 
-        const cabe::Status s = cabe::Engine::Open(DefaultOptions(path), &engine);
-        if (!s.ok()) {
-            ::unlink(path.c_str());
-            std::abort();
+        cabe::Options opts;
+        opts.device_path       = path;
+        opts.buffer_pool_count = kConcurrentPoolSize;
+
+        if (!cabe::Engine::Open(opts, &engine).ok()) {
+            engine.reset();
+            return;
         }
 
         value = MakeBytes(CABE_VALUE_DATA_SIZE, 0x77);
         keys.reserve(kPreloadKeys);
         for (size_t k = 0; k < kPreloadKeys; ++k) {
             keys.push_back("ck_" + std::to_string(k));
-            if (!engine->Put(keys[k], value).ok()) std::abort();
+            if (!engine->Put(keys[k], value).ok()) {
+                engine.reset();
+                return;
+            }
         }
     }
 
     ~CabeConcurrentSetup() {
         if (engine) (void) engine->Close();
-        ::unlink(path.c_str());
+        // 不 unlink:裸设备由调用方管理
     }
 };
 
@@ -239,7 +246,20 @@ CabeConcurrentSetup& ConcurrentSetup() {
 }
 
 void BM_CabeEngine_ConcurrentGet(benchmark::State& state) {
-    auto&                  s = ConcurrentSetup();
+    auto& s = ConcurrentSetup();
+    // CABE_BENCH_DEVICE 未设置 / setup 失败 → engine 为 nullptr。
+    //
+    // SkipWithError 在 google benchmark 里是 **per-thread** 语义:每个线程
+    // 必须各自调一次,框架不会跨线程传播。如果只让 thread 0 调,其它线程
+    // 既没 iterate 也没 skip,当 thread 数足够多(观察到 threads:16 触发)时
+    // 框架会判定"The benchmark didn't run, nor was it explicitly skipped"。
+    // 让所有线程都调 SkipWithError,框架内部会去重(看到同一条 msg)。
+    if (!s.engine) {
+        state.SkipWithError("CABE_BENCH_DEVICE not set or Engine setup failed; "
+                            "use scripts/mkloop.sh and `export CABE_BENCH_DEVICE=/dev/loopX`");
+        return;
+    }
+
     std::vector<std::byte> out;
     size_t                 i      = static_cast<size_t>(state.thread_index());
     const size_t           stride = static_cast<size_t>(state.threads());

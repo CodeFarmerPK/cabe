@@ -6,17 +6,30 @@
 
 #include "free_list.h"
 
+void FreeList::SetMaxBlockCount(const uint64_t maxBlockCount) {
+    maxBlockCount_ = maxBlockCount;
+}
+
 int32_t FreeList::Allocate(BlockId* blockId) {
     if (blockId == nullptr) {
         return MEMORY_NULL_POINTER_EXCEPTION;
     }
 
+    // 优先走复用路径:freeBlocks_ 里的 blockId 都是已经被 Release 过的,
+    // 不占用"新空间",即使 maxBlockCount_ 已达上限也能分配出去。
     if (!freeBlocks_.empty()) {
         *blockId = freeBlocks_.back();
         freeBlocks_.pop_back();
-    } else {
-        *blockId = nextBlockId_++;
+        return SUCCESS;
     }
+
+    // 走 nextBlockId_++ 路径:检查是否达到设备容量上限。
+    // maxBlockCount_ == 0 表示未配置上限(单元测试路径),跳过校验。
+    if (maxBlockCount_ != 0 && nextBlockId_ >= maxBlockCount_) {
+        return DEVICE_NO_SPACE;
+    }
+    *blockId = nextBlockId_++;
+
 
     return SUCCESS;
 }
@@ -76,4 +89,8 @@ size_t FreeList::FreeCount() const {
 
 BlockId FreeList::NextBlockId() const {
     return nextBlockId_;
+}
+
+uint64_t FreeList::MaxBlockCount() const {
+    return maxBlockCount_;
 }

@@ -26,7 +26,17 @@ public:
     FreeList(FreeList&&) = delete;
     FreeList& operator=(FreeList&&) = delete;
 
-    // 分配一个 block
+    // 配置块数量上限。0 表示无上限(单元测试 fixture 不感知设备容量时使用)。
+    //
+    // Engine::Open 调用本接口,把 Storage::BlockCount() 直接传进来——这是
+    // 裸设备语义下"能写多少 chunk"的硬上限,由 Storage 在 Open 阶段从
+    // ioctl(BLKGETSIZE64) 取字节数后向下取整得到。Allocate 走 nextBlockId_++
+    // 路径前会校验是否越界,越界返回 DEVICE_NO_SPACE。
+    void SetMaxBlockCount(uint64_t maxBlockCount);
+
+    // 分配一个 block。
+    // 优先从 freeBlocks_ 复用;空时走 nextBlockId_++,此时若 maxBlockCount_ 已设定
+    // 且 nextBlockId_ 已达上限,返回 DEVICE_NO_SPACE。
     int32_t Allocate(BlockId* blockId);
 
     // 回收一个 block
@@ -41,8 +51,12 @@ public:
     // 获取下一个 blockId
     BlockId NextBlockId() const;
 
+    // 当前配置的块数量上限。0 = 无上限。
+    uint64_t MaxBlockCount() const;
+
 private:
     BlockId nextBlockId_ = 0;
+    uint64_t maxBlockCount_ = 0; // 0 = 无上限;Engine::Open 设备就绪后写入
 
     std::vector<BlockId> freeBlocks_;
 

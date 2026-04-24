@@ -9,6 +9,9 @@
 #include "common/logger.h"
 #include <cerrno>
 #include <fcntl.h>
+#include <linux/fs.h>   // BLKGETSIZE64
+#include <sys/ioctl.h>
+#include <sys/stat.h>
 #include <unistd.h>
 namespace {
     // pwrite 的 EINTR-safe + 短写入处理：循环直到全部写完或遇到真实错误。
@@ -76,11 +79,60 @@ int32_t Storage::Open(const std::string& devicePath) {
     if (devicePath.empty()) {
         return DEVICE_FAILED_TO_OPEN_DEVICE;
     }
-    // 先 open 验证可用，成功后才更新 devicePath_，
-    // 避免 open 失败时把成员污染成失败的路径名
+
+    // --- S_ISBLK 校验必须前置于 open(O_DIRECT) ---
+    //
+    // Linux 的 do_dentry_open() 在发现 O_DIRECT 但 f_mapping 的 a_ops
+    // 不实现 direct_IO 时,open(2) 阶段直接 return EINVAL。/dev/null、
+    // /dev/zero 这类字符设备的 fops 不实现 direct I/O,若先 open 再 fstat,
+    // 非 block 设备会在 open 阶段被 EINVAL 拒绝,错误码走 IOError 通道,
+    // 调用方永远见不到更准确的 DEVICE_NOT_BLOCK_DEVICE → InvalidArgument。
+    //
+    // 因此先用 ::stat 判文件类型,再 open。::stat 不带 O_DIRECT,对字符设备、
+    // 普通文件、目录都能成功取到 st_mode。
+    //
+    // TOCTOU:stat 和 open 之间有理论上的路径 swap 窗口,但 device_path 是
+    // Cabe 配置层信任的输入,不是 per-request 用户输入,不在威胁模型内。
+    struct stat st{};
+    if (::stat(devicePath.c_str(), &st) < 0) {
+        // 路径不存在(ENOENT) / 权限被拒(EACCES) / 符号链接断链 等
+        // 统一当作"打不开设备" → IOError
+        return DEVICE_FAILED_TO_OPEN_DEVICE;
+    }
+    if (!S_ISBLK(st.st_mode)) {
+        CABE_LOG_WARN("Storage::Open: not a block device, path=%s", devicePath.c_str());
+        return DEVICE_NOT_BLOCK_DEVICE;
+    }
+
+    // 类型校验过了,现在用 O_RDWR|O_DIRECT|O_SYNC 正式打开。
+    // 对合法 block 设备这一步几乎不会失败(权限已在 stat 阶段间接验过);
+    // 若仍失败(EINVAL 来自不支持 O_DIRECT 的块设备,极罕见),按 IOError 返回。
     const int new_fd = ::open(devicePath.c_str(), O_RDWR | O_DIRECT | O_SYNC);
     if (new_fd < 0) {
         return DEVICE_FAILED_TO_OPEN_DEVICE;
+    }
+
+    // --- 取设备字节数,立即向下取整为 block 数 ---
+    //
+    // BLKGETSIZE64 是标准块设备 ioctl,返回 uint64_t 字节数(非扇区数)。
+    // 字节数只在这一处局部使用,立即向下取整为 block 数后丢弃。
+    // 上层(Engine / FreeList / WriteBlock 越界校验)统一只用 block 数,
+    // 不再需要重复 `/ CABE_VALUE_DATA_SIZE` 的算式。
+    //
+    // 向下取整丢弃的尾部不足 1 chunk 的字节是不可寻址区(blockId 永远不会
+    // 指到那里),无副作用。
+    uint64_t devBytes = 0;
+    if (::ioctl(new_fd, BLKGETSIZE64, &devBytes) < 0) {
+        CABE_LOG_ERROR("Storage::Open: BLKGETSIZE64 failed, errno=%d", errno);
+        ::close(new_fd);
+        return DEVICE_QUERY_FAILED;
+    }
+    const uint64_t blockCount = devBytes / CABE_VALUE_DATA_SIZE;
+    if (blockCount == 0) {
+        CABE_LOG_WARN("Storage::Open: device too small, bytes=%llu < chunk=%zu",
+            static_cast<unsigned long long>(devBytes), CABE_VALUE_DATA_SIZE);
+        ::close(new_fd);
+        return DEVICE_TOO_SMALL;
     }
 
     // string copy assignment 可能抛 bad_alloc。如果抛了，new_fd 必须关掉
@@ -93,6 +145,7 @@ int32_t Storage::Open(const std::string& devicePath) {
         return DEVICE_FAILED_TO_OPEN_DEVICE;
     }
     fd_ = new_fd;
+    blockCount_ = blockCount;
     return SUCCESS;
 }
 
@@ -107,6 +160,7 @@ int32_t Storage::Close() {
     const int rc = ::close(fd_);
     fd_ = -1;
     devicePath_.clear();
+    blockCount_ = 0;
     if (rc < 0) {
         return DEVICE_FAILED_TO_CLOSE_DEVICE;
     }
@@ -121,6 +175,13 @@ int32_t Storage::WriteBlock(const BlockId blockId, const DataView data) const {
 
     if (data.size() != CABE_VALUE_DATA_SIZE) {
         return CABE_INVALID_DATA_SIZE;
+    }
+
+    // 越界保护:正常路径上 FreeList 已按 blockCount_ 配置上限,blockId 不会越界。
+    // 这里是最后一道防线,防止 P3+ 异步路径下因 race 或外部污染让越界 blockId
+    // 真的写到设备末尾外(裸设备越界写返回 EIO,但提前拦下能给出更清晰的错误码)。
+    if (blockId >= blockCount_) {
+        return DEVICE_NO_SPACE;
     }
 
     const off_t offset = static_cast<off_t>(blockId) * CABE_VALUE_DATA_SIZE;
@@ -143,6 +204,11 @@ int32_t Storage::ReadBlock(const BlockId blockId, DataBuffer data) const {
         return CABE_INVALID_DATA_SIZE;
     }
 
+    // 越界保护同 WriteBlock。
+    if (blockId >= blockCount_) {
+        return DEVICE_NO_SPACE;
+    }
+
     const off_t offset = static_cast<off_t>(blockId) * CABE_VALUE_DATA_SIZE;
 
     // pread: 原子性地定位并读取，线程安全；EINTR 由 PReadAll 内部重试
@@ -156,4 +222,8 @@ int32_t Storage::ReadBlock(const BlockId blockId, DataBuffer data) const {
 
 bool Storage::IsOpen() const {
     return fd_ >= 0;
+}
+
+uint64_t Storage::BlockCount() const {
+    return blockCount_;
 }

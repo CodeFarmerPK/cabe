@@ -22,9 +22,17 @@ namespace cabe {
     //       C++ API 是产品本身。调用方通过本类读写数据，引擎负责
     //       "数据如何在 NVMe 上高效存储和检索"，其余逻辑由调用方决定。
     //
-    // 基本用法：
+    // 裸设备语义:
+    //   Cabe 直接操作裸块设备(/dev/nvmeXn1, /dev/loopX 等),不支持普通文件
+    //   作为 backing。Engine::Open 会校验 device_path 是已存在的块设备节点,
+    //   否则返回 Status::InvalidArgument。Engine 全程不创建、不 truncate、
+    //   不 unlink backing 路径——backing 的生命周期由调用方(sysadmin /
+    //   scripts/mkloop.sh)管理。
+    //
+    // 基本用法:
     //   cabe::Options opts;
-    //   opts.path = "/var/data/cabe.db";
+    //   opts.device_path = "/dev/nvme0n1";   // 生产:真实 NVMe
+    //   // opts.device_path = "/dev/loop0";  // 开发:scripts/mkloop.sh 创建的 loop
     //   std::unique_ptr<cabe::Engine> db;
     //   cabe::Status s = cabe::Engine::Open(opts, &db);
     //   if (!s.ok()) { /* 处理错误 */ }
@@ -49,23 +57,32 @@ namespace cabe {
     //     长生命周期建议把 Engine 用 std::shared_ptr 持有，所有调用方释放后再析构。
     //
     // 多实例约束（P3 前）：
-    //   - 同一 path 同时只能存在一个 Engine 实例（多进程或同进程多实例）。
-    //   - 当前未实现 LOCK 文件保护，并发 Open 同一 path 会导致互相截断 / 数据损坏。
-    //   - P3 计划引入 LOCK 文件 + flock，届时该约束可放宽为"跨进程互斥"。
+    //   - 同一 device_path 同时只能存在一个 Engine 实例(多进程或同进程多实例)。
+    //   - 当前未实现 LOCK 保护,并发 Open 同一设备会让两个实例的 FreeList /
+    //     MetaIndex 各自独立演化,写入互相覆盖 → 数据损坏。
+    //   - P3 计划引入 flock(LOCK_EX|LOCK_NB) 在 fd 上加文件级锁,届时该约束
+    //     可放宽为"跨进程互斥"(同进程多 Engine 仍由调用方负责)。
     //
     // 隔离原则（Pimpl）：
     //   本头文件不引入任何内部头文件（MetaIndex / ChunkIndex / BufferPool 等），
     //   调用方仅依赖标准库和 cabe/ 公开头文件，内部实现变更不触发调用方重编译。
     class Engine {
     public:
-        // 打开（或创建）数据库。
+        // 打开已存在的块设备,在其上挂起一个 Engine 实例。
         //
         // 成功：*result 获得 Engine 的独占所有权，返回 Status::OK()。
         // 失败：*result 保持不变（通常为 nullptr），返回对应错误：
-        //   - InvalidArgument：result 为 nullptr、opts.path 为空、buffer_pool_count 为 0、
-        //                      error_if_exists=true 且路径已存在
-        //   - NotFound：create_if_missing=false 且路径不存在
-        //   - IOError：文件创建失败、预分配空间失败、内部 Open 失败
+        //   - InvalidArgument：result 为 nullptr、opts.device_path 为空、
+        //                      buffer_pool_count 为 0、device_path 不是块设备、
+        //                      设备容量小于 1 个 chunk
+        //   - IOError       ：open(2) 失败(含 ENOENT 不存在)、
+        //                      ioctl(BLKGETSIZE64) 失败、内部 Open 其他系统错误
+        //   - ResourceExhausted：BufferPool 初始化失败(mmap 不出来)、
+        //                        FreeList 容量不足以分配
+        //
+        // 注意:Open 不会创建、不会 truncate、不会 unlink device_path。
+        //       不存在的设备节点直接被 open(2) 拒绝(IOError);
+        //       想"重新格式化"请用 dd / blkdiscard 在 Engine 之外操作。
         [[nodiscard]] static Status Open(const Options& opts, std::unique_ptr<Engine>* result);
 
         ~Engine();
@@ -84,8 +101,11 @@ namespace cabe {
         //
         // 错误：
         //   - InvalidArgument：key 为空 或 value 为空
-        //   - IOError：磁盘写入失败
-        //   - ResourceExhausted：BufferPool 耗尽或磁盘空间不足
+        //   - IOError：设备写入失败
+        //   - ResourceExhausted：BufferPool 耗尽 或 设备空间不足
+        //                        (FreeList 中的 nextBlockId_ 已达
+        //                         Storage::BlockCount() 上限)
+        //   - NotSupported：Engine 未 Open 或已 Close(调用方时序错误)
         [[nodiscard]] Status Put(const WriteOptions& opts, std::string_view key, std::span<const std::byte> value);
 
         // 便捷重载：使用默认 WriteOptions{}，避免调用方写 `Put({}, key, value)` 的噪音。
@@ -101,7 +121,8 @@ namespace cabe {
         //   - InvalidArgument：key 为空 或 value 为 nullptr
         //   - NotFound：key 不存在或已被 Delete
         //   - Corruption：CRC 校验失败（数据损坏）
-        //   - IOError：磁盘读取失败
+        //   - IOError：设备读取失败
+        //   - NotSupported：Engine 未 Open 或已 Close(调用方时序错误)
         [[nodiscard]] Status Get(const ReadOptions& opts, std::string_view key, std::vector<std::byte>* value);
 
         // 便捷重载：使用默认 ReadOptions{}。
@@ -109,14 +130,16 @@ namespace cabe {
             return Get(ReadOptions{}, key, value);
         }
 
-        // 删除键值对（单次原子操作：逻辑删除 + 物理移除 + 磁盘块回收）。
+        // 删除键值对(单次原子操作:逻辑删除 + 物理移除 + 设备块回收)。
         //
-        // 与 LevelDB 的 Delete 语义对齐：调用方无需感知"逻辑删除"和"物理删除"
-        // 的内部分阶段实现，一次 Delete 调用即完成所有清理。
+        // 与 LevelDB 的 Delete 语义对齐:调用方无需感知"逻辑删除"和"物理删除"
+        // 的内部分阶段实现,一次 Delete 调用即完成所有清理。被回收的设备块
+        // 进入 FreeList,后续 Put 优先复用,无空间泄漏。
         //
         // 错误：
         //   - InvalidArgument：key 为空
         //   - NotFound：key 不存在或已删除
+        //   - NotSupported：Engine 未 Open 或已 Close(调用方时序错误)
         [[nodiscard]] Status Delete(const WriteOptions& opts, std::string_view key);
 
         // 便捷重载：使用默认 WriteOptions{}。
@@ -130,8 +153,9 @@ namespace cabe {
         // 返回 Engine 是否处于可服务状态。
         [[nodiscard]] bool IsOpen() const;
 
-        // 显式关闭：刷新所有内部状态、释放 BufferPool、关闭文件描述符。
-        // 析构函数会自动调用（忽略错误）；需确认关闭成功时请显式调用本方法。
+        // 显式关闭:释放 BufferPool、关闭设备 fd。
+        // 不会修改设备内容(裸设备语义,Engine 只读写不格式化)。
+        // 析构函数会自动调用(忽略错误);需确认关闭成功时请显式调用本方法。
         Status Close();
 
     private:

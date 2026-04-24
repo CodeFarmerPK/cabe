@@ -37,12 +37,19 @@ public:
 
     // bufferPoolCount：BufferPool 中的 1 MiB 对齐缓冲区数量（默认 8）
     //
-    // 生命周期约束（P3 前）：
-    //   每个 ::Engine 实例的 Open / Close 是 **一次性** 的。Close 后再 Open
-    //   （同实例）不会重置 metaIndex_ / chunkIndex_ / freeList_ / nextChunkId_，
-    //   会导致内存索引与新磁盘内容不一致 → 静默 corruption。
-    //   想"重新打开"必须销毁 Engine 实例后构造新实例。
-    //   cabe::Engine 公开 API 已通过工厂方法 + unique_ptr 强制此约束。
+    // 生命周期约束(P3 前,代码层强制):
+    //   1. 同实例 Open(P, N) → Open(P, N) 幂等 SUCCESS(path + pool 都一致)
+    //   2. 同实例 Open(P1, N) → Open(P2, N) 返回 ENGINE_ALREADY_OPEN(path 不同)
+    //      —— 避免用户以为路径切换成功但引擎仍指向旧设备
+    //   3. 同实例 Open(P, N) → Open(P, M) 返回 ENGINE_ALREADY_OPEN(pool 不同)
+    //      —— 避免新 pool 参数被静默忽略
+    //   4. 同实例 Open → Close → Open 返回 ENGINE_INSTANCE_USED
+    //      —— metaIndex_ / chunkIndex_ / freeList_ / nextChunkId_ 不会被 Close
+    //      重置,在同实例上复用会和新设备内容静默 corruption。
+    //      想"重新打开"必须销毁此实例构造新实例。
+    //   cabe::Engine 公开 API 通过工厂方法 + unique_ptr 天然满足约束 4:
+    //   每次 cabe::Engine::Open 都 new 一个新 Engine 实例,老实例在 unique_ptr
+    //   重置时析构。
     //   P4 持久化引入后会重新设计该生命周期。
     int32_t Open(const std::string& devicePath, uint32_t bufferPoolCount = 8);
     // 关闭引擎
@@ -111,9 +118,18 @@ private:
     std::atomic<ChunkId> nextChunkId_{0};
     bool isOpen_ = false;
 
-    // 记录 Open 时使用的路径，用于检测"已打开后用不同路径再次 Open"
+    // 一次性使用标记:Close 成功后置为 true,后续在同实例上再 Open 直接拒绝。
+    // 目的是拦下"Close → Open 同实例"这类静默 corruption 场景(内存索引
+    // 残留与新设备内容不一致)。从未 Open 过的实例此值保持 false。
+    bool usedOnce_ = false;
+
+    // 记录 Open 时使用的路径,用于检测"已打开后用不同路径再次 Open"
     // 这种 silent miss-switch 场景。空字符串 = 未打开。
     std::string devicePath_;
+
+    // 记录 Open 时使用的 bufferPoolCount,检测"同 path 但 pool 参数不同"
+    // 的幂等伪装。0 = 未打开。
+    uint32_t bufferPoolCount_ = 0;
 };
 
 

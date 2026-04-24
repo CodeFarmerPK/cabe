@@ -60,6 +60,8 @@ REQUIRED_PKGS=(
     util-linux          # losetup
     gtest-devel
     gmock-devel
+    liburing
+    liburing-devel
 )
 
 # ---------- future-P 依赖（现在装好，进入 P1~P3 时不卡壳） ----------

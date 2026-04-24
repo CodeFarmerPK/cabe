@@ -6,23 +6,24 @@
  * P2 公开 API 集成测试
  *
  * 覆盖范围：
- *   - Status 类（纯内存，无 I/O）
- *   - cabe::Engine 生命周期（Open / Close / IsOpen）
+ *   - Status 类(纯内存,无 I/O)
+ *   - cabe::Engine 生命周期(Open / Close / IsOpen)
  *   - Put / Get / Delete 的功能语义和错误路径
  *   - 大 value 多 chunk 读写
  *   - Size() 计数语义
  *
- * 依赖：Storage 使用 O_DIRECT，需要在支持 direct I/O 的文件系统上运行
- *       （ext4、xfs 等；tmpfs 不支持）。不支持时 Engine 相关测试自动 SKIP。
+ * 依赖(裸设备语义):
+ *   Cabe 直接操作裸块设备,测试需要环境变量 CABE_TEST_DEVICE 指向一个
+ *   已存在的块设备(典型:/dev/loopX,由 scripts/mkloop.sh 创建)。
+ *   未设置时所有 Engine 相关测试 SKIP,Status 单元测试仍然运行。
  */
 
 #include <gtest/gtest.h>
 #include "cabe/cabe.h"
 #include "common/structs.h"
 
+#include <cstdlib>
 #include <cstring>
-#include <fcntl.h>
-#include <unistd.h>
 #include <vector>
 
 // ============================================================
@@ -89,30 +90,15 @@ TEST(StatusTest, OKToStringIsOK) {
 }
 
 // ============================================================
-// Engine 集成测试 fixture
+// Engine 集成测试 fixture(裸设备语义)
 // ============================================================
 
-// 探测 O_DIRECT 支持：创建临时文件测试，测试后始终删除，不留残留。
-// SupportsDirectIO 结束后文件被 unlink，Engine::Open（create_if_missing=true）
-// 将为每个测试重新创建该文件。
-static bool SupportsDirectIO(const char* path) {
-    const int fd = ::open(path, O_RDWR | O_CREAT | O_TRUNC, 0644);
-    if (fd < 0) return false;
-
-    if (::ftruncate(fd, 64 * 1024 * 1024) < 0) {
-        ::close(fd);
-        ::unlink(path);
-        return false;
+namespace {
+    std::string GetTestDevice() {
+        const char* env = std::getenv("CABE_TEST_DEVICE");
+        if (env == nullptr || *env == '\0') return {};
+        return env;
     }
-    ::close(fd);
-
-    const int fd2 = ::open(path, O_RDWR | O_DIRECT | O_SYNC);
-    ::unlink(path); // 无论成功与否都删除，由 Engine::Open 负责重建
-    if (fd2 < 0) {
-        return false;
-    }
-    ::close(fd2);
-    return true;
 }
 
 class EngineApiTest : public ::testing::Test {
@@ -121,16 +107,12 @@ protected:
     std::string devicePath_;
 
     void SetUp() override {
-        const auto* info =
-            ::testing::UnitTest::GetInstance()->current_test_info();
-        devicePath_ = std::string("/var/tmp/cabe_api_")
-                    + info->test_suite_name() + "_" + info->name()
-                    + "_" + std::to_string(::getpid()) + ".dat";
-
-        if (!SupportsDirectIO(devicePath_.c_str())) {
-            GTEST_SKIP() << "O_DIRECT not supported at " << devicePath_;
+        devicePath_ = GetTestDevice();
+        if (devicePath_.empty()) {
+            GTEST_SKIP() << "CABE_TEST_DEVICE not set; "
+                            "use scripts/mkloop.sh to create a loop device "
+                            "and `export CABE_TEST_DEVICE=/dev/loopX`";
         }
-        // SupportsDirectIO 已删除探测文件；各测试按需调用 OpenDefault() 打开引擎
     }
 
     void TearDown() override {
@@ -138,21 +120,18 @@ protected:
             (void)engine_->Close();
         }
         engine_.reset();
-        ::unlink(devicePath_.c_str());
+        // 不 unlink:裸设备节点由 sysadmin / mkloop.sh 管理
     }
 
-    // 默认 Options：create_if_missing=true，64 MiB 预分配
+    // 默认 Options:device_path 指向 CABE_TEST_DEVICE
     [[nodiscard]] cabe::Options DefaultOptions() const {
         cabe::Options opts;
-        opts.path              = devicePath_;
-        opts.create_if_missing = true;
-        opts.error_if_exists   = false;
+        opts.device_path       = devicePath_;
         opts.buffer_pool_count = 8;
-        opts.initial_file_size = 64ULL * 1024 * 1024;
         return opts;
     }
 
-    // 便捷打开：用默认 Options
+    // 便捷打开:用默认 Options
     [[nodiscard]] cabe::Status OpenDefault() {
         return cabe::Engine::Open(DefaultOptions(), &engine_);
     }
@@ -183,7 +162,7 @@ TEST_F(EngineApiTest, OpenNullResultReturnsInvalidArgument) {
 
 TEST_F(EngineApiTest, OpenEmptyPathReturnsInvalidArgument) {
     cabe::Options opts = DefaultOptions();
-    opts.path = "";
+    opts.device_path = "";
     std::unique_ptr<cabe::Engine> e;
     const cabe::Status s = cabe::Engine::Open(opts, &e);
     EXPECT_TRUE(s.IsInvalidArgument());
@@ -199,28 +178,26 @@ TEST_F(EngineApiTest, OpenZeroBufferPoolCountReturnsInvalidArgument) {
     EXPECT_EQ(e, nullptr);
 }
 
-TEST_F(EngineApiTest, OpenCreateIfMissingFalseFileNotExist) {
-    // 文件不存在且 create_if_missing=false → NotFound
+// 裸设备语义校验:device_path 必须是块设备节点。
+// /dev/null 是字符设备,通过 S_ISBLK 校验时被拒绝(DEVICE_NOT_BLOCK_DEVICE
+// → Status::InvalidArgument)。
+TEST_F(EngineApiTest, OpenNonBlockDeviceReturnsInvalidArgument) {
     cabe::Options opts = DefaultOptions();
-    opts.create_if_missing = false;
-    std::unique_ptr<cabe::Engine> e;
-    const cabe::Status s = cabe::Engine::Open(opts, &e);
-    EXPECT_TRUE(s.IsNotFound()) << s.ToString();
-    EXPECT_EQ(e, nullptr);
-}
-
-TEST_F(EngineApiTest, OpenErrorIfExistsWhenFileAlreadyExists) {
-    // 先创建文件
-    ASSERT_TRUE(OpenDefault().ok());
-    ASSERT_TRUE(engine_->Close().ok());
-    engine_.reset();
-
-    // error_if_exists=true 且文件已存在 → InvalidArgument
-    cabe::Options opts = DefaultOptions();
-    opts.error_if_exists = true;
+    opts.device_path = "/dev/null";
     std::unique_ptr<cabe::Engine> e;
     const cabe::Status s = cabe::Engine::Open(opts, &e);
     EXPECT_TRUE(s.IsInvalidArgument()) << s.ToString();
+    EXPECT_EQ(e, nullptr);
+}
+
+// 裸设备语义校验:不存在的路径 → ::open(2) 返回 ENOENT → IOError。
+// 这里用一个几乎肯定不存在的路径触发该分支。
+TEST_F(EngineApiTest, OpenNonExistentDeviceReturnsIOError) {
+    cabe::Options opts = DefaultOptions();
+    opts.device_path = "/dev/cabe_definitely_not_exist_xyz";
+    std::unique_ptr<cabe::Engine> e;
+    const cabe::Status s = cabe::Engine::Open(opts, &e);
+    EXPECT_TRUE(s.IsIOError()) << s.ToString();
     EXPECT_EQ(e, nullptr);
 }
 
@@ -236,8 +213,8 @@ TEST_F(EngineApiTest, OpenSamePathTwiceIsIdempotent) {
 
 TEST_F(EngineApiTest, DestructorClosesAutomatically) {
     ASSERT_TRUE(OpenDefault().ok());
-    engine_.reset(); // 触发析构，不应 crash
-    // TearDown 会再次 unlink，幂等
+    engine_.reset(); // 触发析构,不应 crash
+    // 裸设备模式下 TearDown 不 unlink,设备节点保留供下个 test 复用
 }
 
 // ============================================================
