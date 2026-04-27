@@ -40,41 +40,35 @@ int32_t Engine::Open(const std::string& devicePath, const uint32_t bufferPoolCou
         return ENGINE_ALREADY_OPEN;
     }
 
-    const int32_t ret = storage_.Open(devicePath);
+    // P3 M3:统一通过 IoBackend.Open 一步完成原 Storage::Open + BufferPool::Init。
+    // io_ 内部按顺序处理:
+    //   stat + S_ISBLK + open(O_DIRECT|O_SYNC) + ioctl(BLKGETSIZE64)
+    //   → mmap pool + freeStack 倒序填充
+    // 任一阶段失败,io_ 内部已自行回滚(close fd / munmap),返回原 DEVICE_*/POOL_*
+    // 错误码,Engine 直接透传即可,不必再做手动清理。
+    const int32_t ret = io_.Open(devicePath, bufferPoolCount);
     if (ret != SUCCESS) {
         return ret;
     }
 
     // --- 配置 FreeList block 数量上限(裸设备语义关键步骤) ---
     //
-    // Storage::Open 已经在内部完成"字节 → block 数"翻译:用 ioctl(BLKGETSIZE64)
-    // 取设备字节数,向下取整除以 CABE_VALUE_DATA_SIZE,把结果作为 blockCount_
-    // 保存。此处直接拿 BlockCount() 即可,不需要再做 / CABE_VALUE_DATA_SIZE 算式。
+    // IoBackend::Open 已经在内部完成"字节 → block 数"翻译(原 Storage 的逻辑迁入),
+    // 此处直接拿 BlockCount() 即可,不需要再做 / CABE_VALUE_DATA_SIZE 算式。
     //
-    // BlockCount() 由 Storage 保证 >= 1(否则 Open 阶段就返回 DEVICE_TOO_SMALL),
+    // BlockCount() 由 IoBackend 保证 >= 1(否则 Open 阶段就返回 DEVICE_TOO_SMALL),
     // 所以这里不再需要 == 0 的兜底判断。
-    freeList_.SetMaxBlockCount(storage_.BlockCount());
+    freeList_.SetMaxBlockCount(io_.BlockCount());
 
-    // 初始化缓冲池：预分配 bufferPoolCount 个 1 MiB 对齐缓冲区
-    const int32_t poolRet = bufferPool_.Init(CABE_VALUE_DATA_SIZE, bufferPoolCount);
-
-    if (poolRet != SUCCESS) {
-        storage_.Close();
-        return poolRet;
-    }
 
     // string 赋值在 OOM 下可能抛 bad_alloc(短路径走 SSO 不抛,长路径触发堆分配)。
     // 必须包 try/catch:
     //   1. ::Engine::Open 的契约是返回 int32_t 错误码,不能让异常穿透到 cabe::Engine::Open
-    //   2. 异常穿透会破坏 storage_ / bufferPool_ 已成功初始化的资源:fd 不会被关、
-    //      mmap 不会被 munmap → 资源泄漏(裸设备语义下 Engine 不再负责 backing 路径
-    //      的清理,但 Engine 自身资源仍需 RAII 反向回滚)
-    //   3. Storage::Open 已对同类 devicePath_ 赋值做了同样防护,此处补齐对称性
+    //   2. 异常穿透会破坏 io_ 已成功初始化的资源(fd / mmap),需要 RAII 反向回滚
     try {
         devicePath_ = devicePath;
     } catch (...) {
-        bufferPool_.Destroy();
-        storage_.Close();
+        io_.Close();    // 一步释放 fd + munmap pool
         return MEMORY_INSERT_FAIL;
     }
     bufferPoolCount_ = bufferPoolCount;
@@ -88,24 +82,22 @@ int32_t Engine::Close() {
         return SUCCESS;
     }
 
-    // 无论各步成功与否，最终都把状态机推回 "closed"。
-    // 否则 storage_.Close 极罕见情况下失败时，Engine 会卡在
-    // "isOpen_=true 但 bufferPool 已 destroy / fd 已 -1" 的半状态，
-    // 用户看 IsOpen() 返回 true 却根本不能用。
-    // bufferPool_.Destroy 和 storage_.Close 都是幂等的，
-    // 双重调用安全。
-    bufferPool_.Destroy();
-    const int32_t storageRc = storage_.Close();
+    // 无论 io_.Close 成功与否，最终都把状态机推回 "closed"。
+    // 否则 close 极罕见失败时，Engine 会卡在 "isOpen_=true 但 io_ 已半释放"
+    // 的中间态，用户看 IsOpen() 返回 true 却根本不能用。
+    // io_.Close 内部对 munmap + close fd 都做了独立处理,部分失败也会
+    // 把成员置零并设 closed_=true,与 Engine 这里的语义一致。
+    const int32_t ioRc = io_.Close();
 
     devicePath_.clear();
     bufferPoolCount_ = 0;
     isOpen_ = false;
     // 标记此实例已走过一次 Open→Close,Open 检测到 usedOnce_ 即拒绝。
-    // 即使 storage_.Close 失败(极罕见 EIO),此实例也不可复用 —— 避免半 closed
+    // 即使 io_.Close 失败(极罕见 EIO),此实例也不可复用 —— 避免半 closed
     // 状态的 Engine 被重开引入脏索引。
     usedOnce_ = true;
-    // 把 storage 的真实失败码透传给调用方
-    return storageRc;
+    // 把 io_ 的真实失败码(底层 close/munmap 失败)透传给调用方
+    return ioRc;
 }
 
 // ============================================================
@@ -169,28 +161,39 @@ int32_t Engine::Put(const std::string& key, const DataView data) {
         }
 
         {
-            // 分配对齐内存，拷贝数据
-            char* alignedBuffer = bufferPool_.Acquire();
-            if (alignedBuffer == nullptr) {
+            // P3 M3:通过 IoBackend 拿一块 1 MiB 对齐缓冲(RAII,作用域结束自动归还)
+            cabe::io::BufferHandle h = io_.AcquireBuffer();
+            if (!h.valid()) {
                 freeList_.Release(blockId);
                 failRet = POOL_EXHAUSTED;
                 goto rollback;
             }
-            std::memcpy(alignedBuffer, data.data() + offset, chunkSize);
+            // 拷贝用户数据到 buffer 头部
+            std::memcpy(h.data(), data.data() + offset, chunkSize);
 
-            // 写入磁盘
-            ret = storage_.WriteBlock(blockId, {alignedBuffer, CABE_VALUE_DATA_SIZE});
+            // Q2 契约:AcquireBuffer 不再 memset(原 BufferPool::Acquire 的清零行为
+            // 已被 P3 M2 的 SyncIoBackend 取消),小 value 分支必须显式补尾零。
+            // 否则 buffer 尾部是上次使用的残留(或全新 mmap 的 zero page,无保证),
+            // 会被 pwrite 写到磁盘 —— 破坏"同输入产同磁盘内容"的契约。
+            // CRC 只覆盖 [0, chunkSize),Get 侧只读 keyMeta.totalSize 字节,
+            // 所以补零不影响读出正确性,但保证磁盘内容确定性。
+            if (chunkSize < CABE_VALUE_DATA_SIZE) {
+                std::memset(h.data() + chunkSize, 0,
+                            CABE_VALUE_DATA_SIZE - chunkSize);
+            }
+
+            // 写入磁盘(同步 pwrite,O_DIRECT|O_SYNC 落盘)
+            ret = io_.WriteBlock(blockId, h);
             if (ret != SUCCESS) {
-                bufferPool_.Release(alignedBuffer);
+                // h 走出作用域 RAII 归还,无需显式 release
                 freeList_.Release(blockId);
                 failRet = ret;
                 goto rollback;
             }
 
-            // CRC 只覆盖有效数据 [0, chunkSize)，不含末 chunk 的 padding zero。
-            // ChunkMeta.crc 的契约：与 Get 侧用同样公式算出的 chunkSize 相匹配
-            const uint32_t crc = cabe::util::CRC32({alignedBuffer, chunkSize});
-            bufferPool_.Release(alignedBuffer);
+            // CRC 只覆盖有效数据 [0, chunkSize),不含末 chunk 的 padding zero。
+            // ChunkMeta.crc 的契约:与 Get 侧用同样公式算出的 chunkSize 相匹配
+            const uint32_t crc = cabe::util::CRC32({h.data(), chunkSize});
 
             // 写入第二层索引
             const ChunkMeta chunkMeta = {.blockId = blockId, .crc = crc, .timestamp = now, .state = DataState::Active};
@@ -200,6 +203,7 @@ int32_t Engine::Put(const std::string& key, const DataView data) {
                 failRet = ret;
                 goto rollback;
             }
+            // h 走出作用域,RAII 归还 buffer 到 io_ 内部 pool
         }
 
         ++writtenCount;
@@ -328,15 +332,16 @@ int32_t Engine::Get(const std::string& key, DataBuffer buffer, uint64_t* readSiz
     for (uint32_t i = 0; i < keyMeta.chunkCount; ++i) {
         const ChunkMeta& meta = chunkMetas[i];
 
-        char* alignedBuffer = bufferPool_.Acquire();
-        if (alignedBuffer == nullptr) {
+        // P3 M3:RAII handle 替代显式 Acquire/Release。各 early-return
+        // 路径下 h 走出作用域自动归还,无需手动 Release。
+        cabe::io::BufferHandle h = io_.AcquireBuffer();
+        if (!h.valid()) {
             return POOL_EXHAUSTED;
         }
 
-        ret = storage_.ReadBlock(meta.blockId, {alignedBuffer, CABE_VALUE_DATA_SIZE});
+        ret = io_.ReadBlock(meta.blockId, h);
         if (ret != SUCCESS) {
-            bufferPool_.Release(alignedBuffer);
-            return ret;
+            return ret;     // h dtor 归还
         }
 
         // CRC 校验
@@ -346,14 +351,13 @@ int32_t Engine::Get(const std::string& key, DataBuffer buffer, uint64_t* readSiz
         const uint64_t chunkSize = std::min(static_cast<uint64_t>(CABE_VALUE_DATA_SIZE), remaining);
 
         // CRC 校验：与 Put 侧契约一致，只覆盖 [0, chunkSize) 的有效数据
-        if (const uint32_t crc = cabe::util::CRC32({alignedBuffer, chunkSize}); crc != meta.crc) {
-            bufferPool_.Release(alignedBuffer);
-            return DATA_CRC_MISMATCH;
+        if (const uint32_t crc = cabe::util::CRC32({h.data(), chunkSize}); crc != meta.crc) {
+            return DATA_CRC_MISMATCH;     // h dtor 归还
         }
 
-        // 拷贝到 buffer
-        std::memcpy(buffer.data() + offset, alignedBuffer, chunkSize);
-        bufferPool_.Release(alignedBuffer);
+        // 拷贝到调用方 buffer
+        std::memcpy(buffer.data() + offset, h.data(), chunkSize);
+        // h 走出循环体,RAII 归还
     }
 
     *readSize = keyMeta.totalSize;
@@ -411,17 +415,17 @@ int32_t Engine::GetIntoVector(const std::string& key, std::vector<std::byte>* ou
     for (uint32_t i = 0; i < keyMeta.chunkCount; ++i) {
         const ChunkMeta& meta = chunkMetas[i];
 
-        char* alignedBuffer = bufferPool_.Acquire();
-        if (alignedBuffer == nullptr) {
+        // P3 M3:RAII handle 替代显式 Acquire/Release。
+        cabe::io::BufferHandle h = io_.AcquireBuffer();
+        if (!h.valid()) {
             out->clear();
             return POOL_EXHAUSTED;
         }
 
-        ret = storage_.ReadBlock(meta.blockId, {alignedBuffer, CABE_VALUE_DATA_SIZE});
+        ret = io_.ReadBlock(meta.blockId, h);
         if (ret != SUCCESS) {
-            bufferPool_.Release(alignedBuffer);
             out->clear();
-            return ret;
+            return ret;     // h dtor 归还
         }
 
         const uint64_t offset = static_cast<uint64_t>(i) * CABE_VALUE_DATA_SIZE;
@@ -429,15 +433,14 @@ int32_t Engine::GetIntoVector(const std::string& key, std::vector<std::byte>* ou
         const uint64_t chunkSize = std::min(static_cast<uint64_t>(CABE_VALUE_DATA_SIZE), remaining);
 
         // CRC 校验：与 Put 侧契约一致，只覆盖 [0, chunkSize) 的有效数据
-        if (const uint32_t crc = cabe::util::CRC32({alignedBuffer, chunkSize}); crc != meta.crc) {
-            bufferPool_.Release(alignedBuffer);
+        if (const uint32_t crc = cabe::util::CRC32({h.data(), chunkSize}); crc != meta.crc) {
             out->clear();
-            return DATA_CRC_MISMATCH;
+            return DATA_CRC_MISMATCH;     // h dtor 归还
         }
 
         // char* → std::byte*：两者均为单字节类型，memcpy 合法无 UB
-        std::memcpy(out->data() + offset, alignedBuffer, chunkSize);
-        bufferPool_.Release(alignedBuffer);
+        std::memcpy(out->data() + offset, h.data(), chunkSize);
+        // h 走出循环体,RAII 归还
     }
 
     return SUCCESS;

@@ -7,13 +7,12 @@
 #ifndef CABE_ENGINE_H
 #define CABE_ENGINE_H
 
-#include "buffer/buffer_pool.h"
 #include "common/error_code.h"
 #include "common/structs.h"
+#include "io/io_backend.h"
 #include "memory/chunk_index.h"
 #include "memory/meta_index.h"
 #include "storage/free_list.h"
-#include "storage/storage.h"
 
 #include <atomic>
 #include <cstddef>
@@ -27,15 +26,15 @@ public:
     Engine() = default;
     ~Engine();
 
-    // Engine 持有 BufferPool / Storage 等独占资源，语义上不允许拷贝或移动
-    // （否则会出现两个 Engine 共享同一 fd / mmap 区的 UB）。
+    // Engine 持有 IoBackend(内部含 fd + mmap pool)等独占资源，语义上不允许
+    // 拷贝或移动（否则会出现两个 Engine 共享同一 fd / mmap 区的 UB）。
     // 显式 = delete 让错误调用在编译期就被发现，而不是传递到成员层面。
     Engine(const Engine&) = delete;
     Engine& operator=(const Engine&) = delete;
     Engine(Engine&&) = delete;
     Engine& operator=(Engine&&) = delete;
 
-    // bufferPoolCount：BufferPool 中的 1 MiB 对齐缓冲区数量（默认 8）
+    // bufferPoolCount：IoBackend 内部 buffer 池中的 1 MiB 对齐缓冲区数量（默认 8）
     //
     // 生命周期约束(P3 前,代码层强制):
     //   1. 同实例 Open(P, N) → Open(P, N) 幂等 SUCCESS(path + pool 都一致)
@@ -93,26 +92,34 @@ private:
     // 粗粒度 RW 锁：保护所有 Engine 状态的组合操作原子性。
     // 写操作（Put/Delete/Remove/Open/Close）持 unique_lock；
     // 读操作（Get/Size/IsOpen）持 shared_lock，允许多读并发。
-    // P3 引入 io_uring 后，Put 的 I/O 阶段将脱离锁保护，届时锁持有时间大幅缩短。
+    // P4 引入 io_uring 后，Put 的 I/O 阶段将脱离锁保护，届时锁持有时间大幅缩短。
     // mutable：Get/Size/IsOpen 是 const 方法，但仍需获取 shared_lock。
     //
-    // TODO(P3 多 NVMe)：当前 mutex_ 同时保护 metaIndex_/chunkIndex_/freeList_/storage_。
+    // TODO(P4+ 多 NVMe)：当前 mutex_ 同时保护 metaIndex_/chunkIndex_/freeList_/io_。
     //   多 NVMe 路线（roadmap）需要：
-    //     1. freeList_ / storage_ 改为 std::vector<FreeList> / std::vector<Storage>，每设备一个
-    //     2. 每个 FreeList / Storage 持自己的 mutex（去除对 Engine mutex 的依赖）
+    //     1. freeList_ / io_ 改为 std::vector<FreeList> / std::vector<cabe::io::IoBackend>，每设备一个
+    //     2. 每个 FreeList / IoBackend 持自己的 mutex（去除对 Engine mutex 的依赖）
     //     3. ChunkId → DeviceIndex 的策略层加在 AllocateChunkIds 上
     //     4. mutex_ 缩小到只保护 metaIndex_ / chunkIndex_
     //   这样单 NVMe 性能不变，多 NVMe 时各设备的 I/O / FreeList 操作可真并行。
     mutable std::shared_mutex mutex_;
     MetaIndex metaIndex_; // 第一层: key(string) → KeyMeta{firstChunkId, chunkCount}
     ChunkIndex chunkIndex_; // 第二层: chunkId → ChunkMeta (std::map, 有序)
-    FreeList freeList_; // 磁盘块分配
-    Storage storage_; // 磁盘 I/O
+    FreeList freeList_; // 磁盘块号分配(裸设备 BlockId 上限)
 
-    // mutable: Get() 是 const 方法，但需要 Acquire/Release 修改池内部状态
-    // 语义正确：Get 不改变引擎的「逻辑状态」，池是内部实现细节
-    // BufferPool 内部持有独立 mutex，不依赖 Engine mutex 保护。
-    mutable BufferPool bufferPool_;
+    // P3 M3 起:io_ 合并了原 Storage + BufferPool 的职责 ——
+    //   - 设备开关 / pread / pwrite(原 Storage)
+    //   - 1 MiB 对齐 buffer 池 LIFO 分配 / 归还(原 BufferPool)
+    //   - BufferHandle PIMPL 让 Engine 不必触碰底层切片或 fd
+    //
+    // mutable: Get() 是 const 方法,但需要 io_.AcquireBuffer 修改 backend 内部
+    // 状态(LIFO 栈 / outstanding_count_)。语义上 Get 不改变引擎的「逻辑状态」,
+    // pool 是 backend 内部实现细节。
+    // IoBackend 内部用 atomic + poolMutex_ 保护并发,不依赖 Engine mutex。
+    //
+    // 编译期 dispatch:CABE_IO_BACKEND_SYNC=1 时 io_ 是 SyncIoBackend;P4 切到
+    // io_uring 后会变为 IoUringIoBackend,Engine 代码无需修改(concept 保证签名一致)。
+    mutable cabe::io::IoBackend io_;
 
     // fetch_add 原子自增，P3 并行写入时无需持 Engine 锁即可分配 chunkId
     std::atomic<ChunkId> nextChunkId_{0};

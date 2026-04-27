@@ -116,12 +116,30 @@ namespace cabe {
         //   ENGINE_ALREADY_OPEN   — Open 时 path / buffer_pool_count 与首次不一致
         //   ENGINE_INSTANCE_USED  — 此 Engine 实例走过 Open→Close,不允许再 Open
         //   POOL_NOT_INITIALIZED  — BufferPool 未 Init 就 Acquire/Release
+        // P3 M3 起 IoBackend 抽象层引入的状态机违规码也归入此分类:
+        //   IO_BACKEND_NOT_OPEN              — backend 未 Open 时调 Read/Write/AcquireBuffer
+        //   IO_BACKEND_ALREADY_OPEN          — 已 Open 实例(或终态实例)上重复 Open
+        //   IO_BACKEND_INVALID_HANDLE        — Read/Write 收到 invalid 或跨 backend 的 handle
+        //   IO_BACKEND_HANDLE_USE_AFTER_CLOSE — handle 在 Close 之后被访问
         case ENGINE_NOT_OPEN:
         case ENGINE_ALREADY_OPEN:
         case ENGINE_INSTANCE_USED:
         case POOL_NOT_INITIALIZED:
+        case IO_BACKEND_NOT_OPEN:
+        case IO_BACKEND_ALREADY_OPEN:
+        case IO_BACKEND_INVALID_HANDLE:
+        case IO_BACKEND_HANDLE_USE_AFTER_CLOSE:
             return Status::NotSupported();
 
+        // P3 M3 起 IoBackend 抽象层引入的 I/O / 资源耗尽码:
+        //   IO_BACKEND_SUBMIT_FAILED  — io_uring submit / SPDK bdev_submit 失败(P4+)
+        //   IO_BACKEND_IO_FAILED      — CQE res<0 / bdev I/O 错误
+        //   IO_BACKEND_POOL_EXHAUSTED — backend 内部 buffer pool 耗尽(等价 POOL_EXHAUSTED)
+        case IO_BACKEND_SUBMIT_FAILED:
+        case IO_BACKEND_IO_FAILED:
+            return Status::IOError();
+        case IO_BACKEND_POOL_EXHAUSTED:
+            return Status::ResourceExhausted();
         default:
             return Status::IOError("unknown internal error");
         }
