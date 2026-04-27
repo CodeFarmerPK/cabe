@@ -130,19 +130,33 @@ set(CABE_LIB_SOURCES
         engine/engine_api.cpp
         buffer/buffer_pool.cpp
         util/cpu_features.cpp
+        # P3 M1: IoBackend 抽象层骨架。M2 起填实 sync 后端,
+        # M5 删除 storage/storage.* 与 buffer/buffer_pool.*。
+        io/buffer_handle.cpp
+        io/backends/sync_io_backend.cpp
 )
 
 # 静态库，供 main 和 test 共用
 add_library(cabe_lib STATIC ${CABE_LIB_SOURCES})
 # Pimpl 隔离：
 #   PUBLIC  ${CMAKE_SOURCE_DIR}/include  → 仅暴露 cabe/* 公开头给下游 link
-#   PRIVATE ${CMAKE_SOURCE_DIR}          → 内部头(buffer/, memory/, storage/, engine/)
+#   PRIVATE ${CMAKE_SOURCE_DIR}          → 内部头(buffer/, memory/, storage/, engine/, io/)
 #                                          仅 cabe_lib 自身可见，下游绕过 Pimpl 会编译失败
 # cabe_test / cabe_bench 显式声明 PRIVATE 内部头权限，不受影响。
 target_include_directories(cabe_lib
         PUBLIC  ${CMAKE_SOURCE_DIR}/include
         PRIVATE ${CMAKE_SOURCE_DIR}
 )
+
+# ============================================================
+# P3 M1: IoBackend 编译期 dispatch 宏(默认选 sync 后端)
+# ============================================================
+# M4 阶段会换成 CABE_IO_BACKEND CMake 缓存变量(取值 sync/io_uring/spdk),
+# 此处先硬编码 sync,确保 M1–M3 期间 io/ 与 io/backends/sync_* 始终激活。
+#
+# PUBLIC:cabe_test / cabe_bench transitive 继承宏。所有 include
+# io/io_backend.h 或 io/buffer_handle.h 的 TU 都看得到 _SYNC=1。
+target_compile_definitions(cabe_lib PUBLIC CABE_IO_BACKEND_SYNC=1)
 
 # ============================================================
 # 主可执行文件
@@ -180,6 +194,8 @@ if(CABE_BUILD_TESTS)
             test/engine/engine_thread_test.cpp
             test/engine/engine_api_test.cpp
             test/engine/cabe_engine_thread_test.cpp
+            # P3 M1: IoBackend 骨架冒烟测试(类型别名 / concept / 默认值 / move 语义)
+            test/io/sync_io_backend_skeleton_test.cpp
     )
 
     add_executable(cabe_test ${TEST_SOURCES})
