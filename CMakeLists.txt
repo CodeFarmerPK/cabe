@@ -196,6 +196,8 @@ if(CABE_BUILD_TESTS)
             test/engine/cabe_engine_thread_test.cpp
             # P3 M1: IoBackend 骨架冒烟测试(类型别名 / concept / 默认值 / move 语义)
             test/io/sync_io_backend_skeleton_test.cpp
+            # P3 M2: IoBackend 契约测试(裸设备依赖,需 CABE_TEST_DEVICE)
+            test/io/io_backend_contract_test.cpp
     )
 
     add_executable(cabe_test ${TEST_SOURCES})

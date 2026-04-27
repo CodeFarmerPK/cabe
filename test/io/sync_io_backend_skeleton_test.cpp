@@ -80,8 +80,12 @@ TEST(SyncIoBackendSkeleton, BufferHandleMoveSemantics) {
 
 TEST(SyncIoBackendSkeleton, CloseWithoutOpenIsSafe) {
     IoBackend backend;
+    // M2 起 Close 在 (opened=false) 状态下幂等 no-op,不进入 terminal:
+    //   - 返回 SUCCESS
+    //   - is_closed() 仍为 false(允许后续 Open,与 Engine usedOnce_ 行为分离)
+    //   - IsOpen 仍为 false
     EXPECT_EQ(backend.Close(), SUCCESS);
-    EXPECT_TRUE(backend.is_closed());
+    EXPECT_FALSE(backend.is_closed());
     EXPECT_FALSE(backend.IsOpen());
 }
 
