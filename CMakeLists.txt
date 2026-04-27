@@ -124,14 +124,12 @@ set(CABE_LIB_SOURCES
         util/crc32.cpp
         memory/meta_index.cpp
         memory/chunk_index.cpp
-        storage/free_list.cpp
-        storage/storage.cpp
+        storage/free_list.cpp                  # 块号分配器(裸设备 BlockId 上限),保留
         engine/engine.cpp
         engine/engine_api.cpp
-        buffer/buffer_pool.cpp
         util/cpu_features.cpp
-        # P3 M1: IoBackend 抽象层骨架。M2 起填实 sync 后端,
-        # M5 删除 storage/storage.* 与 buffer/buffer_pool.*。
+        # P3 M1: IoBackend 抽象层。M2 起填实 sync 后端,
+        # M5 已删除 storage/storage.* 与 buffer/buffer_pool.*(逻辑迁入下面两个文件)。
         io/buffer_handle.cpp
         io/backends/sync_io_backend.cpp
 )
@@ -140,7 +138,7 @@ set(CABE_LIB_SOURCES
 add_library(cabe_lib STATIC ${CABE_LIB_SOURCES})
 # Pimpl 隔离：
 #   PUBLIC  ${CMAKE_SOURCE_DIR}/include  → 仅暴露 cabe/* 公开头给下游 link
-#   PRIVATE ${CMAKE_SOURCE_DIR}          → 内部头(buffer/, memory/, storage/, engine/, io/)
+#   PRIVATE ${CMAKE_SOURCE_DIR}          → 内部头(memory/, storage/, engine/, io/)
 #                                          仅 cabe_lib 自身可见，下游绕过 Pimpl 会编译失败
 # cabe_test / cabe_bench 显式声明 PRIVATE 内部头权限，不受影响。
 target_include_directories(cabe_lib
@@ -219,7 +217,6 @@ if(CABE_BUILD_TESTS)
     set(TEST_SOURCES
             test/memory/meta_index_test.cpp
             test/memory/chunk_index_test.cpp
-            test/buffer/buffer_pool_test.cpp
             test/storage/free_list_test.cpp
             test/util/crc32_test.cpp
             test/engine/engine_test.cpp
@@ -231,6 +228,8 @@ if(CABE_BUILD_TESTS)
             test/io/sync_io_backend_skeleton_test.cpp
             # P3 M2: IoBackend 契约测试(裸设备依赖,需 CABE_TEST_DEVICE)
             test/io/io_backend_contract_test.cpp
+            # M5 已删除 test/buffer/buffer_pool_test.cpp(BufferPool 类已合入 SyncIoBackend);
+            # 等效覆盖现在通过 io_backend_contract_test 的 AcquireBuffer/归还/Q3 池耗尽 cases 完成。
     )
 
     add_executable(cabe_test ${TEST_SOURCES})
@@ -267,13 +266,15 @@ if(CABE_BUILD_BENCH)
     endif()
 
     set(BENCH_SOURCES
-            bench/buffer_pool_bench.cpp
             bench/meta_index_bench.cpp
             bench/chunk_index_bench.cpp
             bench/free_list_bench.cpp
             bench/crc32_bench.cpp
             bench/engine_bench.cpp
             bench/cabe_engine_bench.cpp
+            # M5 已删除 bench/buffer_pool_bench.cpp(BufferPool 类已合入 SyncIoBackend)。
+            # M6/P4 阶段会按需添加 io_backend_bench 衡量 AcquireBuffer 延迟,
+            # 现阶段 engine_bench / cabe_engine_bench 端到端基线已能反映 pool 的影响。
     )
 
     add_executable(cabe_bench ${BENCH_SOURCES})

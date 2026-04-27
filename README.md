@@ -78,7 +78,7 @@ export CABE_TEST_DEVICE=/dev/loop0   # 以 mkloop 输出为准
 ./scripts/run-tests.sh --release      # Release
 ./scripts/run-tests.sh --asan         # Debug + AddressSanitizer
 ./scripts/run-tests.sh --tsan         # Debug + ThreadSanitizer
-./scripts/run-tests.sh --filter 'BufferPool'
+./scripts/run-tests.sh --filter 'IoBackendContract'
 ```
 
 每个 sanitizer 使用独立 build 目录(`build-asan/` `build-tsan/`),切换不触发全量重编。
@@ -102,9 +102,11 @@ sudo ./scripts/mkloop.sh cleanup
 cabe/
 ├── common/       ChunkId / BlockId / KeyMeta / ChunkMeta，错误码
 ├── util/         CRC32、时间戳
-├── buffer/       BufferPool —— mmap + O_DIRECT 对齐缓冲
 ├── memory/       MetaIndex（key→meta）+ ChunkIndex（chunkId→meta）
-├── storage/      FreeList(块分配 + 设备容量上限)+ Storage(O_DIRECT pread/pwrite + S_ISBLK 校验)
+├── storage/      FreeList —— 裸设备 BlockId 上限内的块号分配器
+├── io/           IoBackend 抽象层(编译期 dispatch) + sync 后端
+│                 (P4 加 io_uring 后端,P9 加 SPDK 后端)
+│                 设备 I/O + 1 MiB 对齐 buffer 池(原 storage/Storage 与 buffer/BufferPool 合并而来)
 ├── engine/       Engine —— 顶层门面：Open/Put/Get/Delete/Remove/Close
 ├── test/         gtest 套件（与模块布局对称）
 └── scripts/      开发环境脚本
