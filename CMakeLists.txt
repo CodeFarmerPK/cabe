@@ -149,15 +149,48 @@ target_include_directories(cabe_lib
 )
 
 # ============================================================
-# P3 M1: IoBackend 编译期 dispatch 宏(默认选 sync 后端)
+# P3 M4: IoBackend 编译期 dispatch
 # ============================================================
-# M4 阶段会换成 CABE_IO_BACKEND CMake 缓存变量(取值 sync/io_uring/spdk),
-# 此处先硬编码 sync,确保 M1–M3 期间 io/ 与 io/backends/sync_* 始终激活。
+# CABE_IO_BACKEND 是 CMake 缓存变量,选择编译期激活的 IO 后端。
+# 取值映射到 CABE_IO_BACKEND_* 宏,由 io/io_backend.h 与 io/buffer_handle.cpp 的
+# #if defined() 分支选择对应的 backend 类与 BufferHandleImpl 定义。
+#
+# 用法:
+#   cmake -DCABE_IO_BACKEND=sync       (默认,P3 起可用)
+#   cmake -DCABE_IO_BACKEND=io_uring   (P4 起可用)
+#   cmake -DCABE_IO_BACKEND=spdk       (P9 起可用)
+#
+# 一份源码树支持多 backend 并存(各自独立 build 目录或 CMakePresets.json);
+# scripts/run-tests.sh / run-bench.sh 提供 --backend=BACKEND 便利参数。
 #
 # PUBLIC:cabe_test / cabe_bench transitive 继承宏。所有 include
-# io/io_backend.h 或 io/buffer_handle.h 的 TU 都看得到 _SYNC=1。
-target_compile_definitions(cabe_lib PUBLIC CABE_IO_BACKEND_SYNC=1)
 
+# io/io_backend.h 或 io/buffer_handle.h 的 TU 都能看到对应的 _BACKEND 宏。
+set(CABE_IO_BACKEND "sync" CACHE STRING "IO backend: sync | io_uring | spdk")
+set_property(CACHE CABE_IO_BACKEND PROPERTY STRINGS sync io_uring spdk)
+
+if(CABE_IO_BACKEND STREQUAL "sync")
+    target_compile_definitions(cabe_lib PUBLIC CABE_IO_BACKEND_SYNC=1)
+elseif(CABE_IO_BACKEND STREQUAL "io_uring")
+    # P4 落地后这里会加:
+    #   target_sources(cabe_lib PRIVATE io/backends/io_uring_io_backend.cpp)
+    #   target_link_libraries(cabe_lib PUBLIC uring)
+    # 当前先 FATAL_ERROR,避免用户配置成功但编译失败导致难诊断。
+    target_compile_definitions(cabe_lib PUBLIC CABE_IO_BACKEND_IO_URING=1)
+    message(FATAL_ERROR
+            "CABE_IO_BACKEND=io_uring 还未实现,P4 阶段(项目路线图)落地。"
+            "P3 阶段请使用 CABE_IO_BACKEND=sync(默认值)。")
+elseif(CABE_IO_BACKEND STREQUAL "spdk")
+    target_compile_definitions(cabe_lib PUBLIC CABE_IO_BACKEND_SPDK=1)
+    message(FATAL_ERROR
+            "CABE_IO_BACKEND=spdk 还未实现,P9 阶段(可选,项目路线图)落地。"
+            "P3 阶段请使用 CABE_IO_BACKEND=sync(默认值)。")
+else()
+    message(FATAL_ERROR
+            "Unknown CABE_IO_BACKEND: '${CABE_IO_BACKEND}'。"
+            "有效取值:sync | io_uring | spdk。")
+endif()
+message(STATUS "IoBackend: ${CABE_IO_BACKEND}")
 # ============================================================
 # 主可执行文件
 # ============================================================

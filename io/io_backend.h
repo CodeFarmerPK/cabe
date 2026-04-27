@@ -9,10 +9,14 @@
  * 在编译期通过 CABE_IO_BACKEND_* 宏选定。无虚函数、无 unique_ptr、无
  * runtime if —— 全部 inline 友好。
  *
- * 选择方式(P3 M4 阶段会包成 CMake 缓存变量 CABE_IO_BACKEND):
- *   cmake -DCABE_IO_BACKEND=sync       → CABE_IO_BACKEND_SYNC=1
- *   cmake -DCABE_IO_BACKEND=io_uring   → CABE_IO_BACKEND_IO_URING=1
- *   cmake -DCABE_IO_BACKEND=spdk       → CABE_IO_BACKEND_SPDK=1
+ * 选择方式(P3 M4 起 CMake 缓存变量 CABE_IO_BACKEND 控制):
+ *   cmake -DCABE_IO_BACKEND=sync       → CABE_IO_BACKEND_SYNC=1     (P3 默认)
+ *   cmake -DCABE_IO_BACKEND=io_uring   → CABE_IO_BACKEND_IO_URING=1 (P4 起)
+ *   cmake -DCABE_IO_BACKEND=spdk       → CABE_IO_BACKEND_SPDK=1     (P9 起)
+ * 详见 CMakeLists.txt 的 CABE_IO_BACKEND 缓存变量分支;脚本入口在
+ *   scripts/run-tests.sh --backend=BACKEND
+ *   scripts/run-bench.sh --backend=BACKEND
+ * 也可用 CMakePresets.json 里的 sync-* / io_uring-* 预设(IDE 友好)。
  *
  * 强制接口契约:IoBackendTraits concept + static_assert 编译期校验。
  *   - 任何 backend 漏方法、签名错都立刻编译失败,定位到此处
@@ -40,7 +44,7 @@
   #include "io/backends/spdk_io_backend.h"            // P9 接入
   namespace cabe::io { using IoBackend = SpdkIoBackend; }
 #else
-  #error "No IO backend selected; CMake must pass -DCABE_IO_BACKEND_SYNC=1 (or _IO_URING / _SPDK)"
+  #error "No IO backend selected; pass -DCABE_IO_BACKEND=sync (or io_uring / spdk) to cmake"
 #endif
 
 namespace cabe::io {

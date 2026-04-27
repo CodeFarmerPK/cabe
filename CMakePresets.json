@@ -1,0 +1,115 @@
+{
+  "version": 3,
+  "cmakeMinimumRequired": { "major": 3, "minor": 21, "patch": 0 },
+  "configurePresets": [
+    {
+      "name": "sync-debug",
+      "displayName": "sync backend, Debug",
+      "description": "Default development preset: sync IoBackend + Debug + no sanitizer.",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "CABE_IO_BACKEND": "sync"
+      }
+    },
+    {
+      "name": "sync-release",
+      "displayName": "sync backend, Release",
+      "description": "Performance build for sync backend (used by run-bench.sh implicitly).",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build-release",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "CABE_IO_BACKEND": "sync"
+      }
+    },
+    {
+      "name": "sync-asan",
+      "displayName": "sync backend, Debug + ASAN",
+      "description": "AddressSanitizer build for sync backend.",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build-asan",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "CABE_IO_BACKEND": "sync",
+        "CABE_ENABLE_ASAN": "ON"
+      }
+    },
+    {
+      "name": "sync-tsan",
+      "displayName": "sync backend, Debug + TSAN",
+      "description": "ThreadSanitizer build for sync backend.",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build-tsan",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "CABE_IO_BACKEND": "sync",
+        "CABE_ENABLE_TSAN": "ON"
+      }
+    },
+    {
+      "name": "sync-ubsan",
+      "displayName": "sync backend, Debug + UBSAN",
+      "description": "UndefinedBehaviorSanitizer build for sync backend.",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build-ubsan",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "CABE_IO_BACKEND": "sync",
+        "CABE_ENABLE_UBSAN": "ON"
+      }
+    },
+    {
+      "name": "io_uring-release",
+      "displayName": "io_uring backend, Release (P4+)",
+      "description": "io_uring IoBackend Release build. Currently FATAL_ERROR until P4 implementation lands.",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build-io_uring",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "CABE_IO_BACKEND": "io_uring"
+      }
+    }
+  ],
+  "buildPresets": [
+    { "name": "sync-debug",       "configurePreset": "sync-debug" },
+    { "name": "sync-release",     "configurePreset": "sync-release" },
+    { "name": "sync-asan",        "configurePreset": "sync-asan" },
+    { "name": "sync-tsan",        "configurePreset": "sync-tsan" },
+    { "name": "sync-ubsan",       "configurePreset": "sync-ubsan" },
+    { "name": "io_uring-release", "configurePreset": "io_uring-release" }
+  ],
+  "testPresets": [
+    {
+      "name": "sync-debug",
+      "configurePreset": "sync-debug",
+      "output": { "outputOnFailure": true },
+      "execution": { "jobs": 1 }
+    },
+    {
+      "name": "sync-release",
+      "configurePreset": "sync-release",
+      "output": { "outputOnFailure": true },
+      "execution": { "jobs": 1 }
+    },
+    {
+      "name": "sync-asan",
+      "configurePreset": "sync-asan",
+      "output": { "outputOnFailure": true },
+      "execution": { "jobs": 1 }
+    },
+    {
+      "name": "sync-tsan",
+      "configurePreset": "sync-tsan",
+      "output": { "outputOnFailure": true },
+      "execution": { "jobs": 1 }
+    },
+    {
+      "name": "sync-ubsan",
+      "configurePreset": "sync-ubsan",
+      "output": { "outputOnFailure": true },
+      "execution": { "jobs": 1 }
+    }
+  ]
+}

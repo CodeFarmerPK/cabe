@@ -36,29 +36,43 @@ ARCHIVE_LABEL=""
 CLEAN=false
 CPU_PIN="${CPU_PIN:-0}"
 JOBS="$(nproc)"
-BUILD_DIR="$ROOT/build-bench"
+BACKEND="sync"            # P3 M4: IoBackend 选择,默认 sync
+BACKEND_SUFFIX=""         # 非默认 backend 进 build 目录名
 
 # ---------- arg parsing ----------
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        --filter)  FILTER="$2"; shift ;;
-        --archive) ARCHIVE_LABEL="$2"; shift ;;
-        --clean)   CLEAN=true ;;
-        --cpu)     CPU_PIN="$2"; shift ;;
+        --filter)         FILTER="$2"; shift ;;
+        --archive)        ARCHIVE_LABEL="$2"; shift ;;
+        --clean)          CLEAN=true ;;
+        --cpu)            CPU_PIN="$2"; shift ;;
+        --backend)        BACKEND="$2"; shift ;;
+        --backend=*)      BACKEND="${1#*=}" ;;
         -h|--help)
             cat <<EOF
-Usage: $0 [--filter REGEX] [--archive LABEL] [--clean] [--cpu N]
+Usage: $0 [--filter REGEX] [--archive LABEL] [--clean] [--cpu N] [--backend=BACKEND]
 
-  --filter REGEX    Run only benchmarks matching regex (ctest style)
-  --archive LABEL   Archive results to bench/baselines/LABEL-TIMESTAMP.json
-  --clean           Wipe build-bench/ before configuring
-  --cpu N           Pin to CPU N (default: 0)
+  --filter REGEX     Run only benchmarks matching regex (gbench style)
+  --archive LABEL    Archive results to bench/baselines/LABEL-TIMESTAMP.json
+  --clean            Wipe build-bench[-BACKEND]/ before configuring
+  --cpu N            Pin to CPU N (default: 0)
+  --backend=BACKEND  IoBackend selection: sync (default) | io_uring | spdk
+                     P3 stage only sync is implemented;
+                     io_uring/spdk trigger CMake FATAL_ERROR until P4/P9.
+
+Build directory naming:
+  build-bench               (sync, default backend - suffix omitted)
+  build-bench-io_uring      (non-default backend in name)
 EOF
             exit 0 ;;
         *) echo "Unknown arg: $1" >&2; exit 1 ;;
     esac
     shift
 done
+
+# 非默认 backend 加 build 目录后缀,与 run-tests.sh 命名约定一致
+[[ "$BACKEND" != "sync" ]] && BACKEND_SUFFIX="-${BACKEND}"
+BUILD_DIR="$ROOT/build-bench${BACKEND_SUFFIX}"
 
 # ---------- clean ----------
 if [[ "$CLEAN" == "true" && -d "$BUILD_DIR" ]]; then
@@ -67,9 +81,10 @@ if [[ "$CLEAN" == "true" && -d "$BUILD_DIR" ]]; then
 fi
 
 # ---------- configure (Release, no sanitizers) ----------
-echo "=== Configuring $BUILD_DIR (Release) ==="
+echo "=== Configuring $BUILD_DIR (Release, backend=$BACKEND) ==="
 cmake -S "$ROOT" -B "$BUILD_DIR" -G Ninja \
     -DCMAKE_BUILD_TYPE=Release \
+    -DCABE_IO_BACKEND="$BACKEND" \
     -DCABE_ENABLE_ASAN=OFF \
     -DCABE_ENABLE_TSAN=OFF \
     -DCABE_ENABLE_UBSAN=OFF \

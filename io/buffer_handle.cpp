@@ -7,7 +7,8 @@
  * 成员函数都定义在此处:析构、move、data() / size() / valid()。
  *
  * 编译期校验:CABE_IO_BACKEND_* 宏必须由 CMake 提供;否则 #error。
- * 见 CMakeLists.txt 的 target_compile_definitions(cabe_lib PUBLIC ...)。
+ * 用户侧通过 -DCABE_IO_BACKEND=sync|io_uring|spdk 选,详见 CMakeLists.txt
+ * 的 CABE_IO_BACKEND 缓存变量分支(P3 M4 引入)。
  */
 
 #include "io/buffer_handle.h"
@@ -20,7 +21,7 @@
 #elif defined(CABE_IO_BACKEND_SPDK)
   #include "io/backends/spdk_buffer_handle_impl.h"       // P9 接入
 #else
-  #error "No CABE_IO_BACKEND_* macro defined; CMake must pass -DCABE_IO_BACKEND_SYNC=1 (or _IO_URING / _SPDK)"
+  #error "No CABE_IO_BACKEND_* macro defined; pass -DCABE_IO_BACKEND=sync (or io_uring / spdk) to cmake"
 #endif
 
 namespace cabe::io {

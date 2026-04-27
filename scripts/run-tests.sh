@@ -21,23 +21,43 @@ fi
 BUILD_TYPE="Debug"
 SAN_FLAG=""
 SAN_SUFFIX=""
+BACKEND="sync"           # P3 M4: IoBackend 选择,默认 sync
+BACKEND_SUFFIX=""        # 默认 backend 不进 build 目录名(向后兼容旧 build/ 目录)
 CLEAN=false
 FILTER=""
 JOBS="$(nproc)"
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        --release) BUILD_TYPE="Release" ;;
-        --debug)   BUILD_TYPE="Debug" ;;
-        --asan)    SAN_FLAG="-DCABE_ENABLE_ASAN=ON";  SAN_SUFFIX="-asan" ;;
-        --tsan)    SAN_FLAG="-DCABE_ENABLE_TSAN=ON";  SAN_SUFFIX="-tsan" ;;
-        --ubsan)   SAN_FLAG="-DCABE_ENABLE_UBSAN=ON"; SAN_SUFFIX="-ubsan" ;;
-        --clean)   CLEAN=true ;;
-        --filter)  FILTER="$2"; shift ;;
-        --jobs)    JOBS="$2"; shift ;;
+        --release)        BUILD_TYPE="Release" ;;
+        --debug)          BUILD_TYPE="Debug" ;;
+        --asan)           SAN_FLAG="-DCABE_ENABLE_ASAN=ON";  SAN_SUFFIX="-asan" ;;
+        --tsan)           SAN_FLAG="-DCABE_ENABLE_TSAN=ON";  SAN_SUFFIX="-tsan" ;;
+        --ubsan)          SAN_FLAG="-DCABE_ENABLE_UBSAN=ON"; SAN_SUFFIX="-ubsan" ;;
+        --backend)        BACKEND="$2"; shift ;;
+        --backend=*)      BACKEND="${1#*=}" ;;
+        --clean)          CLEAN=true ;;
+        --filter)         FILTER="$2"; shift ;;
+        --jobs)           JOBS="$2"; shift ;;
         -h|--help)
             cat <<EOF
-Usage: $0 [--release|--debug] [--asan|--tsan|--ubsan] [--clean] [--filter REGEX] [--jobs N]
+Usage: $0 [--release|--debug] [--asan|--tsan|--ubsan] [--backend=BACKEND]
+          [--clean] [--filter REGEX] [--jobs N]
+
+Options:
+  --release|--debug    Build type (default: Debug)
+  --asan|--tsan|--ubsan
+                       Enable specific sanitizer (mutually exclusive)
+  --backend=BACKEND    IoBackend selection: sync (default) | io_uring | spdk
+                       P3 stage only sync is implemented;
+                       io_uring/spdk will trigger CMake FATAL_ERROR until P4/P9.
+  --clean              Remove build directory before configuring
+  --filter REGEX       Run only tests matching POSIX regex
+  --jobs N             Parallel build jobs (default: $(nproc))
+
+Build directory naming:
+  build, build-asan                  (sync, default backend - suffix omitted)
+  build-io_uring, build-io_uring-asan (non-default backend in name)
 EOF
             exit 0 ;;
         *) echo "Unknown arg: $1" >&2; exit 1 ;;
@@ -45,14 +65,21 @@ EOF
     shift
 done
 
-BUILD_DIR="$ROOT/build${SAN_SUFFIX}"
-echo "=== build_type=$BUILD_TYPE san=${SAN_SUFFIX:-none} dir=$BUILD_DIR jobs=$JOBS ==="
+# 非默认 backend 加进 build 目录名,允许多 backend 并存:
+#   build, build-asan       (sync 默认,后缀省略)
+#   build-io_uring          (io_uring 后端)
+#   build-io_uring-asan     (io_uring + ASAN)
+[[ "$BACKEND" != "sync" ]] && BACKEND_SUFFIX="-${BACKEND}"
+
+BUILD_DIR="$ROOT/build${BACKEND_SUFFIX}${SAN_SUFFIX}"
+echo "=== build_type=$BUILD_TYPE backend=$BACKEND san=${SAN_SUFFIX:-none} dir=$BUILD_DIR jobs=$JOBS ==="
 
 [[ "$CLEAN" == "true" && -d "$BUILD_DIR" ]] && { echo ">>> rm -rf $BUILD_DIR"; rm -rf "$BUILD_DIR"; }
 
 # shellcheck disable=SC2086
 cmake -S "$ROOT" -B "$BUILD_DIR" -G Ninja \
     -DCMAKE_BUILD_TYPE="$BUILD_TYPE" \
+    -DCABE_IO_BACKEND="$BACKEND" \
     $SAN_FLAG
 
 cmake --build "$BUILD_DIR" --parallel "$JOBS"
