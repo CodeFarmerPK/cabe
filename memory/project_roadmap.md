@@ -11,14 +11,14 @@ type: project
 - **P1.1** Google Benchmark 骨架 — ✅ 已完成
 - **P1.2** 线程安全（shared_mutex + atomic） — ✅ 已完成
 - **P2** C++ API 契约定型 — ✅ 已完成（cabe::Engine + Status + Options，Pimpl 隔离）
-- **P3** IoBackend 抽象层（编译期 dispatch，仅 sync 后端） — 🚧 下一步
+- **P3** IoBackend 抽象层（编译期 dispatch，仅 sync 后端） — ✅ 已完成
   - M1 `io/` 目录骨架 + PIMPL + concept 强校验
   - M2 SyncIoBackend 填充实现（迁移 `storage/` + `buffer/` 逻辑）
   - M3 Engine 切换到 IoBackend（含 Q2 尾部补 memset）
   - M4 CMake `CABE_IO_BACKEND` 选项 + CMakePresets + `scripts/run-tests.sh --backend=`
   - M5 删除旧 `storage/storage.*` 与 `buffer/buffer_pool.*`
   - M6 文档更新 + bench 基线归档（`p3-post-io-abstraction`）
-- **P4** io_uring 后端 + registered buffer pool（io_uring 接管 BufferPool） — 计划中
+- **P4** io_uring 后端 + registered buffer pool（io_uring 接管 BufferPool） — 🚧 下一步
 - **P5** WAL + 崩溃恢复 — 计划中
 - **P6** 多线程 Reactor 引擎 — 计划中
 - **P7** 自研 B+ 树 + 细粒度并发 — 计划中
@@ -84,12 +84,26 @@ CMake 配置：
 
 - **最终目标**：无锁并发，充分利用多 NVMe + 多核/多 Socket 直至硬件瓶颈
 
-## P3 关键工作项（IoBackend 抽象）
+## P3 实现摘要（IoBackend 抽象）
 
-新 P3 范围：仅做 sync 后端 + 编译期 dispatch 抽象层，**不接入 io_uring**。
-M1–M6 步骤见上方 P3 列表。每步必须 test 全绿才进入下一步；M5 是破坏性
-改动（删除 `storage/` `buffer/` 旧目录），前置条件是 M3 全部 engine_test 通过。
+P3 范围：sync 后端 + 编译期 dispatch 抽象层（不含 io_uring，io_uring 移入 P4）。
+M1–M6 已全部落地：
 
+- **M1** `io/` 骨架（`io_backend.h` / `buffer_handle.{h,cpp}` / `backends/sync_*`）
+    + `IoBackendTraits` concept 强校验 + `BufferHandle` PIMPL
+- **M2** `SyncIoBackend` 真实实现:Open / Close / AcquireBuffer / Read/Write,
+  迁入原 `Storage` + `BufferPool` 逻辑;落地 Q1(RAII)/ Q2(不清零)/ Q3(立刻失败)/ Q7(Debug abort, Release warn)
+- **M3** Engine 改用 `cabe::io::IoBackend io_` 成员;`Engine::Put` 小 value 分支加 Q2 尾部 `memset`;
+  `engine_api.cpp::TranslateStatus` 加 `IO_BACKEND_*` 7 条 case
+- **M4** CMake `CABE_IO_BACKEND` 缓存变量 + 新建 `CMakePresets.json`(6 个 preset)+
+  `scripts/run-tests.sh` / `scripts/run-bench.sh` 加 `--backend=BACKEND`;
+  io_uring/spdk FATAL_ERROR 占位等待 P4/P9
+- **M5** 删除 `storage/storage.{h,cpp}` `buffer/buffer_pool.{h,cpp}` 及对应 test/bench
+- **M6** 文档收尾(进行中:bench 基线 `p3-post-io-abstraction` 待归档,注释里"BufferPool/Storage" 历史措辞清理可推到 P4 启动)
+
+测试:`test/io/sync_io_backend_skeleton_test.cpp`(8 case,无设备依赖)+
+`test/io/io_backend_contract_test.cpp`(18 case,需 `CABE_TEST_DEVICE`);
+现有 engine_test / engine_thread_test / cabe_engine_thread_test 全绿,公开 API 行为零回归。
 ### Q1–Q7 决策（已闭环）
 
 | # | 主题 | 决定 |

@@ -144,8 +144,8 @@ measurement at the module and engine level.
 | P0  | BufferPool（mmap + O_DIRECT 对齐） | ✅ 完成 |
 | P1  | 线程安全（shared_mutex + atomic）+ Google Benchmark 骨架 | ✅ 完成 |
 | P2  | C++ API 契约定型(Pimpl + Status)+ 裸设备语义重构 | ✅ 完成 |
-| P3  | IoBackend 抽象层（编译期 dispatch，仅 sync 后端） | 🚧 下一步 |
-| P4  | io_uring 后端 + registered buffer pool（接管 BufferPool） | 计划 |
+| P3  | IoBackend 抽象层（编译期 dispatch，仅 sync 后端） | ✅ 完成 |
+| P4  | io_uring 后端 + registered buffer pool（接管 BufferPool） | 🚧 下一步 |
 | P5  | WAL + 崩溃恢复 | 计划 |
 | P6  | 多线程 reactor 引擎 | 计划 |
 | P7  | 自研 B+ 树 + 细粒度并发 | 计划 |
