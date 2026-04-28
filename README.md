@@ -145,12 +145,20 @@ measurement at the module and engine level.
 | P1  | 线程安全（shared_mutex + atomic）+ Google Benchmark 骨架 | ✅ 完成 |
 | P2  | C++ API 契约定型(Pimpl + Status)+ 裸设备语义重构 | ✅ 完成 |
 | P3  | IoBackend 抽象层（编译期 dispatch，仅 sync 后端） | ✅ 完成 |
-| P4  | io_uring 后端 + registered buffer pool（接管 BufferPool） | 🚧 下一步 |
+| P4  | io_uring 后端 + registered buffer pool（接管 BufferPool） | 🚧 进行中（[设计稿](doc/p4_io_uring_design.md)） |
 | P5  | WAL + 崩溃恢复 | 计划 |
 | P6  | 多线程 reactor 引擎 | 计划 |
 | P7  | 自研 B+ 树 + 细粒度并发 | 计划 |
 | P8  | scatter-gather 多 chunk 合并 I/O | 计划 |
 | P9  | SPDK 用户态驱动后端（可选） | 不确定 |
+
+---
+
+## Design Documents
+
+详细设计文档位于 `doc/`:
+
+- [P4 io_uring 分阶段实施设计](doc/p4_io_uring_design.md) — 19 项决策(D1–D19)、9 个里程碑(M1–M9)、12 项风险点(R1–R12);v1.0(2026-04-28,讨论稿)
 
 ---
 
