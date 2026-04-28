@@ -3,49 +3,55 @@
  * Created Time: 2026-04-28
  * Created by: CodeFarmerPK
  *
- * IoUringIoBackend —— P4 io_uring 后端实现(M2 阶段)。
+ * IoUringIoBackend —— P4 io_uring 后端实现(M3 阶段)。
  *
- * M2 状态:Open / Close / AcquireBuffer / IsOpen / BlockCount / is_closed /
- *          ReturnBuffer_Internal 全部真实实现;WriteBlock / ReadBlock 仍 stub
- *          (返回 IO_BACKEND_NOT_OPEN),M3 起填实。
+ * M3 状态:Open / Close / AcquireBuffer / IsOpen / BlockCount / is_closed /
+ *          ReturnBuffer_Internal / WriteBlock / ReadBlock 全部真实实现。
+ *          WriteBlock / ReadBlock 走 Model A(粗 io_mutex_ +
+ *          io_uring_prep_write/read 裸指针 + submit_and_wait(1)),
+ *          无 FIXED ops、无 IOSQE_FIXED_FILE、无 user_data 关联。
  *
- * M2 落地的功能:
- *   - Open: open(O_DIRECT|O_SYNC|O_RDWR) + S_ISBLK + BLKGETSIZE64 +
- *           mmap(n × 1 MiB) pool + 切片 freeStack_ + io_uring_queue_init
- *   - Open 失败的完整 rollback:任何步骤失败都精确回滚已分配资源,保证
- *     "失败 → opened_=false 且无资源残留" 的不变式
- *   - Close: closed_=true → drain in-flight CQE → Q7 outstanding 检查
- *           → queue_exit + delete ring_state_ → munmap pool → close fd
- *   - AcquireBuffer: LIFO 弹 slot + 构造 BufferHandleImpl(填 fixed_buf_index_)
- *                   + outstanding_count_++
- *   - ReturnBuffer_Internal: closed_ fast-path + double-release 检测 +
- *                           outstanding_count_--
+ * M3 落地的功能(M2 基础上新增):
+ *   - WriteBlock: 入口校验(opened/closed/handle.valid/size/pool 范围/blockId 范围)
+ *               → io_mutex_ 临界区(锁内 recheck closed_)
+ *               → io_uring_get_sqe → io_uring_prep_write(裸指针 + 裸 fd)
+ *               → in_flight_count_++ → io_uring_submit_and_wait(1)
+ *                 (-EAGAIN 退避一次重试)
+ *               → io_uring_peek_cqe → 读 cqe.res → io_uring_cqe_seen
+ *               → in_flight_count_--
+ *   - ReadBlock: 对称 WriteBlock,prep_read 替代 prep_write
+ *   - 错误映射(设计文档 §10):
+ *       submit_and_wait 仍 < 0          → IO_BACKEND_SUBMIT_FAILED
+ *       cqe.res < 0                     → IO_BACKEND_IO_FAILED
+ *       cqe.res != CABE_VALUE_DATA_SIZE → IO_BACKEND_IO_FAILED(短读短写)
  *
- * M2 不做的(留给后续 milestone,详见 doc/p4_io_uring_design.md §13):
- *   M3: WriteBlock / ReadBlock 真实实现(Model A,prep_write/read,无 FIXED)
+ * M3 不做的(留给后续 milestone,详见 doc/p4_io_uring_design.md §13):
  *   M4: io_uring_register_buffers + WRITE_FIXED / READ_FIXED + fixed_buf_index_ 真用
  *   M5: io_uring_register_files + IOSQE_FIXED_FILE
  *   M6: io_uring_specific_test + Options.io_uring_sq_depth + 部署文档
- *   M7: WriteBlocks / ReadBlocks 批量 API
+ *   M7: WriteBlocks / ReadBlocks 批量 API + Engine 多 chunk 路径接入
  *
  * 与 sync 后端的实现对齐(`io/backends/sync_io_backend.cpp`):
  *   - 状态机:终态 Close,Close-before-Open 幂等 no-op
  *   - Q1 RAII 归还 / Q2 不清零 / Q3 池耗尽返回 invalid / Q7 outstanding 检查
- *   - 错误码翻译:DEVICE_* / POOL_* 在 backend 层暴露;抽象层契约见 IO_BACKEND_*
+ *   - 入口校验路径返回相同的 DEVICE_NO_SPACE / IO_BACKEND_INVALID_HANDLE 等;
+ *     io_uring 特有的 submit / cqe 错误用 IO_BACKEND_SUBMIT_FAILED / IO_FAILED
+ *     (sync 在底层用 pwrite,失败用 DEVICE_FAILED_TO_WRITE_DATA;两者经
+ *      TranslateStatus 统一映射到 cabe::Status::IOError)
  *   - 参考 memory/project_roadmap.md Q1-Q7 决策
  *
- * io_uring 特有项(M2 阶段):
- *   - SQ depth 固定为 64(M6 起从 Options.io_uring_sq_depth 取);M2 不会
- *     submit 任何 op,depth 数值不影响功能正确性
+ * io_uring 特有项(M3 阶段):
+ *   - SQ depth 仍固定 64(M6 起从 Options.io_uring_sq_depth 取);M3 一次只发
+ *     1 个 op,depth 数值不影响功能正确性
  *   - PIMPL RingState 隐藏 liburing 类型,公开头零依赖 liburing.h
- *   - drain 循环 D17 不带超时(健壮运行环境假设);M2 阶段 in_flight_count_
- *     永远 0,循环逻辑写出来给 M3+ 自动生效
- *   - io_mutex_ 临界区覆盖 drain + queue_exit + delete ring_state_,
- *     防止 M3+ WriteBlock 等锁期间 ring_state_ 被 destroy 导致 UAF
- *     (M3 必须配套:WriteBlock / ReadBlock 在 io_mutex_ 内 recheck closed_
- *      或 ring_state_ != nullptr)
+ *   - Model A:io_mutex_ 全程持锁。WriteBlock / ReadBlock 入口先 fast-path 检查
+ *     closed_,锁内 recheck closed_ 再访问 ring_state_,防止与 Close 的 race
+ *     UAF(Close 拿 io_mutex_ 后会 destroy ring_state_)
+ *   - drain 循环 D17 不带超时(健壮运行环境假设);M3 阶段 in_flight_count_ 在
+ *     WriteBlock / ReadBlock 退出 io_mutex_ 临界区前必归 0,Close drain 仍是
+ *     no-op,M8 Model B 才会真正利用 drain 循环
  *
- * 详细设计:doc/p4_io_uring_design.md §6、§9
+ * 详细设计:doc/p4_io_uring_design.md §6、§8、§9、§10
  */
 
 #include "io/backends/io_uring_io_backend.h"
@@ -429,24 +435,176 @@ BufferHandle IoUringIoBackend::AcquireBuffer() {
     return BufferHandle{std::move(impl)};
 }
 
-int32_t IoUringIoBackend::WriteBlock(BlockId, const BufferHandle&) {
-    // M2 stub:Open 已可成功,但 I/O 路径未实现。M3 起真实实现:
-    //   1. 检查 closed_ / handle.valid / blockId 范围
-    //   2. lock(io_mutex_); recheck closed_ / ring_state_ != nullptr; in_flight++
-    //   3. sqe = io_uring_get_sqe(&ring_state_->ring)
-    //   4. M3:io_uring_prep_write(sqe, fd_, ptr, size, offset);
-    //      M4:io_uring_prep_write_fixed(sqe, fd_idx, ptr, size, offset, fixed_buf_idx)
-    //      M5:sqe->flags |= IOSQE_FIXED_FILE; sqe->fd = 0
-    //   5. io_uring_submit_and_wait(&ring_state_->ring, 1)
-    //   6. cqe = io_uring_peek_cqe(...); 读 cqe->res; io_uring_cqe_seen(...)
-    //   7. in_flight--; 错误映射(SUBMIT_FAILED / IO_FAILED / 短读短写)
-    return IO_BACKEND_NOT_OPEN;
+int32_t IoUringIoBackend::WriteBlock(const BlockId blockId,
+                                      const BufferHandle& handle) {
+    // ---- 入口校验(无需 io_mutex_,字段在 opened_ 之后到 Close 前不变)----
+    if (!opened_ || closed_.load(std::memory_order_acquire)) {
+        return IO_BACKEND_NOT_OPEN;
+    }
+    if (!handle.valid()) {
+        return IO_BACKEND_INVALID_HANDLE;
+    }
+    if (handle.size() != CABE_VALUE_DATA_SIZE) {
+        return CABE_INVALID_DATA_SIZE;
+    }
+
+    // 验证 handle 来自本实例的 pool(防跨实例 / 跨 backend 误用)。
+    // 不持 poolMutex_:poolBase_ / poolTotalSize_ 在 opened_ 之后到 Close 之前
+    // 都不变,且本路径的 opened_ 检查已通过,这里读是安全的。
+    const char* const dataPtr = handle.data();
+    if (dataPtr < poolBase_ || dataPtr >= poolBase_ + poolTotalSize_) {
+        return IO_BACKEND_INVALID_HANDLE;
+    }
+
+    // 越界保护:正常路径上 FreeList(在 Engine 层)已按 blockCount_ 上限拦住,
+    // 此处是最后防线。返回与 sync 后端一致的 DEVICE_NO_SPACE。
+    if (blockId >= blockCount_) {
+        return DEVICE_NO_SPACE;
+    }
+
+    const off_t offset = static_cast<off_t>(blockId) * CABE_VALUE_DATA_SIZE;
+
+    // ---- Model A:io_mutex_ 全程持锁,prep + submit + wait + cqe_seen 串行 ----
+    std::lock_guard<std::mutex> lock(io_mutex_);
+
+    // 锁内 recheck closed_:Close 拿到 io_mutex_ 之后会 destroy ring_state_,
+    // 我们必须在锁内确认 closed_ 仍是 false,否则后面访问 ring_state_ → UAF。
+    // (race 场景:本线程入口 fast-path 已通过,但还没拿到 io_mutex_ 之前
+    //  Close 已经把 closed_ 设为 true 并在排队等 io_mutex_。这里 recheck 后
+    //  返回 NOT_OPEN,Close 拿到锁后做清理,无 UAF。)
+    if (closed_.load(std::memory_order_acquire)) {
+        return IO_BACKEND_NOT_OPEN;
+    }
+
+    io_uring_sqe* sqe = ::io_uring_get_sqe(&ring_state_->ring);
+    if (sqe == nullptr) {
+        // SQ 满。M3 一次只发 1 个 op + Model A 串行,SQ depth 64 ≫ 1,理论
+        // 不应发生;一旦观察到说明 ring 状态异常,直接报 SUBMIT_FAILED。
+        return IO_BACKEND_SUBMIT_FAILED;
+    }
+
+    // M3:裸指针 prep_write,无 FIXED ops、无 IOSQE_FIXED_FILE。
+    //   M4 起换 io_uring_prep_write_fixed(sqe, fd_idx, ptr, size, offset, fixed_buf_idx)
+    //   M5 起加 sqe->flags |= IOSQE_FIXED_FILE; sqe->fd = 0(registered file index)
+    ::io_uring_prep_write(sqe, fd_, dataPtr, CABE_VALUE_DATA_SIZE,
+                          static_cast<__u64>(offset));
+    sqe->user_data = 0;     // M3 (Model A 1:1) 不使用 user_data;M7 batch 起填下标
+
+    in_flight_count_.fetch_add(1, std::memory_order_acq_rel);
+
+    // 提交并等待:submit_and_wait(ring, 1) = "submit pending + 等到至少 1 个 cqe"。
+    // EAGAIN 退避一次重试(设计文档 §10)。
+    int submitted = ::io_uring_submit_and_wait(&ring_state_->ring, 1);
+    if (submitted == -EAGAIN) {
+        submitted = ::io_uring_submit_and_wait(&ring_state_->ring, 1);
+    }
+    if (submitted < 0) {
+        in_flight_count_.fetch_sub(1, std::memory_order_acq_rel);
+        return IO_BACKEND_SUBMIT_FAILED;
+    }
+
+    // submit_and_wait(1) 已确保至少 1 个 cqe ready,peek 正常情况不应失败。
+    io_uring_cqe* cqe = nullptr;
+    const int peeked = ::io_uring_peek_cqe(&ring_state_->ring, &cqe);
+    if (peeked < 0 || cqe == nullptr) {
+        in_flight_count_.fetch_sub(1, std::memory_order_acq_rel);
+        return IO_BACKEND_IO_FAILED;
+    }
+
+    const int32_t res = cqe->res;
+    ::io_uring_cqe_seen(&ring_state_->ring, cqe);
+    in_flight_count_.fetch_sub(1, std::memory_order_acq_rel);
+
+    if (res < 0) {
+        CABE_LOG_ERROR("IoUringIoBackend::WriteBlock: cqe.res=%d (errno=%d)",
+                       res, -res);
+        return IO_BACKEND_IO_FAILED;
+    }
+    if (static_cast<std::size_t>(res) != CABE_VALUE_DATA_SIZE) {
+        CABE_LOG_ERROR("IoUringIoBackend::WriteBlock: short write res=%d expected=%zu",
+                       res, CABE_VALUE_DATA_SIZE);
+        return IO_BACKEND_IO_FAILED;
+    }
+    return SUCCESS;
 }
 
-int32_t IoUringIoBackend::ReadBlock(BlockId, BufferHandle&) {
-    // M2 stub。M3 起真实实现(对称 WriteBlock,prep_read / prep_read_fixed)。
-    return IO_BACKEND_NOT_OPEN;
+int32_t IoUringIoBackend::ReadBlock(const BlockId blockId, BufferHandle& handle) {
+    // 入口校验 / io_mutex_ recheck / submit / wait / cqe_seen 流程与 WriteBlock
+    // 完全对称,只把 io_uring_prep_write 换成 io_uring_prep_read。详细注释见
+    // WriteBlock。M7 batch API 落地后这两个函数会一起重构成共享 helper,
+    // M3 阶段保持显式镜像(YAGNI / 先落地后优化)。
+    if (!opened_ || closed_.load(std::memory_order_acquire)) {
+        return IO_BACKEND_NOT_OPEN;
+    }
+    if (!handle.valid()) {
+        return IO_BACKEND_INVALID_HANDLE;
+    }
+    if (handle.size() != CABE_VALUE_DATA_SIZE) {
+        return CABE_INVALID_DATA_SIZE;
+    }
+
+    char* const dataPtr = handle.data();
+    if (dataPtr < poolBase_ || dataPtr >= poolBase_ + poolTotalSize_) {
+        return IO_BACKEND_INVALID_HANDLE;
+    }
+
+    if (blockId >= blockCount_) {
+        return DEVICE_NO_SPACE;
+    }
+
+    const off_t offset = static_cast<off_t>(blockId) * CABE_VALUE_DATA_SIZE;
+
+    std::lock_guard<std::mutex> lock(io_mutex_);
+
+    if (closed_.load(std::memory_order_acquire)) {
+        return IO_BACKEND_NOT_OPEN;
+    }
+
+    io_uring_sqe* sqe = ::io_uring_get_sqe(&ring_state_->ring);
+    if (sqe == nullptr) {
+        return IO_BACKEND_SUBMIT_FAILED;
+    }
+
+    // M3:裸指针 prep_read。M4 起换 prep_read_fixed,M5 起加 IOSQE_FIXED_FILE。
+    ::io_uring_prep_read(sqe, fd_, dataPtr, CABE_VALUE_DATA_SIZE,
+                         static_cast<__u64>(offset));
+    sqe->user_data = 0;
+
+    in_flight_count_.fetch_add(1, std::memory_order_acq_rel);
+
+    int submitted = ::io_uring_submit_and_wait(&ring_state_->ring, 1);
+    if (submitted == -EAGAIN) {
+        submitted = ::io_uring_submit_and_wait(&ring_state_->ring, 1);
+    }
+    if (submitted < 0) {
+        in_flight_count_.fetch_sub(1, std::memory_order_acq_rel);
+        return IO_BACKEND_SUBMIT_FAILED;
+    }
+
+    io_uring_cqe* cqe = nullptr;
+    const int peeked = ::io_uring_peek_cqe(&ring_state_->ring, &cqe);
+    if (peeked < 0 || cqe == nullptr) {
+        in_flight_count_.fetch_sub(1, std::memory_order_acq_rel);
+        return IO_BACKEND_IO_FAILED;
+    }
+
+    const int32_t res = cqe->res;
+    ::io_uring_cqe_seen(&ring_state_->ring, cqe);
+    in_flight_count_.fetch_sub(1, std::memory_order_acq_rel);
+
+    if (res < 0) {
+        CABE_LOG_ERROR("IoUringIoBackend::ReadBlock: cqe.res=%d (errno=%d)",
+                       res, -res);
+        return IO_BACKEND_IO_FAILED;
+    }
+    if (static_cast<std::size_t>(res) != CABE_VALUE_DATA_SIZE) {
+        CABE_LOG_ERROR("IoUringIoBackend::ReadBlock: short read res=%d expected=%zu",
+                       res, CABE_VALUE_DATA_SIZE);
+        return IO_BACKEND_IO_FAILED;
+    }
+    return SUCCESS;
 }
+
 
 void IoUringIoBackend::ReturnBuffer_Internal(BufferHandleImpl& impl) noexcept {
     // outstanding_count_ 永远 dec —— 无论是否真的归还回 pool,都对应一次
