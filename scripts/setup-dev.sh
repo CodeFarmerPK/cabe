@@ -44,30 +44,25 @@ SUDO=""
 
 # ---------- required packages (每个 build 都需要) ----------
 REQUIRED_PKGS=(
-    gcc                 # GCC 15
+    gcc                      # GCC 15
     gcc-c++
-    clang               # Clang 20
-    libasan          # AddressSanitizer runtime
-    libtsan          # ThreadSanitizer runtime
-    libubsan         # UBSanitizer runtime
-    cmake               # 3.30+
+    clang                    # Clang 20
+    libasan                  # AddressSanitizer runtime
+    libtsan                  # ThreadSanitizer runtime
+    libubsan                 # UBSanitizer runtime
+    cmake                    # 3.30+
     make
     ninja-build
-    pkgconf-pkg-config
+    pkgconf-pkg-config       # CMake pkg_check_modules 入口
     git
     tar
     kernel-headers
-    util-linux          # losetup
+    util-linux               # losetup
     gtest-devel
     gmock-devel
-    liburing
-    liburing-devel
-)
-
-# ---------- future-P 依赖（现在装好，进入 P1~P3 时不卡壳） ----------
-FUTURE_PKGS=(
-    google-benchmark-devel   # P1 微基准
-    liburing-devel           # P3 io_uring
+    google-benchmark-devel   # P1+: 微基准
+    liburing                 # P4: io_uring runtime
+    liburing-devel           # P4: io_uring headers + pkg-config metadata (>= 2.9 校验在下方)
 )
 
 # ---------- dev-only 工具（CI 跳过以加速） ----------
@@ -85,14 +80,48 @@ DEV_EXTRA_PKGS=(
 echo ">>> Installing required packages..."
 $SUDO dnf install -y "${REQUIRED_PKGS[@]}"
 
-echo ">>> Installing future-P dependencies..."
-$SUDO dnf install -y "${FUTURE_PKGS[@]}" || {
-    echo "Warning: some future-P packages unavailable. CMake FetchContent can fall back." >&2
-}
-
 if [[ "$CI_MODE" == "false" ]]; then
     echo ">>> Installing dev-only profiling tools..."
     $SUDO dnf install -y "${DEV_EXTRA_PKGS[@]}" || true
+fi
+
+# ---------- P4 io_uring runtime checks ----------
+echo ""
+echo ">>> Verifying io_uring runtime prerequisites (P4)..."
+
+# 1. liburing version (CMake will require >= 2.9, see doc/p4_io_uring_design.md D12)
+if ! pkg-config --atleast-version=2.9 liburing; then
+    echo "Error: liburing >= 2.9 required for P4 io_uring backend (found: $(pkg-config --modversion liburing 2>/dev/null || echo missing))" >&2
+    exit 1
+fi
+echo "    liburing: $(pkg-config --modversion liburing)"
+
+# 2. kernel io_uring not disabled by sysctl (Linux 6.6+)
+if [[ -r /proc/sys/kernel/io_uring_disabled ]]; then
+    case "$(cat /proc/sys/kernel/io_uring_disabled)" in
+        0) echo "    io_uring: enabled" ;;
+        1) echo "    io_uring: restricted (CAP_SYS_ADMIN required); P4 tests must run as root or capability-granted user" ;;
+        2) echo "Error: io_uring disabled by sysctl (kernel.io_uring_disabled=2). Run: sudo sysctl -w kernel.io_uring_disabled=0" >&2; exit 1 ;;
+        *) echo "    io_uring: unknown disabled state, assuming enabled" ;;
+    esac
+else
+    echo "    io_uring: sysctl absent (kernel < 6.6), assumed enabled"
+fi
+
+# 3. RLIMIT_MEMLOCK advisory (P4 register_buffers pins pool memory; D15)
+MEMLOCK=$(ulimit -l)
+if [[ "$MEMLOCK" == "unlimited" ]]; then
+    echo "    RLIMIT_MEMLOCK: unlimited"
+elif (( MEMLOCK < 16384 )); then
+    cat >&2 <<EOF
+Warning: ulimit -l = ${MEMLOCK} KB is below P4 io_uring needs.
+  register_buffers pins ~16 MiB for default buffer_pool_count=16.
+  Recommended:
+    ulimit -l unlimited                   # current shell
+    LimitMEMLOCK=infinity                 # systemd unit
+EOF
+else
+    echo "    RLIMIT_MEMLOCK: ${MEMLOCK} KB (sufficient for default pool of 16)"
 fi
 
 echo ""
@@ -100,7 +129,9 @@ echo "=== Toolchain versions ==="
 gcc --version | head -n1
 command -v clang &>/dev/null && clang --version | head -n1
 cmake --version | head -n1
-echo "kernel: $(uname -r)"
+echo "kernel:   $(uname -r)"
+echo "liburing: $(pkg-config --modversion liburing 2>/dev/null || echo missing)"
 echo ""
 echo "Next:"
 echo "  ./scripts/run-tests.sh --asan"
+echo "  ./scripts/run-tests.sh --backend=io_uring   # P4 io_uring path (after M1)"
