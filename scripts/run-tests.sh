@@ -65,6 +65,25 @@ EOF
     shift
 done
 
+# P4 D19: TSAN 与 io_uring 不兼容 —— 脚本层前置 reject。
+# CMake 层也会拦(io_uring + CABE_ENABLE_TSAN=ON → FATAL_ERROR),此处提前 fail
+# 避免用户看到一长串 cmake configure 输出后才发现问题。
+if [[ "$BACKEND" == "io_uring" && "$SAN_SUFFIX" == "-tsan" ]]; then
+    cat >&2 <<'EOF'
+ERROR: --backend=io_uring 与 --tsan 不兼容。
+
+io_uring 的 SQ/CQ 是用户态与内核共享内存,TSAN 看不到内核侧 store,
+会产生大量 false-positive race 报告。
+
+请改用以下任一组合:
+  ./scripts/run-tests.sh --tsan                      (sync + TSAN)
+  ./scripts/run-tests.sh --backend=io_uring          (io_uring + 无 sanitizer)
+  ./scripts/run-tests.sh --backend=io_uring --asan   (io_uring + ASAN,兼容)
+  ./scripts/run-tests.sh --backend=io_uring --ubsan  (io_uring + UBSAN,兼容)
+EOF
+    exit 2
+fi
+
 # 非默认 backend 加进 build 目录名,允许多 backend 并存:
 #   build, build-asan       (sync 默认,后缀省略)
 #   build-io_uring          (io_uring 后端)

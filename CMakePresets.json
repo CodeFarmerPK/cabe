@@ -61,14 +61,37 @@
       }
     },
     {
+      "name": "io_uring-debug",
+      "displayName": "io_uring backend, Debug (P4 M1+)",
+      "description": "io_uring IoBackend Debug build (P4 M1 skeleton; full impl lands M2-M9).",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build-io_uring-debug",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "CABE_IO_BACKEND": "io_uring"
+      }
+    },
+    {
       "name": "io_uring-release",
-      "displayName": "io_uring backend, Release (P4+)",
-      "description": "io_uring IoBackend Release build. Currently FATAL_ERROR until P4 implementation lands.",
+      "displayName": "io_uring backend, Release (P4 M1+)",
+      "description": "io_uring IoBackend Release build (P4 M1 skeleton returns NOT_OPEN; full impl lands M2-M9).",
       "generator": "Ninja",
       "binaryDir": "${sourceDir}/build-io_uring",
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Release",
         "CABE_IO_BACKEND": "io_uring"
+      }
+    },
+    {
+      "name": "io_uring-asan",
+      "displayName": "io_uring backend, Debug + ASAN (P4 M1+)",
+      "description": "AddressSanitizer build for io_uring backend. TSAN is blocked by CMake (see D19).",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build-io_uring-asan",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "CABE_IO_BACKEND": "io_uring",
+        "CABE_ENABLE_ASAN": "ON"
       }
     }
   ],
@@ -78,7 +101,9 @@
     { "name": "sync-asan",        "configurePreset": "sync-asan" },
     { "name": "sync-tsan",        "configurePreset": "sync-tsan" },
     { "name": "sync-ubsan",       "configurePreset": "sync-ubsan" },
-    { "name": "io_uring-release", "configurePreset": "io_uring-release" }
+    { "name": "io_uring-debug",   "configurePreset": "io_uring-debug" },
+    { "name": "io_uring-release", "configurePreset": "io_uring-release" },
+    { "name": "io_uring-asan",    "configurePreset": "io_uring-asan" }
   ],
   "testPresets": [
     {
@@ -108,6 +133,24 @@
     {
       "name": "sync-ubsan",
       "configurePreset": "sync-ubsan",
+      "output": { "outputOnFailure": true },
+      "execution": { "jobs": 1 }
+    },
+    {
+      "name": "io_uring-debug",
+      "configurePreset": "io_uring-debug",
+      "output": { "outputOnFailure": true },
+      "execution": { "jobs": 1 }
+    },
+    {
+      "name": "io_uring-release",
+      "configurePreset": "io_uring-release",
+      "output": { "outputOnFailure": true },
+      "execution": { "jobs": 1 }
+    },
+    {
+      "name": "io_uring-asan",
+      "configurePreset": "io_uring-asan",
       "output": { "outputOnFailure": true },
       "execution": { "jobs": 1 }
     }

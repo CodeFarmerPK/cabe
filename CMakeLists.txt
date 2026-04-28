@@ -128,10 +128,12 @@ set(CABE_LIB_SOURCES
         engine/engine.cpp
         engine/engine_api.cpp
         util/cpu_features.cpp
-        # P3 M1: IoBackend 抽象层。M2 起填实 sync 后端,
-        # M5 已删除 storage/storage.* 与 buffer/buffer_pool.*(逻辑迁入下面两个文件)。
+        # P3 M1: IoBackend 抽象层。M5 已删除 storage/storage.* 与
+        # buffer/buffer_pool.*(逻辑迁入各 backend 实现里)。
+        # 各 backend 的 .cpp 不在此处列,而在下面 CABE_IO_BACKEND 分支里通过
+        # target_sources 按需加入,避免 ODR 冲突 —— 所有 backend 都定义
+        # cabe::io::BufferHandleImpl::~,只能编译进当前激活的那一份。
         io/buffer_handle.cpp
-        io/backends/sync_io_backend.cpp
 )
 
 # 静态库，供 main 和 test 共用
@@ -169,25 +171,43 @@ set_property(CACHE CABE_IO_BACKEND PROPERTY STRINGS sync io_uring spdk)
 
 if(CABE_IO_BACKEND STREQUAL "sync")
     target_compile_definitions(cabe_lib PUBLIC CABE_IO_BACKEND_SYNC=1)
+    target_sources(cabe_lib PRIVATE io/backends/sync_io_backend.cpp)
 elseif(CABE_IO_BACKEND STREQUAL "io_uring")
-    # P4 落地后这里会加:
-    #   target_sources(cabe_lib PRIVATE io/backends/io_uring_io_backend.cpp)
-    #   target_link_libraries(cabe_lib PUBLIC uring)
-    # 当前先 FATAL_ERROR,避免用户配置成功但编译失败导致难诊断。
+    # P4 M1: liburing 接入 + IoUringIoBackend 骨架(stub),后续 M2-M9 逐步填实。
+    # 详细设计:doc/p4_io_uring_design.md
     target_compile_definitions(cabe_lib PUBLIC CABE_IO_BACKEND_IO_URING=1)
-    message(FATAL_ERROR
-            "CABE_IO_BACKEND=io_uring 还未实现,P4 阶段(项目路线图)落地。"
-            "P3 阶段请使用 CABE_IO_BACKEND=sync(默认值)。")
+    target_sources(cabe_lib PRIVATE io/backends/io_uring_io_backend.cpp)
+    # D11/D12: 动态链接 liburing,>= 2.9(Fedora 43 当前包版本作为 floor,
+    # 跟随发行版包管理推进)。setup-dev.sh 在安装阶段已校验同一 floor。
+    find_package(PkgConfig REQUIRED)
+    pkg_check_modules(LIBURING REQUIRED IMPORTED_TARGET liburing>=2.9)
+    target_link_libraries(cabe_lib PUBLIC PkgConfig::LIBURING)
 elseif(CABE_IO_BACKEND STREQUAL "spdk")
     target_compile_definitions(cabe_lib PUBLIC CABE_IO_BACKEND_SPDK=1)
     message(FATAL_ERROR
             "CABE_IO_BACKEND=spdk 还未实现,P9 阶段(可选,项目路线图)落地。"
-            "P3 阶段请使用 CABE_IO_BACKEND=sync(默认值)。")
+            "请使用 CABE_IO_BACKEND=sync(默认)或 CABE_IO_BACKEND=io_uring(P4)。")
 else()
     message(FATAL_ERROR
             "Unknown CABE_IO_BACKEND: '${CABE_IO_BACKEND}'。"
             "有效取值:sync | io_uring | spdk。")
 endif()
+
+# ============================================================
+# P4 D19: TSAN 与 io_uring 不兼容 —— CMake 层硬阻断
+# ============================================================
+# io_uring 的 SQ/CQ 是用户态与内核共享内存,TSAN 看不到内核侧 store,
+# 会产生大量 false-positive race 报告。scripts/run-tests.sh 在脚本层
+# 也会前置 reject(用户体验),此处是底裤,任何 build 路径都拦得住。
+if(CABE_IO_BACKEND STREQUAL "io_uring" AND CABE_ENABLE_TSAN)
+    message(FATAL_ERROR
+            "CABE_IO_BACKEND=io_uring 与 CABE_ENABLE_TSAN=ON 不兼容。\n"
+            "io_uring 的 SQ/CQ 是用户态与内核共享内存,TSAN 看不到内核侧 store,\n"
+            "会产生大量 false-positive race 报告。\n"
+            "请改用 -DCABE_IO_BACKEND=sync 跑 TSAN,\n"
+            "或不开 TSAN 跑 io_uring(ASAN / UBSAN 与 io_uring 兼容,可正常组合)。")
+endif()
+
 message(STATUS "IoBackend: ${CABE_IO_BACKEND}")
 # ============================================================
 # 主可执行文件
@@ -224,13 +244,25 @@ if(CABE_BUILD_TESTS)
             test/engine/engine_thread_test.cpp
             test/engine/engine_api_test.cpp
             test/engine/cabe_engine_thread_test.cpp
-            # P3 M1: IoBackend 骨架冒烟测试(类型别名 / concept / 默认值 / move 语义)
-            test/io/sync_io_backend_skeleton_test.cpp
-            # P3 M2: IoBackend 契约测试(裸设备依赖,需 CABE_TEST_DEVICE)
+            # P3 M2 / P4: IoBackend 契约测试(裸设备依赖,需 CABE_TEST_DEVICE)
+            # 通过 IoBackend 类型别名跑当前后端,sync 与 io_uring 共用此契约。
+            # P4 M1 阶段在 io_uring 后端上跑此 test 期望 fail(stub 实现),
+            # M2/M3 落地后转绿。
             test/io/io_backend_contract_test.cpp
             # M5 已删除 test/buffer/buffer_pool_test.cpp(BufferPool 类已合入 SyncIoBackend);
             # 等效覆盖现在通过 io_backend_contract_test 的 AcquireBuffer/归还/Q3 池耗尽 cases 完成。
     )
+
+    # 各 backend 的 skeleton 冒烟测试按 CABE_IO_BACKEND 条件追加。
+    # 同时编译两份会因 static_assert(IoBackend == 具体后端) 互相冲突,
+    # 因此一次 build 只挂当前激活后端那一个。
+    if(CABE_IO_BACKEND STREQUAL "sync")
+        # P3 M1 已就位
+        list(APPEND TEST_SOURCES test/io/sync_io_backend_skeleton_test.cpp)
+    elseif(CABE_IO_BACKEND STREQUAL "io_uring")
+        # P4 M1 新增
+        list(APPEND TEST_SOURCES test/io/io_uring_skeleton_test.cpp)
+    endif()
 
     add_executable(cabe_test ${TEST_SOURCES})
     target_link_libraries(cabe_test PRIVATE cabe_lib GTest::gtest_main)
