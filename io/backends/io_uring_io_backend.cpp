@@ -3,33 +3,31 @@
  * Created Time: 2026-04-28
  * Created by: CodeFarmerPK
  *
- * IoUringIoBackend —— P4 io_uring 后端实现(M3 阶段)。
+ * IoUringIoBackend —— P4 io_uring 后端实现(M4 已落地,M5 待启动)。
  *
- * M3 状态:Open / Close / AcquireBuffer / IsOpen / BlockCount / is_closed /
+ * 截至 M4 状态:Open / Close / AcquireBuffer / IsOpen / BlockCount / is_closed /
  *          ReturnBuffer_Internal / WriteBlock / ReadBlock 全部真实实现。
  *          WriteBlock / ReadBlock 走 Model A(粗 io_mutex_ +
- *          io_uring_prep_write/read 裸指针 + submit_and_wait(1)),
- *          无 FIXED ops、无 IOSQE_FIXED_FILE、无 user_data 关联。
+ *          io_uring_prep_write_fixed / prep_read_fixed + submit_and_wait(1)),
+ *          fd 仍是裸 fd(M5 起换 IOSQE_FIXED_FILE + registered file index)。
  *
- * M3 落地的功能(M2 基础上新增):
- *   - WriteBlock: 入口校验(opened/closed/handle.valid/size/pool 范围/blockId 范围)
- *               → io_mutex_ 临界区(锁内 recheck closed_)
- *               → io_uring_get_sqe → io_uring_prep_write(裸指针 + 裸 fd)
- *               → in_flight_count_++ → io_uring_submit_and_wait(1)
- *                 (-EAGAIN 退避一次重试)
- *               → io_uring_peek_cqe → 读 cqe.res → io_uring_cqe_seen
- *               → in_flight_count_--
- *   - ReadBlock: 对称 WriteBlock,prep_read 替代 prep_write
- *   - 错误映射(设计文档 §10):
- *       submit_and_wait 仍 < 0          → IO_BACKEND_SUBMIT_FAILED
- *       cqe.res < 0                     → IO_BACKEND_IO_FAILED
- *       cqe.res != CABE_VALUE_DATA_SIZE → IO_BACKEND_IO_FAILED(短读短写)
+ * M4 落地的功能(M3 基础上新增):
+ *   - Open: 第 4.5 阶段加 io_uring_register_buffers(iovecs[n], n × 1 MiB),
+ *           失败按 D15 完整 rollback(queue_exit → munmap → close fd)
+ *   - WriteBlock: prep_write 改 prep_write_fixed,内核跳过 GUP / page pin
+ *   - ReadBlock:  prep_read  改 prep_read_fixed(对称)
+ *   - Close: 反注册顺序为 unregister_files(M5) → unregister_buffers → queue_exit
+ *   - 测试:test/io/io_uring_specific_test.cpp::RegisterBuffersFailsWhenPoolTooLarge
+ *           覆盖 D15 失败路径(root 下 SKIP,见 fixture 顶部注释)
+ *   - bench 验证:cpu_time 加速 16–82%(small op 受 GUP 消除受益最大,
+ *           大 op 也有 16% 改善),远超设计稿 W4.6 的 5% 验收门
  *
- * M3 不做的(留给后续 milestone,详见 doc/p4_io_uring_design.md §13):
- *   M4: io_uring_register_buffers + WRITE_FIXED / READ_FIXED + fixed_buf_index_ 真用
- *   M5: io_uring_register_files + IOSQE_FIXED_FILE
- *   M6: io_uring_specific_test + Options.io_uring_sq_depth + 部署文档
- *   M7: WriteBlocks / ReadBlocks 批量 API + Engine 多 chunk 路径接入
+ * M4 不做的(留给后续 milestone,详见 doc/p4_io_uring_design.md §13):
+ *   M5: io_uring_register_files + IOSQE_FIXED_FILE(下一步,改动 2 个 Edit)
+ *   M6: Options.io_uring_sq_depth(D7)+ specific test 扩展 + 部署文档(R7)
+ *   M7: WriteBlocks / ReadBlocks 批量 API + Engine 多 chunk 路径接入(D18)
+ *   M8: (可选)Model A → Model B 升级(reaper 线程,M7 数据决定)
+ *   M9: bench 归档 + README/roadmap/设计稿状态收尾
  *
  * 与 sync 后端的实现对齐(`io/backends/sync_io_backend.cpp`):
  *   - 状态机:终态 Close,Close-before-Open 幂等 no-op
@@ -40,16 +38,16 @@
  *      TranslateStatus 统一映射到 cabe::Status::IOError)
  *   - 参考 memory/project_roadmap.md Q1-Q7 决策
  *
- * io_uring 特有项(M3 阶段):
- *   - SQ depth 仍固定 64(M6 起从 Options.io_uring_sq_depth 取);M3 一次只发
+ * io_uring 特有项(截至 M4):
+ *   - SQ depth 固定 64(M6 起从 Options.io_uring_sq_depth 取);Model A 一次只发
  *     1 个 op,depth 数值不影响功能正确性
  *   - PIMPL RingState 隐藏 liburing 类型,公开头零依赖 liburing.h
  *   - Model A:io_mutex_ 全程持锁。WriteBlock / ReadBlock 入口先 fast-path 检查
  *     closed_,锁内 recheck closed_ 再访问 ring_state_,防止与 Close 的 race
  *     UAF(Close 拿 io_mutex_ 后会 destroy ring_state_)
- *   - drain 循环 D17 不带超时(健壮运行环境假设);M3 阶段 in_flight_count_ 在
- *     WriteBlock / ReadBlock 退出 io_mutex_ 临界区前必归 0,Close drain 仍是
- *     no-op,M8 Model B 才会真正利用 drain 循环
+ *   - drain 循环 D17 不带超时(健壮运行环境假设);截至 M4 阶段 in_flight_count_
+ *     在 W/R 退出 io_mutex_ 临界区前必归 0,Close drain 仍是 no-op,
+ *     M8 Model B 才会真正利用 drain 循环
  *
  * 详细设计:doc/p4_io_uring_design.md §6、§8、§9、§10
  */
@@ -78,10 +76,11 @@ namespace cabe::io {
 
 namespace {
 
-// M2 阶段 SQ depth 的硬编码默认值。M6 落地 Options.io_uring_sq_depth 后
-// 从 Open 入参或 Options 传入;约束 sq_depth >= buffer_pool_count 也在 M6 校验。
+// M2-M5 阶段 SQ depth 的硬编码默认值。M6 起从 Options.io_uring_sq_depth 取,
+// 并加 sq_depth >= buffer_pool_count 的 Open 前置校验(R12)。
 // io_uring_queue_init 要求 entries 是 2 的幂(老内核硬性要求,新内核宽松);
-// 64 = 2^6 满足。M2 阶段不 submit 任何 op,数值不影响功能。
+// 64 = 2^6 满足。Model A 一次只发 1 个 op,depth 数值不影响功能正确性,
+// 只影响 M7 batch 启用后可同时 in-flight 的上限。
 constexpr unsigned kDefaultSqDepth = 64;
 
 } // namespace
@@ -209,6 +208,7 @@ int32_t IoUringIoBackend::Open(const std::string& devicePath,
     std::vector<std::uint32_t>  newStack;
     std::string                 newPath;
     std::unique_ptr<RingState>  new_ring_state;
+    std::vector<iovec>          iovecs;     // M4: register_buffers 入参,n × {slot_ptr, 1 MiB}
     try {
         newStack.reserve(bufferPoolCount);
         // 倒序压入,pop_back 时按地址顺序分配
@@ -217,6 +217,18 @@ int32_t IoUringIoBackend::Open(const std::string& devicePath,
         }
         newPath        = devicePath;
         new_ring_state = std::make_unique<RingState>();
+
+        // M4 / D13:把 mmap pool 切成 n 个独立 iovec,与 freeStack slot 一一对应。
+        // 注册成功后,每个 BufferHandleImpl.fixed_buf_index_ == slot_index_
+        // (AcquireBuffer 在 M2 已提前填好,M4 直接复用)。
+        iovecs.reserve(bufferPoolCount);
+        for (std::uint32_t i = 0; i < bufferPoolCount; ++i) {
+            iovecs.push_back(iovec{
+                .iov_base = static_cast<char*>(mmap_ptr) +
+                            static_cast<std::size_t>(i) * CABE_VALUE_DATA_SIZE,
+                .iov_len  = CABE_VALUE_DATA_SIZE
+            });
+        }
     } catch (...) {
         ::munmap(mmap_ptr, totalSize);
         ::close(new_fd);
@@ -243,11 +255,34 @@ int32_t IoUringIoBackend::Open(const std::string& devicePath,
     }
     new_ring_state->ring_initialized = true;
 
-    // ===== 第 4.5 阶段:M4 起在此处 io_uring_register_buffers =====
-    //   - 失败按 D15 走整体失败:queue_exit + ring_state_ 释放 + munmap + close fd
-    //   - 成功后 new_ring_state->buffers_registered = true
+    // ===== 第 4.5 阶段:io_uring_register_buffers (M4 / D5 / D13 / D15)=====
+    //
+    // 把 stage 3 构造的 n × 1 MiB iovec 一次性注册为 io_uring fixed buffer。
+    // 注册成功后,WriteBlock / ReadBlock 用 prep_*_fixed + buf_index 提交,
+    // 内核跳过每次 I/O 的 GUP(get_user_pages)与 page pin/unpin 开销。
+    //
+    // D15 失败处置(整体失败,不 fallback 到非 FIXED 路径):
+    //   - rollback:queue_exit → unique_ptr 释放 RingState → munmap → close fd
+    //   - 最常见触发是 RLIMIT_MEMLOCK 撞限(默认 64 KiB,默认 pool 16 MiB 直接失败)
+    //   - 文档 README "Production deployment notes"(M6 加)指导用户调 ulimit
+    //   - 测试覆盖:test/io/io_uring_specific_test.cpp::RegisterBuffersFailsWhenPoolTooLarge
+    const int rrc = ::io_uring_register_buffers(&new_ring_state->ring,
+                                                 iovecs.data(),
+                                                 static_cast<unsigned>(bufferPoolCount));
+    if (rrc < 0) {
+        CABE_LOG_ERROR("IoUringIoBackend::Open: io_uring_register_buffers failed, errno=%d",
+                       -rrc);
+        ::io_uring_queue_exit(&new_ring_state->ring);   // ring 已 init,必须 exit
+        ::munmap(mmap_ptr, totalSize);
+        ::close(new_fd);
+        // RLIMIT_MEMLOCK 撞限 → ENOMEM,翻成 POOL_MMAP_FAILED 让上层易识别;
+        // 其他 errno → IO_BACKEND_NOT_OPEN(沿用 queue_init 失败的命名约定)。
+        return -rrc == ENOMEM ? POOL_MMAP_FAILED : IO_BACKEND_NOT_OPEN;
+    }
+    new_ring_state->buffers_registered = true;
+
     // ===== 第 4.6 阶段:M5 起在此处 io_uring_register_files =====
-    //   - 同样的 rollback 模式
+    //   - 同样的 rollback 模式(再 unregister_buffers + queue_exit + munmap + close fd)
 
     // ===== 第 5 阶段:全部成功,no-throw 提交 =====
     fd_              = new_fd;
@@ -325,8 +360,25 @@ int32_t IoUringIoBackend::Close() {
         }
 
         // ---- (M5) io_uring_unregister_files ----
-        // ---- (M4) io_uring_unregister_buffers ----
-        // M2 阶段没注册,跳过对应 unregister。
+        // M4 阶段未注册 files;M5 起加 io_uring_unregister_files(同样 ring_state_
+        // != nullptr && files_registered 旁路保护)。
+
+        // ---- io_uring_unregister_buffers (M4 起)----
+        //
+        // 注:io_uring_queue_exit 也会隐式释放 registered buffers,这里显式
+        // unregister 主要是为了:
+        //   1) 拿到失败 errno 写日志,便于排查
+        //   2) 把 buffers_registered 置 false,M8 Model B 阶段即便 reaper 残留对
+        //      ring 的引用,buffers 状态机也是清晰的
+        // 失败不阻断 close 流程,继续走 queue_exit / munmap / close fd。
+        if (ring_state_ != nullptr && ring_state_->buffers_registered) {
+            const int urc = ::io_uring_unregister_buffers(&ring_state_->ring);
+            if (urc < 0) {
+                CABE_LOG_ERROR("IoUringIoBackend::Close: unregister_buffers failed, errno=%d",
+                               -urc);
+            }
+            ring_state_->buffers_registered = false;
+        }
 
         // ---- queue_exit + 释放 ring_state_ ----
         //
@@ -424,8 +476,9 @@ BufferHandle IoUringIoBackend::AcquireBuffer() {
     impl->size_            = CABE_VALUE_DATA_SIZE;
     impl->slot_index_      = slot_index;
     // D13:n × 1 MiB iovec 一一对应,fixed_buf_index_ == slot_index_。
-    // M2 阶段 register_buffers 未做(M4),fixed_buf_index_ 字段填值不被使用;
-    // 提前填好让 M4 切换 *_FIXED ops 时 BufferHandleImpl 字段已就位。
+    // M4 起 Open 内 register_buffers 落地后,此字段被 WriteBlock / ReadBlock
+    // 的 io_uring_prep_*_fixed 真用作 buf_index 参数,内核据此直接命中预注册
+    // buffer 跳过 GUP / page pin。
     impl->fixed_buf_index_ = slot_index;
     impl->owner_           = this;
 
@@ -483,12 +536,17 @@ int32_t IoUringIoBackend::WriteBlock(const BlockId blockId,
         return IO_BACKEND_SUBMIT_FAILED;
     }
 
-    // M3:裸指针 prep_write,无 FIXED ops、无 IOSQE_FIXED_FILE。
-    //   M4 起换 io_uring_prep_write_fixed(sqe, fd_idx, ptr, size, offset, fixed_buf_idx)
-    //   M5 起加 sqe->flags |= IOSQE_FIXED_FILE; sqe->fd = 0(registered file index)
-    ::io_uring_prep_write(sqe, fd_, dataPtr, CABE_VALUE_DATA_SIZE,
-                          static_cast<__u64>(offset));
-    sqe->user_data = 0;     // M3 (Model A 1:1) 不使用 user_data;M7 batch 起填下标
+    // M4:io_uring_prep_write_fixed,内核用 buf_index 直接命中预注册的 buffer,
+    // 跳过 GUP / page pin。fd 仍是裸 fd(M5 起换 IOSQE_FIXED_FILE + fd=0)。
+    //
+    // D13 / Q1:fixed_buf_index_ == slot_index_,AcquireBuffer 时已填好,
+    // 这里直接读 BufferHandleImpl 的字段(IoUringIoBackend 是 BufferHandle
+    // 的 friend,可访问私有 impl_)。
+    const std::uint32_t fixed_buf_idx = handle.impl_->fixed_buf_index_;
+    ::io_uring_prep_write_fixed(sqe, fd_, dataPtr, CABE_VALUE_DATA_SIZE,
+                                static_cast<__u64>(offset),
+                                static_cast<int>(fixed_buf_idx));
+    sqe->user_data = 0;     // Model A 1:1 不使用 user_data;M7 batch 起填下标
 
     in_flight_count_.fetch_add(1, std::memory_order_acq_rel);
 
@@ -530,9 +588,9 @@ int32_t IoUringIoBackend::WriteBlock(const BlockId blockId,
 
 int32_t IoUringIoBackend::ReadBlock(const BlockId blockId, BufferHandle& handle) {
     // 入口校验 / io_mutex_ recheck / submit / wait / cqe_seen 流程与 WriteBlock
-    // 完全对称,只把 io_uring_prep_write 换成 io_uring_prep_read。详细注释见
-    // WriteBlock。M7 batch API 落地后这两个函数会一起重构成共享 helper,
-    // M3 阶段保持显式镜像(YAGNI / 先落地后优化)。
+    // 完全对称,只把 io_uring_prep_write_fixed 换成 io_uring_prep_read_fixed。
+    // 详细注释见 WriteBlock。M7 batch API 落地后这两个函数会一起重构成共享
+    // helper,M4 阶段保持显式镜像(YAGNI / 先落地后优化)。
     if (!opened_ || closed_.load(std::memory_order_acquire)) {
         return IO_BACKEND_NOT_OPEN;
     }
@@ -565,9 +623,12 @@ int32_t IoUringIoBackend::ReadBlock(const BlockId blockId, BufferHandle& handle)
         return IO_BACKEND_SUBMIT_FAILED;
     }
 
-    // M3:裸指针 prep_read。M4 起换 prep_read_fixed,M5 起加 IOSQE_FIXED_FILE。
-    ::io_uring_prep_read(sqe, fd_, dataPtr, CABE_VALUE_DATA_SIZE,
-                         static_cast<__u64>(offset));
+    // M4:io_uring_prep_read_fixed(对称 WriteBlock 切到 FIXED ops)。
+    // M5 起加 IOSQE_FIXED_FILE。
+    const std::uint32_t fixed_buf_idx = handle.impl_->fixed_buf_index_;
+    ::io_uring_prep_read_fixed(sqe, fd_, dataPtr, CABE_VALUE_DATA_SIZE,
+                               static_cast<__u64>(offset),
+                               static_cast<int>(fixed_buf_idx));
     sqe->user_data = 0;
 
     in_flight_count_.fetch_add(1, std::memory_order_acq_rel);

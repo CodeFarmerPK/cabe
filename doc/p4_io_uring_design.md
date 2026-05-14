@@ -1,6 +1,9 @@
 # P4 io_uring 分阶段实施设计
 
 > **状态**:草稿 v1.0(讨论稿) · 2026-04-28
+> **实施进度**(2026-05-14):M1 ✅ / M2 ✅ / M3 ✅ / M4 ✅ / M5 ❌ / M6 ❌ / M7 ❌ / M8 ❌ / M9 ❌
+> M4 bench 验证 cpu_time 加速 16-82%,远超 W4.6 验收门(≥ 5%);
+> 详细进度记录见 `memory/project_roadmap.md` 的 "P4 实施计划" 章节。
 > **作者**:CodeFarmerPK + Claude(Opus 4.7, 1M context)
 > **基线**:P3 已交付的 IoBackend 抽象层(`io/io_backend.h` + `io/buffer_handle.{h,cpp}` + `io/backends/sync_*`)
 > **相关文档**:

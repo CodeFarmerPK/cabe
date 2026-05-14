@@ -260,8 +260,13 @@ if(CABE_BUILD_TESTS)
         # P3 M1 已就位
         list(APPEND TEST_SOURCES test/io/sync_io_backend_skeleton_test.cpp)
     elseif(CABE_IO_BACKEND STREQUAL "io_uring")
-        # P4 M1 新增
-        list(APPEND TEST_SOURCES test/io/io_uring_skeleton_test.cpp)
+        list(APPEND TEST_SOURCES
+                # P4 M1: skeleton 冒烟(类型别名 / concept / 默认值 / move)
+                test/io/io_uring_skeleton_test.cpp
+                # P4 M4 起:io_uring 后端独有行为测试。
+                # M4 含 RegisterBuffersFailsWhenPoolTooLarge(RLIMIT_MEMLOCK 撞限);
+                # M6 继续追加 CloseDrainsInflight / RegisterBufferIndexMatchesSlot 等。
+                test/io/io_uring_specific_test.cpp)
     endif()
 
     add_executable(cabe_test ${TEST_SOURCES})

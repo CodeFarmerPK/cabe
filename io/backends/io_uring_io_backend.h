@@ -3,29 +3,31 @@
  * Created Time: 2026-04-28
  * Created by: CodeFarmerPK
  *
- * IoUringIoBackend —— P4 io_uring 后端声明(M1 骨架)。
+ * IoUringIoBackend —— P4 io_uring 后端声明(M4 已落地,M5 待启动)。
  *
- * M1 状态:仅给出类形状 + 方法签名,内部全部 stub:
- *   - Open / Read / Write 返回 IO_BACKEND_NOT_OPEN
- *   - Close 在未 Open 上幂等返回 SUCCESS(与 sync 后端语义对齐)
- *   - AcquireBuffer 返回 invalid handle(等同 Q3 池耗尽契约)
- *   - IsOpen / BlockCount 返回默认 false / 0
+ * 进度(详见 doc/p4_io_uring_design.md §13;接口 API 自 M1 以来零变化,
+ * Engine 调用方完全无感):
+ *   M1 ✅ 骨架 + liburing 接入 + TSAN/io_uring 双层阻断
+ *   M2 ✅ Open/Close + buffer pool + ring 真实实现(状态机 + Q7 行为对齐 sync)
+ *   M3 ✅ 朴素 WriteBlock/ReadBlock(Model A,prep_write/prep_read,裸 fd)
+ *   M4 ✅ io_uring_register_buffers + WRITE_FIXED/READ_FIXED + fixed_buf_index_
+ *         真用(bench cpu_time 加速 16–82%,远超 5% 验收门)
+ *   M5 ❌ io_uring_register_files + IOSQE_FIXED_FILE(下一步)
+ *   M6 ❌ Options.io_uring_sq_depth + io_uring 专属测试扩展 + 部署文档
+ *   M7 ❌ 内部 batch API(WriteBlocks/ReadBlocks)+ Engine 多 chunk 路径接入
+ *   M8 ❌ (可选)Model A → Model B 升级评估(reaper 线程,M7 数据决定)
+ *   M9 ❌ bench 归档 + README/roadmap/设计稿状态收尾
  *
- * M2-M9 逐步落地(详见 doc/p4_io_uring_design.md §13):
- *   M2 — Open/Close + buffer pool + ring 真实实现(状态机 + Q7 行为对齐 sync)
- *   M3 — 朴素 WriteBlock/ReadBlock(Model A,prep_write/prep_read,无 FIXED)
- *   M4 — io_uring_register_buffers + WRITE_FIXED/READ_FIXED + fixed_buf_index_
- *   M5 — io_uring_register_files + IOSQE_FIXED_FILE
- *   M6 — Close drain 契约 + io_uring 专属测试 + Options.io_uring_sq_depth
- *   M7 — 内部 batch API(WriteBlocks/ReadBlocks)+ Engine 多 chunk 路径接入
- *   M8 — (可选)Model A → Model B 升级评估(reaper 线程)
- *
- * 后端形态(M2+ 落地后):
- *   - 设备:O_DIRECT | O_SYNC | O_RDWR 打开裸块设备(同 sync 后端)
- *   - Buffer pool:mmap(MAP_ANONYMOUS) 一大块,LIFO slot;M4 起整片
- *                 register 为 io_uring fixed buffer(n × 1 MiB iovec)
- *   - Ring:io_uring_queue_init(sq_depth, ...);M5 起加 register_files
- *   - 提交模型:Model A(粗 io_mutex_ + submit_and_wait(1)),M7/M8 视情况升级
+* 当前实现形态(截至 M4):
+ *   - 设备:O_DIRECT | O_SYNC | O_RDWR 打开裸块设备(同 sync 后端);fd 仍是
+ *           裸 fd,M5 起 register_files + IOSQE_FIXED_FILE
+ *   - Buffer pool:mmap(MAP_ANONYMOUS) 一大块,LIFO slot;Open 内整片
+ *                 register 为 io_uring fixed buffer(n × 1 MiB iovec,
+ *                 fixed_buf_index_ == slot_index_)
+ *   - Ring:io_uring_queue_init(64, ..., 0);SQ depth 由 kDefaultSqDepth
+ *           硬编码,M6 起从 Options.io_uring_sq_depth 取
+ *   - 提交模型:Model A(粗 io_mutex_ + io_uring_submit_and_wait(1) +
+ *               EAGAIN 一次退避),M7/M8 视情况升级
  *
  * 线程安全(P4 范围):
  *   - Open / Close 由调用方(Engine)串行
