@@ -23,20 +23,20 @@ originSessionId: 5e75530e-aa98-44be-b0dc-01b60f844823
   - M4 CMake `CABE_IO_BACKEND` 选项 + CMakePresets + `scripts/run-tests.sh --backend=`
   - M5 删除旧 `storage/storage.*` 与 `buffer/buffer_pool.*`
   - M6 文档更新 + bench 基线归档（`p3-post-io-abstraction`）
-- **P4** io_uring 后端 + registered buffer pool（io_uring 接管 BufferPool） — 🚧 实施中（M1-M7 完成,M8 评估待启动）
-  - 设计稿:`doc/p4_io_uring_design.md`(2026-04-28 v1.0)
-  - 进度:9 个 milestone 中 7 个完成(M1 骨架+TSAN阻断 / M2 Open-Close / M3 W-R /
-    M4 register_buffers+FIXED / M5 register_files+IOSQE_FIXED_FILE /
-    M6 Options.sq_depth+R12 校验+4 个专属 test+README 部署文档+CABE_HAVE_* 探测 /
-    M7 WriteBlocks/ReadBlocks 批量 API + Engine 多 chunk 路径接入 + 5 个 batch test)
+- **P4** io_uring 后端 + registered buffer pool（io_uring 接管 BufferPool） — ✅ 完成（M1-M9 全部落地;M8 评估 = 不做）
+  - 设计稿:`doc/p4_io_uring_design.md`(2026-04-28 v1.0 定稿 / 2026-05-14 已实施)
+  - 进度:9 个 milestone 全部完成。M1-M7 代码 + 测试落地;M8 评估闭环 = 不做
+    (Model B 在 P6 reactor 阶段被 per-thread ring 架构替代,不是 P6 中间形态);
+    M9 收尾完成(bench 总结 `bench/baselines/p4-summary.md` + 文档 + 路线图)
   - bench 验证:M4 完成 cpu_time 加速 16-82%;M5 跑过 `p4-m5-post-fixed-files`
     baseline(cpu_time 落在 ±5% 测试环境噪声内,功能正确性由 contract test 保证);
-    M7 大 value 批量 bench 归档 `p4-post-batch` 在 M9 收尾时落
-  - 决策:**19 项全部落地**(D7 第二部分 Options 字段 + D10 CABE_HAVE_* 在 M6 闭环;
-    D18 批量 API 在 M7 闭环)
+    M7 大 value 批量 bench `p4-post-batch` 命令在 `bench/baselines/p4-summary.md`,
+    用户 Linux 端跑完后补入 summary
+  - 决策:**19 项全部闭环**(D7 第二部分 Options 字段 + D10 CABE_HAVE_* 在 M6 闭环;
+    D14 Model A → M8 决策 = 不做;D18 批量 API 在 M7 闭环)
   - 风险:**12 项全部闭环**(R12 sq_depth >= pool_count 校验在 M6 与 Options 字段一并加)
-  - 注释/文档同步状态:截至 M7 已统一刷到 M7 标号
-  - 详见下文「## P4 实施计划」(各 milestone 已加 ✅/❌ 状态)
+  - 注释/文档同步状态:M1-M9 全部刷到 P4 收尾状态
+  - 详见下文「## P4 实现摘要」与「## P4 实施计划」
 - **P5** WAL + 崩溃恢复 — 计划中
 - **P6** 多线程 Reactor 引擎 — 计划中
 - **P7** 自研 B+ 树 + 细粒度并发 — 计划中
@@ -66,6 +66,73 @@ M1–M6 全部落地。Q1–Q7 决策已闭环：
 
 衍生约束:Q2=A 是零拷贝路线（P4 FIXED / P8 scatter-gather / P9 SPDK）的前置契约,
 不能在后续阶段反复变更。
+## P4 实现摘要（io_uring 后端 + registered buffer pool）
+
+P4 范围:在 P3 抽象层基础上加 `IoUringIoBackend`,通过 `io_uring_register_buffers`
++ `*_FIXED` ops 兑现 P3 Q2 的零拷贝路线前置契约。公开 API 一字不变(D3),
+  异步化推到 P6 reactor。
+
+**M1–M9 全部落地**:
+- M1-M7 代码 + 测试落地(详见下文「P4 实施计划」各 milestone)
+- M8 评估闭环 = 不做(Model B 在 P6 路线图上无归宿,详见设计稿 §13 M8)
+- M9 收尾完成(bench 总结 + 文档 + 路线图状态)
+
+**D1–D19 决策全部闭环**(完整论述见 `doc/p4_io_uring_design.md` §3 + 附录 A):
+- D1 / D11 / D12:liburing 动态链接 + `>= 2.9`(运维便利,性能差 ≈ 0)
+- D2:1 ring / IoBackend 实例;多 NVMe 时多个 IoBackend 实例(P4+ 推进)
+- D3:P4 公开 API 保持 sync,异步化推到 P6
+- D4:M3 朴素 → M4 FIXED → M5 register_files 三档独立交付,逐档 bench 归档
+- D5 / D13:n × 1 MiB iovec 静态注册,`fixed_buf_index == slot_index`
+- D6:SQPOLL/IOPOLL 不进 P4(P6 reactor 阶段评估)
+- D7:`Options.io_uring_sq_depth = 64`(M6 加,Open 校验 sq>=pool 且 2 幂)
+- D8:错误码沿用 `IO_BACKEND_*` 七种,不新增
+- D9 / D17:Close 必须 drain CQE,无超时(健壮运行环境假设)
+- D10:`CABE_HAVE_IORING_SETUP_SINGLE_ISSUER` / `DEFER_TASKRUN` feature gate
+  (M6,为 P6 reactor 单生产者独占 ring 路径预留)
+- D14:Model A 起步;M8 评估 = 不做(P6 reactor 直接采用 per-thread ring 替代)
+- D15:register_buffers 失败 → Open 整体失败,不 fallback
+- D16:user_data 三档演进(M3-M6 = 0;M7 = 数组下标;P6 reactor = Request*)
+- D18:M7 batch API + Engine 多 chunk 接入(P4 收尾阶段引入,时机灵活)
+- D19:CMake + scripts 双层阻断 `io_uring + TSAN` 组合
+
+**R1–R12 风险点全部闭环**:
+- R1 RLIMIT_MEMLOCK 撞限 → D15 + README 部署文档 +
+  `RegisterBuffersFailsWhenPoolTooLarge` 测试(root 下 SKIP)
+- R2 TSAN false positive → D19 双层阻断
+- R3 O_DIRECT|O_SYNC 持久化语义 → 健壮运行假设,不主动 fsync 校验
+- R4 kernel worker punt → 不加 IOSQE_ASYNC,不监测
+- R5 liburing 跨版本 breaking → pkg-config `>= 2.9` 锁定
+- R6 M4 加速不及预期 → 实测 cpu_time 加速 16-82%,远超 5% 门
+- R7 Hardened kernel / Docker seccomp 禁 io_uring → Open 返回 NOT_OPEN +
+  README 列已知不支持环境(LXC 默认 / Hardened kernel `io_uring_disabled=2`)
+- R8 多线程 SQ 竞争 → Model A `io_mutex_` 串行,M7 batch 同锁
+- R9 Close drain 与 BufferHandle dtor 时序 → drain 完才解锁,Q7 force-release
+- R10 queue_exit 与未消费 CQE → drain 收齐才 queue_exit
+- R11 Engine/IoBackend 锁层级混乱 → §8.4 单向 + 注释文档化
+- R12 sq_depth < pool_count 误解 → M6 Open 校验 sq_depth >= pool_count
+
+**Q1–Q7 P3 衍生约束在 io_uring 后端的对齐**:
+- Q1 BufferHandle RAII 归还 ✅
+- Q2 AcquireBuffer 不清零 ✅(Q2=A 零拷贝前置契约)
+- Q3 池耗尽 = invalid handle ✅
+- Q4 buffer_pool_count = slot 语义 ✅
+- Q5 backend 编译期 dispatch `CABE_IO_BACKEND_IO_URING=1` ✅
+- Q6 SPDK 保留 P9 ✅(P4 不动)
+- Q7 Close + outstanding = Debug abort / Release warn ✅(io_uring 后端镜像)
+
+**关键性能数据**(M4 完成时实测,Fedora 43 + kernel 6.17.8 + Ryzen 9 9950X):
+- cpu_time 加速 16-82%(small op GUP 消除受益最大)
+- 远超设计稿 W4.6 验收门(≥ 5%)
+- bench 归档:`p4-m4-pre-fixed` / `p4-m4-post-fixed` / `p4-m5-post-fixed-files`
+- P4 各档 bench 对照见 `bench/baselines/p4-summary.md`
+
+**留给后续阶段的接口**:
+- **P5 WAL**:WAL 写就是普通 WriteBlock,BufferPool 已支持 metadata 类块
+- **P6 reactor**:IoBackend 抽象层不变,reactor 内部直接采用 per-reactor ring
+  (不沿用 Model B);`CABE_HAVE_IORING_SETUP_SINGLE_ISSUER` / `DEFER_TASKRUN`
+  feature gate 预留接入点;M7 batch API + `user_data = 数组下标` codebase 可复用
+- **P7 B+ 树**:节点 I/O 复用现有 BufferHandle 路径,自动享受 zero-copy
+- **P8 scatter-gather**:M7 batch API 是 scatter-gather 的中间形态;真正零拷贝在 P8
 
 ## P4 实施计划
 
@@ -111,10 +178,16 @@ bench 归档:
   → Phase C chunkIndex.Put / CRC校验+memcpy 输出;5 个 io_uring batch test 通过
   (Roundtrip / Empty / NullHandle / EquivalentToSerial / NotOpenError);
   bench 归档 `p4-post-batch` 留给 M9
-- **M8** ❌(可选)Model A → Model B 升级评估;触发条件:M7 数据显示 Model A
-  是多线程 Get 吞吐瓶颈
-- **M9** ❌ bench 归档总结 + README / 路线图收尾,设计稿状态 →「已实施」,
-  P4 状态 → ✅ 完成
+- **M8** ✅(评估 = 不做)Model A → Model B 升级评估闭环。理由:
+  (1) 架构定位错配 — P4 公开 API 仍为 sync(D3),Model B 内部异步化不改变用户视角
+  的阻塞;(2) 设备容量已饱和 — 1 MiB 块 + 单 NVMe 下 Model A 单线程已逼近带宽极限;
+  (3) **Model B 在 P6 路线图上无归宿** — P6 reactor 采用 1 ring / reactor 线程
+  (§5.2 ring 拓扑演进表),单生产者单消费者无锁,直接绕过 Model B 的 reaper +
+  inflight 表协议;(4) 复杂度成本约 700 行 + TSAN 不能验。详见
+  `doc/p4_io_uring_design.md` §13 M8 决策结论
+- **M9** ✅ bench 总结 `bench/baselines/p4-summary.md` + README Roadmap P4 → ✅ +
+  本文件加 "P4 实现摘要" + 设计稿状态 → "v1.0 已实施" + §20 Open Questions 全部
+  收口 + io_uring 后端顶部注释 P4 收尾标记
 
 ### 关键决策（D1–D19,完整论述见设计稿 §3）
 

@@ -3,7 +3,7 @@
  * Created Time: 2026-04-28
  * Created by: CodeFarmerPK
  *
- * IoUringIoBackend —— P4 io_uring 后端声明(M7 已落地,M8 评估待启动)。
+ * IoUringIoBackend —— P4 io_uring 后端声明(P4 ✅ 全部完成,2026-05-14 收尾)。
  *
  * 进度(详见 doc/p4_io_uring_design.md §13;Engine 公开 API 自 M6 起多了
  * Options.io_uring_sq_depth 一个可选字段,默认 64 完全向下兼容):
@@ -20,10 +20,15 @@
  *   M7 ✅ 内部 batch API(WriteBlocks/ReadBlocks)+ Engine 多 chunk 路径接入(D18):
  *         一次 submit_and_wait(N)+ io_uring_for_each_cqe + cq_advance(N),
  *         省 (N-1) 次 syscall 来回;sync 后端同名接口走 for-loop fallback
- *   M8 ❌ (可选)Model A → Model B 升级评估(reaper 线程,M7 数据决定)
- *   M9 ❌ bench 归档 + README/roadmap/设计稿状态收尾
+ *   M8 ✅ (评估 = 不做)Model A → Model B 升级评估闭环。Model B 在 P6 reactor
+ *         阶段被 per-thread ring 架构替代(§5.2 ring 拓扑演进表),不是 P6 的
+ *         中间形态;1 MiB 块 + 单 NVMe 下 Model A 单线程已逼近带宽极限;
+ *         公开 API 仍是 sync(D3)→ Model B 拿不到真正 overlap 收益。
+ *         详见设计稿 §13 M8 决策结论
+ *   M9 ✅ bench 总结(bench/baselines/p4-summary.md)+ README/roadmap/设计稿
+ *         状态 → "已实施";§20 Open Questions 全部收口
  *
- * 当前实现形态(截至 M7):
+ * 当前实现形态(P4 ✅ 全部完成):
  *   - 设备:O_DIRECT | O_SYNC | O_RDWR 打开裸块设备(同 sync 后端);fd 已
  *           registered(io_uring_register_files),SQE 用 IOSQE_FIXED_FILE +
  *           fd_idx=0 提交,跳过 fdget/fdput

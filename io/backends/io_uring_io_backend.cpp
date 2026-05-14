@@ -3,7 +3,7 @@
  * Created Time: 2026-04-28
  * Created by: CodeFarmerPK
  *
- * IoUringIoBackend —— P4 io_uring 后端实现(M7 已落地,M8 评估待启动)。
+ * IoUringIoBackend —— P4 io_uring 后端实现(P4 ✅ 全部完成,2026-05-14 收尾)。
  *
  * 截至 M7 状态:Open / Close / AcquireBuffer / IsOpen / BlockCount / is_closed /
  *          ReturnBuffer_Internal / WriteBlock / ReadBlock / WriteBlocks /
@@ -37,9 +37,18 @@
  *       - BatchWriteEquivalentToSerialWrites(批量与单笔写产物等价)
  *       - BatchOnNotOpenReturnsError(未 Open 时 batch 安全失败)
  *
- * M7 不做的(留给后续 milestone,详见 doc/p4_io_uring_design.md §13):
- *   M8: (可选)Model A → Model B 升级评估(reaper 线程,M7 bench 数据决定)
- *   M9: bench 归档 + README/roadmap/设计稿状态收尾
+ * M8 决策(评估 = 不做,详见 doc/p4_io_uring_design.md §13 M8 决策结论):
+ *   (1) 架构定位错配:P4 公开 API 仍为 sync(D3),Model B 内部异步化不改变用户视角
+ *   (2) 设备容量已饱和:1 MiB 块 + 单 NVMe 下 Model A 单线程已逼近带宽极限
+ *   (3) Model B 在 P6 路线图上无归宿:P6 reactor 采用 1 ring / reactor 线程
+ *       (§5.2 ring 拓扑演进表),单生产者单消费者无锁,直接绕过 Model B 协议
+ *   (4) 复杂度成本 ~700 行 + D19 阻断 io_uring+TSAN 难以严格验证
+ *
+ * M9 落地(2026-05-14 收尾):
+ *   - bench 总结 `bench/baselines/p4-summary.md`(P4 各档归档对照)
+ *   - README Roadmap 表 P4 → ✅ 完成 + 链接到设计稿和 bench summary
+ *   - memory/project_roadmap.md 两端加 "P4 实现摘要"
+ *   - 设计稿 §0 状态 → "v1.0 已实施" + §13 M9 ✅ + §20 Open Questions 全部收口
  *
  * 已有功能保留(M4-M6 兑现):
  *   - register_buffers + WRITE/READ_FIXED → buf_index 命中预注册 → 跳过 GUP/page pin
