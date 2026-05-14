@@ -37,7 +37,9 @@
 #include <atomic>
 #include <cstdint>
 #include <mutex>
+#include <span>
 #include <string>
+#include <utility>
 #include <vector>
 
 
@@ -91,6 +93,19 @@ public:
     // 返回 IO_BACKEND_INVALID_HANDLE。
     int32_t WriteBlock(BlockId blockId, const BufferHandle& handle);
     int32_t ReadBlock (BlockId blockId, BufferHandle&       handle);
+
+    // ===== 批量块 I/O(P4 M7,IoBackendTraits 一致)=====
+    // sync 后端实现 = for-loop 调用 WriteBlock/ReadBlock。语义、错误码、
+    // 返回时机完全等价于多次单笔调用,无额外 syscall 优化;存在的意义
+    // 是让 Engine 调用方对两种后端写一份代码(io_uring 后端在同名接口
+    // 下做真实批量提交)。
+    //
+    // batch 内任一项出错即刻返回首个非 SUCCESS 错码,失败前已完成的
+    // I/O 不做回滚(语义与 N 次单笔调用相同)。
+    // batch.size() == 0 直接返回 SUCCESS;handle 为空指针视为
+    // IO_BACKEND_INVALID_HANDLE(由底层 WriteBlock/ReadBlock 校验)。
+    int32_t WriteBlocks(std::span<const std::pair<BlockId, const BufferHandle*>> batch);
+    int32_t ReadBlocks (std::span<const std::pair<BlockId, BufferHandle*>>       batch);
 
     // ===== Q7 支持 =====
     // BufferHandleImpl 析构时查询。已 Close 则归还逻辑应 no-op 退出

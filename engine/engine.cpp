@@ -11,6 +11,7 @@
 #include "util/util.h"
 #include <algorithm>
 #include <cstring>
+#include <utility>
 
 Engine::~Engine() {
     // Close() 在 unique_lock 内检查 isOpen_，避免析构函数裸读 isOpen_
@@ -152,71 +153,142 @@ int32_t Engine::Put(const std::string& key, const DataView data) {
     const ChunkId firstChunkId = AllocateChunkIds(chunkCount);
     const uint64_t now = cabe::util::GetWallTimeNs();
 
-    // 记录已成功写入的 chunk 数量，用于失败时回滚
+    // writtenCount = 已 chunkIndex.Put 落地的 chunk 总数(跨批累加)。
+    // 失败时 rollback 路径按 [0, writtenCount) 逐个 chunkIndex.Remove + freeList.Release。
+    // 批量路径细节:每批 chunkIndex.Put 全部成功后整批 +N;部分 j 个成功就 +j;
+    // 已 Allocate 但还未 chunkIndex.Put 的 blocks 由内层显式 freeList.Release
+    // (slots 析构归还 handle 到 buffer pool)。
     uint32_t writtenCount = 0;
     int32_t failRet = SUCCESS;
 
-    // 逐 chunk 写入
-    for (uint32_t i = 0; i < chunkCount; ++i) {
-        const uint64_t offset = static_cast<uint64_t>(i) * CABE_VALUE_DATA_SIZE;
-        const uint64_t remaining = totalSize - offset;
-        const uint64_t chunkSize = std::min(static_cast<uint64_t>(CABE_VALUE_DATA_SIZE), remaining);
+    // ----------------------------------------------------------------
+    // P4 M7:批量 I/O 集成 —— 按 bufferPoolCount_ 分批。
+    //   原 P3 路径每个 chunk 单独 Acquire → memcpy → WriteBlock → chunkIndex.Put,
+    //   现在改成:
+    //     Phase A 一批内 Acquire N 个 handle + fill + 补尾 + CRC
+    //     Phase B 调一次 io_.WriteBlocks(span N)
+    //             - io_uring 后端:一次 submit_and_wait(N) + 一次 sweep,
+    //               省 (N-1) 次 syscall 来回
+    //             - sync 后端:for-loop 等价于 N 次单笔 WriteBlock
+    //     Phase C 写齐后逐 chunk chunkIndex.Put
+    //   slots / writeBatch 提到循环外 reserve(bufferPoolCount_),
+    //   每批 .clear() 复用 capacity,避免重分配。
+    //
+    //   batchN 上限 = min(remaining, bufferPoolCount_):buffer pool slot
+    //   总数即一次能 in-flight 的 I/O 上限;io_uring 后端 R12 已校验
+    //   sq_depth >= pool_count,所以 WriteBlocks 内 submit_and_wait(N)
+    //   不会撞 SQ 满。
+    // ----------------------------------------------------------------
+    struct PutSlot {
+        BlockId                blockId;
+        cabe::io::BufferHandle handle;
+        uint32_t               crc;
+    };
+    std::vector<PutSlot>                                                  slots;
+    std::vector<std::pair<BlockId, const cabe::io::BufferHandle*>>        writeBatch;
+    try {
+        slots.reserve(bufferPoolCount_);
+        writeBatch.reserve(bufferPoolCount_);
+    } catch (...) {
+        failRet = MEMORY_INSERT_FAIL;
+        goto rollback;
+    }
 
-        // 分配磁盘块
-        BlockId blockId;
-        int32_t ret = freeList_.Allocate(&blockId);
-        if (ret != SUCCESS) {
-            failRet = ret;
-            goto rollback;
-        }
+    for (uint32_t i = 0; i < chunkCount; ) {
+        const uint32_t batchN = std::min<uint32_t>(chunkCount - i, bufferPoolCount_);
+        slots.clear();
+        writeBatch.clear();
 
-        {
-            // P3 M3:通过 IoBackend 拿一块 1 MiB 对齐缓冲(RAII,作用域结束自动归还)
+
+        // ----- Phase A:批内 Acquire + memcpy + 补尾零 + CRC -----
+        bool phaseAOk = true;
+        for (uint32_t j = 0; j < batchN; ++j) {
+            const uint64_t offset    = static_cast<uint64_t>(i + j) * CABE_VALUE_DATA_SIZE;
+            const uint64_t remaining = totalSize - offset;
+            const uint64_t chunkSize = std::min(
+                static_cast<uint64_t>(CABE_VALUE_DATA_SIZE), remaining);
+
+            BlockId blockId;
+            int32_t ret = freeList_.Allocate(&blockId);
+            if (ret != SUCCESS) {
+                // 本批已 Allocate 但还未 WriteBlocks 的 blocks → 显式 Release
+                // (slots 析构会归还 handles 到 buffer pool)。
+                for (auto& s : slots) freeList_.Release(s.blockId);
+                failRet  = ret;
+                phaseAOk = false;
+                break;
+            }
             cabe::io::BufferHandle h = io_.AcquireBuffer();
             if (!h.valid()) {
                 freeList_.Release(blockId);
-                failRet = POOL_EXHAUSTED;
-                goto rollback;
+                for (auto& s : slots) freeList_.Release(s.blockId);
+                failRet  = POOL_EXHAUSTED;
+                phaseAOk = false;
+                break;
             }
-            // 拷贝用户数据到 buffer 头部
             std::memcpy(h.data(), data.data() + offset, chunkSize);
 
-            // Q2 契约:AcquireBuffer 不再 memset(原 BufferPool::Acquire 的清零行为
-            // 已被 P3 M2 的 SyncIoBackend 取消),小 value 分支必须显式补尾零。
-            // 否则 buffer 尾部是上次使用的残留(或全新 mmap 的 zero page,无保证),
-            // 会被 pwrite 写到磁盘 —— 破坏"同输入产同磁盘内容"的契约。
-            // CRC 只覆盖 [0, chunkSize),Get 侧只读 keyMeta.totalSize 字节,
-            // 所以补零不影响读出正确性,但保证磁盘内容确定性。
+            // Q2 契约:AcquireBuffer 不再 memset(P3 M2 起 SyncIoBackend
+            // 取消清零),小 chunk 必须显式补尾零 —— buffer 尾部残留会被
+            // 后续 WriteBlocks 写到磁盘,破坏"同输入产同磁盘内容"契约。
+            // CRC 只覆盖 [0, chunkSize),Get 侧只读 totalSize 字节,
+            // 补零不影响读出正确性,但保证磁盘内容确定性。
             if (chunkSize < CABE_VALUE_DATA_SIZE) {
                 std::memset(h.data() + chunkSize, 0,
                             CABE_VALUE_DATA_SIZE - chunkSize);
             }
-
-            // 写入磁盘(同步 pwrite,O_DIRECT|O_SYNC 落盘)
-            ret = io_.WriteBlock(blockId, h);
-            if (ret != SUCCESS) {
-                // h 走出作用域 RAII 归还,无需显式 release
-                freeList_.Release(blockId);
-                failRet = ret;
-                goto rollback;
-            }
-
-            // CRC 只覆盖有效数据 [0, chunkSize),不含末 chunk 的 padding zero。
-            // ChunkMeta.crc 的契约:与 Get 侧用同样公式算出的 chunkSize 相匹配
             const uint32_t crc = cabe::util::CRC32({h.data(), chunkSize});
 
-            // 写入第二层索引
-            const ChunkMeta chunkMeta = {.blockId = blockId, .crc = crc, .timestamp = now, .state = DataState::Active};
-            ret = chunkIndex_.Put(firstChunkId + i, chunkMeta);
-            if (ret != SUCCESS) {
-                freeList_.Release(blockId);
-                failRet = ret;
-                goto rollback;
-            }
-            // h 走出作用域,RAII 归还 buffer 到 io_ 内部 pool
+
+            // capacity 已 reserve(bufferPoolCount_),push 不再分配;
+            // PutSlot 含 BufferHandle 是 move-only,push_back 触发 move。
+            slots.push_back({blockId, std::move(h), crc});
+        }
+        if (!phaseAOk) {
+            goto rollback;
         }
 
-        ++writtenCount;
+
+        // ----- Phase B:一次 io_.WriteBlocks(N 项)----
+        // io_uring 后端把 N 个 SQE 一次提交并等齐 N 个 CQE,sync 后端
+        // for-loop 等价于 N 次单笔 WriteBlock。失败语义:任一项失败整批
+        // 失败,首个非 SUCCESS 错码透传;已写出到设备的 block 不回滚,
+        // 但本批的 N 个 blocks(chunkIndex 中尚未登记)在这里显式 Release。
+        for (const auto& s : slots) {
+            writeBatch.emplace_back(s.blockId, &s.handle);
+        }
+        const int32_t wr = io_.WriteBlocks(writeBatch);
+        if (wr != SUCCESS) {
+            for (auto& s : slots) freeList_.Release(s.blockId);
+            failRet = wr;
+            goto rollback;
+        }
+
+        // ----- Phase C:批内逐 chunk chunkIndex.Put -----
+        // chunkIndex.Put 几乎不失败(map insert,典型只在 bad_alloc 时失败)。
+        // 一旦中途 j 失败:本批前 j 个已落 chunkIndex → writtenCount += j
+        // 让外层 rollback 清理;后 (N-j) 个 blocks 未进 chunkIndex,
+        // 这里显式 freeList.Release。
+        for (uint32_t j = 0; j < slots.size(); ++j) {
+            const ChunkMeta cm = {.blockId   = slots[j].blockId,
+                                  .crc       = slots[j].crc,
+                                  .timestamp = now,
+                                  .state     = DataState::Active};
+            const int32_t cr = chunkIndex_.Put(firstChunkId + i + j, cm);
+            if (cr != SUCCESS) {
+                for (uint32_t k = j; k < slots.size(); ++k) {
+                    freeList_.Release(slots[k].blockId);
+                }
+                writtenCount += j;
+                failRet = cr;
+                goto rollback;
+            }
+        }
+        writtenCount += static_cast<uint32_t>(slots.size());
+        i += batchN;
+        // slots 在下批 .clear() 时析构 PutSlot → BufferHandle dtor
+        // → backend.ReturnBuffer_Internal,本批的 N 个 handle 在下批
+        // Acquire 之前已经全部归还到 buffer pool。
     }
 
     {
@@ -338,36 +410,75 @@ int32_t Engine::Get(const std::string& key, DataBuffer buffer, uint64_t* readSiz
         return ret;
     }
 
-    // 逐 chunk 读取并拼接
-    for (uint32_t i = 0; i < keyMeta.chunkCount; ++i) {
-        const ChunkMeta& meta = chunkMetas[i];
+    // ----------------------------------------------------------------
+    // P4 M7:批量读 —— 按 bufferPoolCount_ 分批 Acquire N 个 handle,
+    //   一次 io_.ReadBlocks(span)→ io_uring 后端 submit_and_wait(N) +
+    //   一次 sweep CQE,sync 后端 for-loop 等价。然后批内逐 chunk CRC
+    //   校验 + memcpy 到调用方 buffer。
+    //
+    //   GetSlot.meta 指向 chunkMetas[i+j],chunkMetas 在 GetRange 后
+    //   不再修改,指针在 Get 返回前保持有效。
+    // ----------------------------------------------------------------
+    struct GetSlot {
+        cabe::io::BufferHandle handle;
+        const ChunkMeta*       meta;
+        uint64_t               offset;
+        uint64_t               chunkSize;
+    };
+    std::vector<GetSlot>                                              slots;
+    std::vector<std::pair<BlockId, cabe::io::BufferHandle*>>          readBatch;
+    try {
+        slots.reserve(bufferPoolCount_);
+        readBatch.reserve(bufferPoolCount_);
+    } catch (...) {
+        return MEMORY_INSERT_FAIL;
+    }
 
-        // P3 M3:RAII handle 替代显式 Acquire/Release。各 early-return
-        // 路径下 h 走出作用域自动归还,无需手动 Release。
-        cabe::io::BufferHandle h = io_.AcquireBuffer();
-        if (!h.valid()) {
-            return POOL_EXHAUSTED;
+    for (uint32_t i = 0; i < keyMeta.chunkCount; ) {
+        const uint32_t batchN = std::min<uint32_t>(keyMeta.chunkCount - i,
+                                                    bufferPoolCount_);
+        slots.clear();
+        readBatch.clear();
+
+        // ----- Phase A:批内 Acquire N 个 handle + 记录 offset/chunkSize -----
+        for (uint32_t j = 0; j < batchN; ++j) {
+            cabe::io::BufferHandle h = io_.AcquireBuffer();
+            if (!h.valid()) {
+                // slots 内已 Acquire 的 handle 走出作用域 RAII 归还。
+                return POOL_EXHAUSTED;
+            }
+            const uint64_t offset    = static_cast<uint64_t>(i + j) * CABE_VALUE_DATA_SIZE;
+            const uint64_t remaining = keyMeta.totalSize - offset;
+            const uint64_t chunkSize = std::min(
+                static_cast<uint64_t>(CABE_VALUE_DATA_SIZE), remaining);
+            slots.push_back({std::move(h), &chunkMetas[i + j], offset, chunkSize});
         }
 
-        ret = io_.ReadBlock(meta.blockId, h);
+        // ----- Phase B:一次 io_.ReadBlocks(N 项)----
+        // io_uring 后端把 N 个 read SQE 一次提交 + 等齐 N CQE;
+        // sync 后端 for-loop pread 等价于 N 次单笔 ReadBlock。
+        // 任一失败整批失败,首个非 SUCCESS 错码透传(slots dtor 自动归还)。
+        for (auto& s : slots) {
+            readBatch.emplace_back(s.meta->blockId, &s.handle);
+        }
+        ret = io_.ReadBlocks(readBatch);
         if (ret != SUCCESS) {
-            return ret;     // h dtor 归还
+            return ret;
         }
 
-        // CRC 校验
-        // 先算本 chunk 的有效字节数：末 chunk 可能小于 CABE_VALUE_DATA_SIZE
-        const uint64_t offset = static_cast<uint64_t>(i) * CABE_VALUE_DATA_SIZE;
-        const uint64_t remaining = keyMeta.totalSize - offset;
-        const uint64_t chunkSize = std::min(static_cast<uint64_t>(CABE_VALUE_DATA_SIZE), remaining);
-
-        // CRC 校验：与 Put 侧契约一致，只覆盖 [0, chunkSize) 的有效数据
-        if (const uint32_t crc = cabe::util::CRC32({h.data(), chunkSize}); crc != meta.crc) {
-            return DATA_CRC_MISMATCH;     // h dtor 归还
+        // ----- Phase C:批内逐 chunk CRC + memcpy 到调用方 buffer -----
+        // CRC 与 Put 侧契约一致,只覆盖 [0, chunkSize) 的有效数据
+        // (末 chunk 的 padding zero 不参与 CRC)。
+        for (const auto& s : slots) {
+            if (const uint32_t crc = cabe::util::CRC32({s.handle.data(), s.chunkSize});
+                crc != s.meta->crc) {
+                return DATA_CRC_MISMATCH;
+            }
+            std::memcpy(buffer.data() + s.offset, s.handle.data(), s.chunkSize);
         }
 
-        // 拷贝到调用方 buffer
-        std::memcpy(buffer.data() + offset, h.data(), chunkSize);
-        // h 走出循环体,RAII 归还
+        i += batchN;
+        // slots 在下批 .clear() 时归还本批所有 handle 到 buffer pool。
     }
 
     *readSize = keyMeta.totalSize;
@@ -422,35 +533,67 @@ int32_t Engine::GetIntoVector(const std::string& key, std::vector<std::byte>* ou
         return ret;
     }
 
-    for (uint32_t i = 0; i < keyMeta.chunkCount; ++i) {
-        const ChunkMeta& meta = chunkMetas[i];
+    // ----------------------------------------------------------------
+    // P4 M7:批量读 —— 结构与 Get 完全对称,差异是写入 *out 而非 DataBuffer,
+    //   失败路径需要 out->clear()(契约:除 nullptr 外的失败都 clear)。
+    // ----------------------------------------------------------------
+    struct GetSlot {
+        cabe::io::BufferHandle handle;
+        const ChunkMeta*       meta;
+        uint64_t               offset;
+        uint64_t               chunkSize;
+    };
+    std::vector<GetSlot>                                              slots;
+    std::vector<std::pair<BlockId, cabe::io::BufferHandle*>>          readBatch;
+    try {
+        slots.reserve(bufferPoolCount_);
+        readBatch.reserve(bufferPoolCount_);
+    } catch (...) {
+        out->clear();
+        return MEMORY_INSERT_FAIL;
+    }
 
-        // P3 M3:RAII handle 替代显式 Acquire/Release。
-        cabe::io::BufferHandle h = io_.AcquireBuffer();
-        if (!h.valid()) {
-            out->clear();
-            return POOL_EXHAUSTED;
+    for (uint32_t i = 0; i < keyMeta.chunkCount; ) {
+        const uint32_t batchN = std::min<uint32_t>(keyMeta.chunkCount - i,
+                                                    bufferPoolCount_);
+        slots.clear();
+        readBatch.clear();
+
+        // ----- Phase A:批内 Acquire -----
+        for (uint32_t j = 0; j < batchN; ++j) {
+            cabe::io::BufferHandle h = io_.AcquireBuffer();
+            if (!h.valid()) {
+                out->clear();
+                return POOL_EXHAUSTED;
+            }
+            const uint64_t offset    = static_cast<uint64_t>(i + j) * CABE_VALUE_DATA_SIZE;
+            const uint64_t remaining = keyMeta.totalSize - offset;
+            const uint64_t chunkSize = std::min(
+                static_cast<uint64_t>(CABE_VALUE_DATA_SIZE), remaining);
+            slots.push_back({std::move(h), &chunkMetas[i + j], offset, chunkSize});
         }
 
-        ret = io_.ReadBlock(meta.blockId, h);
+        // ----- Phase B:一次 io_.ReadBlocks -----
+        for (auto& s : slots) {
+            readBatch.emplace_back(s.meta->blockId, &s.handle);
+        }
+        ret = io_.ReadBlocks(readBatch);
         if (ret != SUCCESS) {
             out->clear();
-            return ret;     // h dtor 归还
+            return ret;
         }
 
-        const uint64_t offset = static_cast<uint64_t>(i) * CABE_VALUE_DATA_SIZE;
-        const uint64_t remaining = keyMeta.totalSize - offset;
-        const uint64_t chunkSize = std::min(static_cast<uint64_t>(CABE_VALUE_DATA_SIZE), remaining);
-
-        // CRC 校验：与 Put 侧契约一致，只覆盖 [0, chunkSize) 的有效数据
-        if (const uint32_t crc = cabe::util::CRC32({h.data(), chunkSize}); crc != meta.crc) {
-            out->clear();
-            return DATA_CRC_MISMATCH;     // h dtor 归还
+        // ----- Phase C:批内 CRC + memcpy 到 *out -----
+        // char* → std::byte*:两者都是单字节类型,memcpy 合法无 UB。
+        for (const auto& s : slots) {
+            if (const uint32_t crc = cabe::util::CRC32({s.handle.data(), s.chunkSize});
+                crc != s.meta->crc) {
+                out->clear();
+                return DATA_CRC_MISMATCH;
+            }
+            std::memcpy(out->data() + s.offset, s.handle.data(), s.chunkSize);
         }
-
-        // char* → std::byte*：两者均为单字节类型，memcpy 合法无 UB
-        std::memcpy(out->data() + offset, h.data(), chunkSize);
-        // h 走出循环体,RAII 归还
+        i += batchN;
     }
 
     return SUCCESS;

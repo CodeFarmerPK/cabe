@@ -37,6 +37,7 @@
 
 #include <cerrno>
 #include <cstdlib>
+#include <span>
 #include <utility>
 
 #include <fcntl.h>
@@ -395,6 +396,41 @@ int32_t SyncIoBackend::ReadBlock(const BlockId blockId, BufferHandle& handle) {
     const ssize_t bytesRead = PReadAll(fd_, dataPtr, CABE_VALUE_DATA_SIZE, offset);
     if (bytesRead < 0 || static_cast<std::size_t>(bytesRead) != CABE_VALUE_DATA_SIZE) {
         return DEVICE_FAILED_TO_READ_DATA;
+    }
+    return SUCCESS;
+}
+
+// =====================================================================
+// 批量 I/O(P4 M7)—— sync 后端 for-loop fallback。
+// 单笔 WriteBlock/ReadBlock 已对 fd 并发安全(pread/pwrite 在不同 offset
+// 上无须串行),这里只是把"调用方一次 call 拿到 N 个 chunk 的语义"折成
+// N 次单笔。没有额外锁,没有额外 syscall 优化 —— io_uring 后端在同名
+// 接口下做真实批量提交,Engine 调用方一套代码两个后端通吃。
+// =====================================================================
+int32_t SyncIoBackend::WriteBlocks(std::span<const std::pair<BlockId, const BufferHandle*>> batch) {
+    for (const auto& [blockId, handlePtr] : batch) {
+        if (handlePtr == nullptr) {
+            // span 视图本身允许空 handle 指针,这里显式拦下与 WriteBlock 一致
+            // (WriteBlock 入参是 const&,无法表达 null;span 入口必须自己 check)。
+            return IO_BACKEND_INVALID_HANDLE;
+        }
+        const int32_t rc = WriteBlock(blockId, *handlePtr);
+        if (rc != SUCCESS) {
+            return rc;
+        }
+    }
+    return SUCCESS;
+}
+
+int32_t SyncIoBackend::ReadBlocks(std::span<const std::pair<BlockId, BufferHandle*>> batch) {
+    for (const auto& [blockId, handlePtr] : batch) {
+        if (handlePtr == nullptr) {
+            return IO_BACKEND_INVALID_HANDLE;
+        }
+        const int32_t rc = ReadBlock(blockId, *handlePtr);
+        if (rc != SUCCESS) {
+            return rc;
+        }
     }
     return SUCCESS;
 }

@@ -3,43 +3,49 @@
  * Created Time: 2026-04-28
  * Created by: CodeFarmerPK
  *
- * IoUringIoBackend —— P4 io_uring 后端实现(M6 已落地,M7 待启动)。
+ * IoUringIoBackend —— P4 io_uring 后端实现(M7 已落地,M8 评估待启动)。
  *
- * 截至 M6 状态:Open / Close / AcquireBuffer / IsOpen / BlockCount / is_closed /
- *          ReturnBuffer_Internal / WriteBlock / ReadBlock 全部真实实现。
- *          WriteBlock / ReadBlock 走 Model A(粗 io_mutex_ +
+ * 截至 M7 状态:Open / Close / AcquireBuffer / IsOpen / BlockCount / is_closed /
+ *          ReturnBuffer_Internal / WriteBlock / ReadBlock / WriteBlocks /
+ *          ReadBlocks 全部真实实现。
+ *          单笔 WriteBlock / ReadBlock 走 Model A(粗 io_mutex_ +
  *          io_uring_prep_write_fixed / prep_read_fixed + submit_and_wait(1)),
  *          fd 已 registered + SQE 用 IOSQE_FIXED_FILE + fd_idx=0 提交。
+ *          M7 批量 WriteBlocks / ReadBlocks 同 Model A 锁,但一次锁内
+ *          prep N 个 SQE → submit_and_wait(N) → io_uring_for_each_cqe
+ *          + cq_advance(N),省 (N-1) 次 syscall 来回。
  *          SQ depth 从 Options.io_uring_sq_depth 取(D7),Open 校验
  *          sq_depth >= pool_count(R12)且是 2 的幂(D7)。
  *
- * M6 落地的功能(M5 基础上新增):
- *   - 公开 API:include/cabe/options.h 加 io_uring_sq_depth 字段(D7 第二部分)
- *   - IoBackendTraits trait Open 加 3rd 参数 sqDepth(sync 后端忽略)
- *   - Open 校验:sq_depth >= pool_count(R12)+ sq_depth 是 2 的幂(D7)
- *   - io_uring_queue_init 用 sqDepth 替代 kDefaultSqDepth 硬编码
- *   - Engine 公开 API 透传 Options.io_uring_sq_depth → 内部 Engine.Open
- *     → io_.Open(同实例 re-Open 幂等校验包含 sqDepth)
- *   - 4 个 io_uring 专属测试(test/io/io_uring_specific_test.cpp):
- *       - OpenRejectsSqDepthLessThanPoolCount(R12 验证)
- *       - OpenRejectsSqDepthNotPowerOfTwo(D7 验证)
- *       - RegisterBufferIndexMatchesSlot(buf_index 一一映射验证)
- *       - CloseDrainsInflightSubmissions(大量 W/R 后 Close 干净)
- *       - WriteBlockEAGAINRetriesOnce(SKIP,等 M7 batch 才能触发)
- *   - README "Production deployment notes" 章节(R7):ulimit / systemd
- *     LimitMEMLOCK / hardened kernel / Docker seccomp / Options.sq_depth 配置
- *   - CMakeLists CABE_HAVE_* feature gate try_compile(D10):探测
- *     IORING_SETUP_SINGLE_ISSUER / IORING_SETUP_DEFER_TASKRUN 标志,
- *     给 M8 / P6 reactor 阶段留接入点
+ * M7 落地的功能(M6 基础上新增):
+ *   - IoBackendTraits concept 加 WriteBlocks/ReadBlocks 签名,sync 与 io_uring
+ *     两类后端都实现。span<pair<BlockId, [const] BufferHandle*>> 入参,
+ *     调用方持 vector,backend 不 copy/move,只读 N 项 (blockId, handlePtr)
+ *   - sync 后端 WriteBlocks/ReadBlocks 退化为 for-loop 调用单笔,无额外锁,
+ *     语义与多次单笔调用完全等价(D18 一致 trait 但分档优化)
+ *   - io_uring 后端 WriteBlocks/ReadBlocks 真实批量:
+ *       prep N 个 SQE(user_data=i) → io_uring_submit_and_wait(ring, N)
+ *       → io_uring_for_each_cqe + 单次 io_uring_cq_advance(N) sweep
+ *     比 N 次单笔节省 (N-1) 次 syscall(submit 1 次替代 N 次,advance 1 次替代 N 次)
+ *   - Engine::Put / Get / GetIntoVector 多 chunk 路径全部切到批量 API:
+ *     按 bufferPoolCount_ 分批,每批 Phase A(Acquire+memcpy+CRC)→
+ *     Phase B(WriteBlocks/ReadBlocks)→ Phase C(chunkIndex.Put / 校验 CRC + memcpy)
+ *   - test/io/io_uring_specific_test.cpp 新增 5 个 M7 case:
+ *       - WriteBlocksReadBlocksRoundtrip(8 个 pattern + 路由不串验证)
+ *       - EmptyBatchReturnsSuccess(n=0 短路 SUCCESS)
+ *       - BatchRejectsNullHandle(handlePtr nullptr 返回 INVALID_HANDLE)
+ *       - BatchWriteEquivalentToSerialWrites(批量与单笔写产物等价)
+ *       - BatchOnNotOpenReturnsError(未 Open 时 batch 安全失败)
  *
- * M6 不做的(留给后续 milestone,详见 doc/p4_io_uring_design.md §13):
- *   M7: WriteBlocks / ReadBlocks 批量 API + Engine 多 chunk 路径接入(D18)
- *   M8: (可选)Model A → Model B 升级(reaper 线程,M7 数据决定)
+ * M7 不做的(留给后续 milestone,详见 doc/p4_io_uring_design.md §13):
+ *   M8: (可选)Model A → Model B 升级评估(reaper 线程,M7 bench 数据决定)
  *   M9: bench 归档 + README/roadmap/设计稿状态收尾
  *
- * 已有功能保留(M4 兑现):
+ * 已有功能保留(M4-M6 兑现):
  *   - register_buffers + WRITE/READ_FIXED → buf_index 命中预注册 → 跳过 GUP/page pin
  *     bench 验证 cpu_time 加速 16–82%,远超设计稿 W4.6 的 5% 验收门
+ *   - register_files + IOSQE_FIXED_FILE → 跳过 fdget/fdput(M5)
+ *   - Options.io_uring_sq_depth(D7)+ R12 校验 + production deployment notes
  *   - 测试:test/io/io_uring_specific_test.cpp::RegisterBuffersFailsWhenPoolTooLarge
  *     覆盖 D15 失败路径(root 下 SKIP,见 fixture 顶部注释)
  *
@@ -50,19 +56,24 @@
  *     io_uring 特有的 submit / cqe 错误用 IO_BACKEND_SUBMIT_FAILED / IO_FAILED
  *     (sync 在底层用 pwrite,失败用 DEVICE_FAILED_TO_WRITE_DATA;两者经
  *      TranslateStatus 统一映射到 cabe::Status::IOError)
+ *   - 批量 API:sync 后端 for-loop 等价于 N 次单笔,io_uring 后端
+ *     真实批量;两者语义一致,Engine 调用方一套代码两后端通吃
  *   - 参考 memory/project_roadmap.md Q1-Q7 决策
  *
- * io_uring 特有项(截至 M5):
- *   - SQ depth 固定 64(M6 起从 Options.io_uring_sq_depth 取);Model A 一次只发
- *     1 个 op,depth 数值不影响功能正确性
- *   - registered file(M5):Open 内 register_files 一次,sqe 用 IOSQE_FIXED_FILE
- *     + fd_idx=0 提交;Close drain 之后 unregister_files 先于 unregister_buffers
+ * io_uring 特有项(截至 M7):
+ *   - SQ depth 从 Options.io_uring_sq_depth 取(M6),Open 校验 sq>=pool 且 2 幂
+ *   - registered file(M5):Open 内 register_files 一次,所有 sqe 用
+ *     IOSQE_FIXED_FILE + fd_idx=0 提交;Close drain 之后 unregister_files
+ *     先于 unregister_buffers
+ *   - registered buffer(M4):Open 内 register_buffers,WriteBlock/Blocks
+ *     与 ReadBlock/Blocks 用 prep_*_fixed + buf_index = slot_index 提交
  *   - PIMPL RingState 隐藏 liburing 类型,公开头零依赖 liburing.h
- *   - Model A:io_mutex_ 全程持锁。WriteBlock / ReadBlock 入口先 fast-path 检查
- *     closed_,锁内 recheck closed_ 再访问 ring_state_,防止与 Close 的 race
- *     UAF(Close 拿 io_mutex_ 后会 destroy ring_state_)
- *   - drain 循环 D17 不带超时(健壮运行环境假设);截至 M5 阶段 in_flight_count_
- *     在 W/R 退出 io_mutex_ 临界区前必归 0,Close drain 仍是 no-op,
+ *   - Model A:io_mutex_ 全程持锁(单笔 + 批量统一)。WriteBlock / ReadBlock /
+ *     WriteBlocks / ReadBlocks 入口先 fast-path 检查 closed_,锁内 recheck
+ *     closed_ 再访问 ring_state_,防止与 Close 的 race UAF(Close 拿 io_mutex_
+ *     后会 destroy ring_state_)
+ *   - drain 循环 D17 不带超时(健壮运行环境假设);Model A 单笔 / 批量都在
+ *     退出 io_mutex_ 临界区前归 0 in_flight_count_,Close drain 仍是 no-op;
  *     M8 Model B 才会真正利用 drain 循环
  *
  * 详细设计:doc/p4_io_uring_design.md §6、§8、§9、§10
@@ -77,6 +88,7 @@
 #include <cerrno>
 #include <cstdlib>
 #include <memory>
+#include <span>
 #include <utility>
 
 #include <fcntl.h>
@@ -753,6 +765,298 @@ int32_t IoUringIoBackend::ReadBlock(const BlockId blockId, BufferHandle& handle)
     return SUCCESS;
 }
 
+// =====================================================================
+// 批量 I/O(P4 M7):真实批量提交。
+//
+// 模式:io_mutex_ 全程持锁(Model A) → 锁外预校验 + 锁内 prep N 个 SQE
+//   → submit_and_wait(N) → io_uring_for_each_cqe 一次 sweep → cq_advance(N)
+//   → in_flight_count_ 减 N。一次 batch 把 (N-1) 次 submit + (N-1) 次
+//   cq_advance 折叠掉,这是 M7 syscall 节省的主要来源。
+//
+// 错误语义(与 N 次单笔等价,设计文档 §9):
+//   - 任一 cqe.res < 0 或 short I/O → 整批失败,返回首个非 SUCCESS 错码
+//   - 已成功完成的 I/O 不回滚(失败前已写到设备的 block 留在那里;
+//     Engine 在写齐 metaIndex 之前不暴露给读路径,保证对外不可见)
+//   - get_sqe 失败时:把已 prep 的 i 个 SQE 提交并等齐 sweep,
+//     避免脏 ring 影响下次 submit。正常路径不应到此(R12 + Engine
+//     分批保证 n <= pool_count <= sq_depth)。
+//
+// 与单笔 WriteBlock/ReadBlock 的关系:
+//   - n == 1 的批量与单笔语义完全等价,但多走一次校验循环,微开销可忽略
+//   - Engine 多 chunk 路径用 WriteBlocks/ReadBlocks 统一调用,
+//     单 chunk 仍走单笔 WriteBlock(避免一次 batch 启动开销)
+// =====================================================================
+int32_t IoUringIoBackend::WriteBlocks(
+    std::span<const std::pair<BlockId, const BufferHandle*>> batch) {
+    const std::size_t n = batch.size();
+    if (n == 0) {
+        return SUCCESS;
+    }
+
+    // ---- 入口快速校验(无需 io_mutex_,字段在 opened_→Close 之间不变)----
+    if (!opened_ || closed_.load(std::memory_order_acquire)) {
+        return IO_BACKEND_NOT_OPEN;
+    }
+
+    // ---- 锁外逐项预校验,避免半提交后回滚 ring ----
+    for (std::size_t i = 0; i < n; ++i) {
+        const auto& [blockId, handlePtr] = batch[i];
+        if (handlePtr == nullptr || !handlePtr->valid()) {
+            return IO_BACKEND_INVALID_HANDLE;
+        }
+        if (handlePtr->size() != CABE_VALUE_DATA_SIZE) {
+            return CABE_INVALID_DATA_SIZE;
+        }
+        const char* const dataPtr = handlePtr->data();
+        if (dataPtr < poolBase_ || dataPtr >= poolBase_ + poolTotalSize_) {
+            return IO_BACKEND_INVALID_HANDLE;
+        }
+        if (blockId >= blockCount_) {
+            return DEVICE_NO_SPACE;
+        }
+    }
+
+    // ---- Model A:io_mutex_ 全程持锁 ----
+    std::lock_guard<std::mutex> lock(io_mutex_);
+
+    // 锁内 recheck closed_:防 Close 在等锁期间 destroy ring_state_(UAF)。
+    if (closed_.load(std::memory_order_acquire)) {
+        return IO_BACKEND_NOT_OPEN;
+    }
+
+    // ---- prep N 个 SQE ----
+    // 任一 get_sqe 失败时:已 prep 的 i 个 SQE 在 sq_tail 中无法回滚
+    // (liburing 没有 prep-undo API)。最稳的恢复路径是 submit + 等齐 sweep
+    // 这 i 个,确保 ring 干净。R12 + Engine 分批已保证 n <= sq_depth,
+    // 此分支正常不应触发。
+    for (std::size_t i = 0; i < n; ++i) {
+        io_uring_sqe* sqe = ::io_uring_get_sqe(&ring_state_->ring);
+        if (sqe == nullptr) {
+            CABE_LOG_ERROR("IoUringIoBackend::WriteBlocks: get_sqe failed at i=%zu (n=%zu)",
+                           i, n);
+            if (i > 0) {
+                in_flight_count_.fetch_add(static_cast<std::uint32_t>(i),
+                                            std::memory_order_acq_rel);
+                const int sub = ::io_uring_submit_and_wait(&ring_state_->ring,
+                                                            static_cast<unsigned>(i));
+                if (sub >= 0) {
+                    unsigned drained = 0;
+                    unsigned head;
+                    io_uring_cqe* dcqe = nullptr;
+                    io_uring_for_each_cqe(&ring_state_->ring, head, dcqe) {
+                        (void) head; (void) dcqe;
+                        ++drained;
+                        if (drained >= static_cast<unsigned>(i)) break;
+                    }
+                    ::io_uring_cq_advance(&ring_state_->ring, drained);
+                    in_flight_count_.fetch_sub(drained, std::memory_order_acq_rel);
+                }
+            }
+            return IO_BACKEND_SUBMIT_FAILED;
+        }
+        const auto& [blockId, handlePtr] = batch[i];
+        const off_t offset = static_cast<off_t>(blockId) * CABE_VALUE_DATA_SIZE;
+        const std::uint32_t fixed_buf_idx = handlePtr->impl_->fixed_buf_index_;
+        const char* const dataPtr = handlePtr->data();
+
+        // 与单笔 WriteBlock 完全一致:fd_idx=0(registered file)
+        // + prep_write_fixed + IOSQE_FIXED_FILE,跳过 GUP / fdget。
+        ::io_uring_prep_write_fixed(sqe, /*fd_idx=*/0, dataPtr, CABE_VALUE_DATA_SIZE,
+                                    static_cast<__u64>(offset),
+                                    static_cast<int>(fixed_buf_idx));
+        sqe->flags    |= IOSQE_FIXED_FILE;
+        // user_data = batch 索引,sweep 时方便日志定位失败的批内位置
+        sqe->user_data = static_cast<__u64>(i);
+    }
+
+    in_flight_count_.fetch_add(static_cast<std::uint32_t>(n),
+                                std::memory_order_acq_rel);
+
+    // ---- 一次 submit_and_wait(N):N 个 SQE 一并提交 + 等齐 N 个 CQE ----
+    int submitted = ::io_uring_submit_and_wait(&ring_state_->ring,
+                                                 static_cast<unsigned>(n));
+    if (submitted == -EAGAIN) {
+        submitted = ::io_uring_submit_and_wait(&ring_state_->ring,
+                                                static_cast<unsigned>(n));
+    }
+    if (submitted < 0) {
+        // submit 失败:保守地视为 n 个全部未消费,dec 全量,后续 Close drain
+        // 会自然收尾。正常路径不应到(EAGAIN 二次退避仍失败 = 资源问题)。
+        in_flight_count_.fetch_sub(static_cast<std::uint32_t>(n),
+                                    std::memory_order_acq_rel);
+        return IO_BACKEND_SUBMIT_FAILED;
+    }
+
+    // ---- 一次 sweep N 个 CQE + 一次 cq_advance(N)----
+    // 比 N 次 peek + cqe_seen 少 (N-1) 次 cq_advance 的 atomic store。
+    // 任一 cqe.res 异常 → 记录首个错码;其他 cqe 继续 sweep 把 cq 头推齐,
+    // 避免脏 ring。
+    int32_t firstErr   = SUCCESS;
+    unsigned cqeCount  = 0;
+    unsigned head;
+    io_uring_cqe* cqe = nullptr;
+    io_uring_for_each_cqe(&ring_state_->ring, head, cqe) {
+        (void) head;
+        ++cqeCount;
+        const int32_t res = cqe->res;
+        if (res < 0) {
+            if (firstErr == SUCCESS) {
+                firstErr = IO_BACKEND_IO_FAILED;
+                CABE_LOG_ERROR("IoUringIoBackend::WriteBlocks: cqe[%llu].res=%d "
+                               "(errno=%d)",
+                               static_cast<unsigned long long>(cqe->user_data),
+                               res, -res);
+            }
+        } else if (static_cast<std::size_t>(res) != CABE_VALUE_DATA_SIZE) {
+            if (firstErr == SUCCESS) {
+                firstErr = IO_BACKEND_IO_FAILED;
+                CABE_LOG_ERROR("IoUringIoBackend::WriteBlocks: cqe[%llu] short "
+                               "write res=%d expected=%zu",
+                               static_cast<unsigned long long>(cqe->user_data),
+                               res, CABE_VALUE_DATA_SIZE);
+            }
+        }
+        if (cqeCount >= n) break;
+    }
+    ::io_uring_cq_advance(&ring_state_->ring, cqeCount);
+    in_flight_count_.fetch_sub(cqeCount, std::memory_order_acq_rel);
+
+    if (cqeCount != n && firstErr == SUCCESS) {
+        CABE_LOG_ERROR("IoUringIoBackend::WriteBlocks: got %u cqes, expected %zu",
+                       cqeCount, n);
+        firstErr = IO_BACKEND_IO_FAILED;
+    }
+
+    return firstErr;
+}
+
+int32_t IoUringIoBackend::ReadBlocks(
+    std::span<const std::pair<BlockId, BufferHandle*>> batch) {
+    // 与 WriteBlocks 完全对称,仅 prep_write_fixed → prep_read_fixed
+    // 与日志字符串差异。详细注释见 WriteBlocks;M8/M9 视 bench 再决定
+    // 是否抽公共 helper(目前两份代码各 ~120 行,显式镜像更易跟踪)。
+    const std::size_t n = batch.size();
+    if (n == 0) {
+        return SUCCESS;
+    }
+
+    if (!opened_ || closed_.load(std::memory_order_acquire)) {
+        return IO_BACKEND_NOT_OPEN;
+    }
+
+    for (std::size_t i = 0; i < n; ++i) {
+        const auto& [blockId, handlePtr] = batch[i];
+        if (handlePtr == nullptr || !handlePtr->valid()) {
+            return IO_BACKEND_INVALID_HANDLE;
+        }
+        if (handlePtr->size() != CABE_VALUE_DATA_SIZE) {
+            return CABE_INVALID_DATA_SIZE;
+        }
+        const char* const dataPtr = handlePtr->data();
+        if (dataPtr < poolBase_ || dataPtr >= poolBase_ + poolTotalSize_) {
+            return IO_BACKEND_INVALID_HANDLE;
+        }
+        if (blockId >= blockCount_) {
+            return DEVICE_NO_SPACE;
+        }
+    }
+
+    std::lock_guard<std::mutex> lock(io_mutex_);
+
+    if (closed_.load(std::memory_order_acquire)) {
+        return IO_BACKEND_NOT_OPEN;
+    }
+
+    for (std::size_t i = 0; i < n; ++i) {
+        io_uring_sqe* sqe = ::io_uring_get_sqe(&ring_state_->ring);
+        if (sqe == nullptr) {
+            CABE_LOG_ERROR("IoUringIoBackend::ReadBlocks: get_sqe failed at i=%zu (n=%zu)",
+                           i, n);
+            if (i > 0) {
+                in_flight_count_.fetch_add(static_cast<std::uint32_t>(i),
+                                            std::memory_order_acq_rel);
+                const int sub = ::io_uring_submit_and_wait(&ring_state_->ring,
+                                                            static_cast<unsigned>(i));
+                if (sub >= 0) {
+                    unsigned drained = 0;
+                    unsigned head;
+                    io_uring_cqe* dcqe = nullptr;
+                    io_uring_for_each_cqe(&ring_state_->ring, head, dcqe) {
+                        (void) head; (void) dcqe;
+                        ++drained;
+                        if (drained >= static_cast<unsigned>(i)) break;
+                    }
+                    ::io_uring_cq_advance(&ring_state_->ring, drained);
+                    in_flight_count_.fetch_sub(drained, std::memory_order_acq_rel);
+                }
+            }
+            return IO_BACKEND_SUBMIT_FAILED;
+        }
+        const auto& [blockId, handlePtr] = batch[i];
+        const off_t offset = static_cast<off_t>(blockId) * CABE_VALUE_DATA_SIZE;
+        const std::uint32_t fixed_buf_idx = handlePtr->impl_->fixed_buf_index_;
+        char* const dataPtr = handlePtr->data();
+
+        ::io_uring_prep_read_fixed(sqe, /*fd_idx=*/0, dataPtr, CABE_VALUE_DATA_SIZE,
+                                   static_cast<__u64>(offset),
+                                   static_cast<int>(fixed_buf_idx));
+        sqe->flags    |= IOSQE_FIXED_FILE;
+        sqe->user_data = static_cast<__u64>(i);
+    }
+
+    in_flight_count_.fetch_add(static_cast<std::uint32_t>(n),
+                                std::memory_order_acq_rel);
+
+    int submitted = ::io_uring_submit_and_wait(&ring_state_->ring,
+                                                 static_cast<unsigned>(n));
+    if (submitted == -EAGAIN) {
+        submitted = ::io_uring_submit_and_wait(&ring_state_->ring,
+                                                static_cast<unsigned>(n));
+    }
+    if (submitted < 0) {
+        in_flight_count_.fetch_sub(static_cast<std::uint32_t>(n),
+                                    std::memory_order_acq_rel);
+        return IO_BACKEND_SUBMIT_FAILED;
+    }
+
+    int32_t firstErr   = SUCCESS;
+    unsigned cqeCount  = 0;
+    unsigned head;
+    io_uring_cqe* cqe = nullptr;
+    io_uring_for_each_cqe(&ring_state_->ring, head, cqe) {
+        (void) head;
+        ++cqeCount;
+        const int32_t res = cqe->res;
+        if (res < 0) {
+            if (firstErr == SUCCESS) {
+                firstErr = IO_BACKEND_IO_FAILED;
+                CABE_LOG_ERROR("IoUringIoBackend::ReadBlocks: cqe[%llu].res=%d "
+                               "(errno=%d)",
+                               static_cast<unsigned long long>(cqe->user_data),
+                               res, -res);
+            }
+        } else if (static_cast<std::size_t>(res) != CABE_VALUE_DATA_SIZE) {
+            if (firstErr == SUCCESS) {
+                firstErr = IO_BACKEND_IO_FAILED;
+                CABE_LOG_ERROR("IoUringIoBackend::ReadBlocks: cqe[%llu] short "
+                               "read res=%d expected=%zu",
+                               static_cast<unsigned long long>(cqe->user_data),
+                               res, CABE_VALUE_DATA_SIZE);
+            }
+        }
+        if (cqeCount >= n) break;
+    }
+    ::io_uring_cq_advance(&ring_state_->ring, cqeCount);
+    in_flight_count_.fetch_sub(cqeCount, std::memory_order_acq_rel);
+
+    if (cqeCount != n && firstErr == SUCCESS) {
+        CABE_LOG_ERROR("IoUringIoBackend::ReadBlocks: got %u cqes, expected %zu",
+                       cqeCount, n);
+        firstErr = IO_BACKEND_IO_FAILED;
+    }
+
+    return firstErr;
+}
 
 void IoUringIoBackend::ReturnBuffer_Internal(BufferHandleImpl& impl) noexcept {
     // outstanding_count_ 永远 dec —— 无论是否真的归还回 pool,都对应一次

@@ -31,8 +31,10 @@
 
 #include <concepts>
 #include <cstdint>
+#include <span>
 #include <string>
 #include <type_traits>
+#include <utility>
 
 #if defined(CABE_IO_BACKEND_SYNC)
   #include "io/backends/sync_io_backend.h"
@@ -62,7 +64,10 @@ concept IoBackendTraits = requires(
     std::uint32_t           sqDepth,   // M6:io_uring SQ depth(sync 后端忽略)
     BlockId                 blockId,
     BufferHandle&           handle,
-    const BufferHandle&     chandle
+    const BufferHandle&     chandle,
+    // M7:批量 I/O 形参(span 视图,owner 在调用方)
+    std::span<const std::pair<BlockId, const BufferHandle*>> writeBatch,
+    std::span<const std::pair<BlockId, BufferHandle*>>       readBatch
 ) {
     // 生命周期
 //
@@ -84,6 +89,24 @@ concept IoBackendTraits = requires(
     // 块 I/O(阻塞到完成)
     { t.WriteBlock(blockId, chandle) } -> std::same_as<std::int32_t>;
     { t.ReadBlock(blockId, handle) }   -> std::same_as<std::int32_t>;
+
+    // 批量块 I/O(P4 M7):一次提交 N 个 chunk 的请求,等齐完成。
+    //   - sync 后端:for-loop 调用 WriteBlock/ReadBlock,首个错误即返回,
+    //     失败前已成功的项不回滚(语义与单笔 WriteBlock 调用 N 次完全等价)
+    //   - io_uring 后端:io_uring_prep_*_fixed N 个 SQE → submit_and_wait(N)
+    //     → io_uring_for_each_cqe + cq_advance(N),省 (N-1) 次 syscall 来回;
+    //     任一 CQE.res < 0 即视为整批失败,返回首个非 SUCCESS 错码
+    //
+    // 调用方约束(Engine 多 chunk 路径已保证):
+    //   - batch.size() > 0
+    //   - 每个 BufferHandle* 非空且仍持有有效 buffer
+    //   - batch.size() <= sq_depth(io_uring 后端,否则 submit 失败)
+    //   - 同一 batch 内 BlockId 不重复(Engine 通过 AllocateChunkIds 自然保证)
+    //
+    // 不保证原子性:io_uring 批量提交是 N 个独立 I/O,失败时已写部分留在设备上,
+    // 由 Engine 的 chunkIndex/metaIndex 操作时机(写齐再更新)避免对外可见。
+    { t.WriteBlocks(writeBatch) } -> std::same_as<std::int32_t>;
+    { t.ReadBlocks(readBatch) }   -> std::same_as<std::int32_t>;
 };
 
 static_assert(IoBackendTraits<IoBackend>,

@@ -1,12 +1,16 @@
 # P4 io_uring 分阶段实施设计
 
 > **状态**:草稿 v1.0(讨论稿) · 2026-04-28
-> **实施进度**(2026-05-14):M1 ✅ / M2 ✅ / M3 ✅ / M4 ✅ / M5 ✅ / M6 ✅ / M7 ❌ / M8 ❌ / M9 ❌
+> **实施进度**(2026-05-14):M1 ✅ / M2 ✅ / M3 ✅ / M4 ✅ / M5 ✅ / M6 ✅ / M7 ✅ / M8 ❌ / M9 ❌
 > M4 bench 验证 cpu_time 加速 16-82%,远超 W4.6 验收门(≥ 5%);
 > M5 落地 register_files + IOSQE_FIXED_FILE,bench 归档名 `p4-post-fixed-files`,预期 +1-3%。
 > M6 落地 Options.io_uring_sq_depth(D7)+ R12 校验 + 4 个专属 test + README 部署文档 +
 > CABE_HAVE_* feature gate(D10);**19 项决策与 12 项风险全部闭环**,后续 M7-M9 不再有
 > 新设计要锁。
+> M7 落地批量 API:`WriteBlocks`/`ReadBlocks`(IoBackendTraits 一致),io_uring 后端
+> 一次 `submit_and_wait(N)` + `for_each_cqe` + `cq_advance(N)`,省 (N-1) 次 syscall;
+> sync 后端 for-loop 退化等价。Engine `Put`/`Get`/`GetIntoVector` 多 chunk 路径
+> 按 `bufferPoolCount_` 分批接入(D18);5 个 io_uring 专属 batch test 通过。
 > 详细进度记录见 `memory/project_roadmap.md` 的 "P4 实施计划" 章节。
 > **作者**:CodeFarmerPK + Claude(Opus 4.7, 1M context)
 > **基线**:P3 已交付的 IoBackend 抽象层(`io/io_backend.h` + `io/buffer_handle.{h,cpp}` + `io/backends/sync_*`)
@@ -891,22 +895,36 @@ struct Options {
 
 ---
 
-### M7 — 内部 batch API + Engine 多 chunk 路径接入
+### M7 — 内部 batch API + Engine 多 chunk 路径接入 ✅
 
-**范围**:
-- 新增 `WriteBlocks` / `ReadBlocks` 在 IoBackend(IoUringIoBackend 真实实现 + SyncIoBackend for-loop fallback)
-- `Engine::Put` 多 chunk 路径改用 `WriteBlocks`
-- `Engine::Get` 多 chunk 路径改用 `ReadBlocks`
-- `engine_bench` / `cabe_engine_bench` 跑大 value Put / Get 对比
+**范围**(已落地):
+- `IoBackendTraits` concept 加 `WriteBlocks` / `ReadBlocks` 签名:
+  `std::span<const std::pair<BlockId, [const] BufferHandle*>>`
+- `IoUringIoBackend::WriteBlocks` / `ReadBlocks` 真实批量:
+  `io_mutex_` 锁内 prep N 个 `prep_*_fixed` SQE(user_data = i)→
+  `io_uring_submit_and_wait(ring, N)` → `io_uring_for_each_cqe` + 单次
+  `io_uring_cq_advance(N)` sweep,省 (N-1) 次 syscall 来回
+- `SyncIoBackend::WriteBlocks` / `ReadBlocks` for-loop fallback:
+  逐项调用单笔 `WriteBlock` / `ReadBlock`,首个非 SUCCESS 即返回
+- `Engine::Put` / `Get` / `GetIntoVector` 多 chunk 路径按 `bufferPoolCount_` 分批:
+  Phase A(Acquire N + memcpy + 补尾 + CRC)→ Phase B(`WriteBlocks` / `ReadBlocks`)
+  → Phase C(`chunkIndex.Put` / CRC 校验 + memcpy 输出)
+- `test/io/io_uring_specific_test.cpp` 新增 5 个 M7 case:
+  `WriteBlocksReadBlocksRoundtrip` / `EmptyBatchReturnsSuccess` /
+  `BatchRejectsNullHandle` / `BatchWriteEquivalentToSerialWrites` /
+  `BatchOnNotOpenReturnsError`
 
-**验收**:
-- 所有契约测试 + Engine 测试对 io_uring 全绿
-- 大 value(16 MiB)Put / Get bench 显著加速(预期 ≥ 30%,实际待数据)
-- 归档 `p4-post-batch`
 
-**时机**:见 D18,M3–M6 稳定后再做;不强制紧跟 M6。如果 bench 数据已经达到预期硬件利用率,M7 可推到 P5 启动前再做。但**仍属于 P4 工作项**,不能无限期延期。
+**验收**(M9 收尾):
+- 所有契约测试 + Engine 测试对 io_uring 全绿(M7 本地通过,M9 跨环境复验)
+- 大 value(16 MiB / 16 chunk)Put / Get bench 收益归档为 `p4-post-batch`
+- 数据满足"≥ 30%"门 → 走 M9 收尾;不达预期 → 触发 M8 评估
 
-**失败回退**:Engine 多 chunk 改动出错 → 退到 M6 状态;batch API 保留只在 IoBackend 内部,Engine 不接入。
+**时机**:见 D18,M3–M6 稳定后再做。M7 本身**已合入**;bench 归档在 M9。
+
+**失败回退**(M7 已通过功能验收,本段保留作历史):
+Engine 多 chunk 改动出错 → 退到 M6 状态;batch API 保留只在 IoBackend 内部,
+Engine 不接入。
 
 ---
 

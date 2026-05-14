@@ -3,7 +3,7 @@
  * Created Time: 2026-04-28
  * Created by: CodeFarmerPK
  *
- * IoUringIoBackend —— P4 io_uring 后端声明(M6 已落地,M7 待启动)。
+ * IoUringIoBackend —— P4 io_uring 后端声明(M7 已落地,M8 评估待启动)。
  *
  * 进度(详见 doc/p4_io_uring_design.md §13;Engine 公开 API 自 M6 起多了
  * Options.io_uring_sq_depth 一个可选字段,默认 64 完全向下兼容):
@@ -17,11 +17,13 @@
  *   M6 ✅ Options.io_uring_sq_depth(D7)+ R12 校验 + 4 个 specific test +
  *         README "Production deployment notes"(R7)+ CABE_HAVE_* feature
  *         gate(D10)
- *   M7 ❌ 内部 batch API(WriteBlocks/ReadBlocks)+ Engine 多 chunk 路径接入
+ *   M7 ✅ 内部 batch API(WriteBlocks/ReadBlocks)+ Engine 多 chunk 路径接入(D18):
+ *         一次 submit_and_wait(N)+ io_uring_for_each_cqe + cq_advance(N),
+ *         省 (N-1) 次 syscall 来回;sync 后端同名接口走 for-loop fallback
  *   M8 ❌ (可选)Model A → Model B 升级评估(reaper 线程,M7 数据决定)
  *   M9 ❌ bench 归档 + README/roadmap/设计稿状态收尾
  *
- * 当前实现形态(截至 M5):
+ * 当前实现形态(截至 M7):
  *   - 设备:O_DIRECT | O_SYNC | O_RDWR 打开裸块设备(同 sync 后端);fd 已
  *           registered(io_uring_register_files),SQE 用 IOSQE_FIXED_FILE +
  *           fd_idx=0 提交,跳过 fdget/fdput
@@ -63,7 +65,9 @@
 #include <atomic>
 #include <cstdint>
 #include <mutex>
+#include <span>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace cabe::io {
@@ -113,6 +117,23 @@ public:
     // M3 起真实实现(Model A);M4 起改用 *_FIXED;M5 起加 IOSQE_FIXED_FILE
     int32_t WriteBlock(BlockId blockId, const BufferHandle& handle);
     int32_t ReadBlock (BlockId blockId, BufferHandle&       handle);
+
+    // ===== 批量块 I/O(P4 M7,IoBackendTraits 一致)=====
+    // 真实批量提交:一次锁内 prep N 个 SQE → submit_and_wait(N)
+    // → io_uring_for_each_cqe 一次性 sweep → cq_advance(N),省 (N-1) 次
+    // syscall 来回。N = batch.size(),受调用方限制不超过 sq_depth(R12 在
+    // Open 时校验过 sq>=pool,Engine 多 chunk 路径按 pool 分批,batch.size()
+    // <= pool_count <= sq_depth)。
+    //
+    // 错误语义:任一 CQE.res < 0 视为整批失败,返回首个非 SUCCESS 错码
+    //   (与 N 次单笔 WriteBlock 行为一致);已完成的 I/O 不回滚,由
+    //   Engine 在写齐 metaIndex 之前不暴露给读路径来避免半成品可见。
+    // EAGAIN 处理:批量场景里 submit 失败一次性返回 IO_BACKEND_QUEUE_FULL,
+    //   不做单笔退避(避免 (N - submitted) 笔的复杂回滚)。Engine 的多
+    //   chunk 路径按 pool 大小分批已经把 N <= pool <= sq_depth 锁紧。
+    // batch.size() == 0 直接返回 SUCCESS(与 sync 后端一致)。
+    int32_t WriteBlocks(std::span<const std::pair<BlockId, const BufferHandle*>> batch);
+    int32_t ReadBlocks (std::span<const std::pair<BlockId, BufferHandle*>>       batch);
 
     // ===== Q7 支持 =====
     bool is_closed() const noexcept;

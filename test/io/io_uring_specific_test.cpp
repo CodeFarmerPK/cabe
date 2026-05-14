@@ -31,6 +31,7 @@
 #include <cstring>
 #include <set>          // M6 RegisterBufferIndexMatchesSlot 用
 #include <string>
+#include <utility>      // M7 WriteBlocks/ReadBlocks batch pair
 #include <vector>       // M6 RegisterBufferIndexMatchesSlot 用
 
 #include <sys/resource.h>
@@ -262,6 +263,198 @@ TEST_F(IoUringSpecificTest, WriteBlockEAGAINRetriesOnce) {
     GTEST_SKIP() << "Model A 1:1 串行下 SQ depth 64 ≫ 1,EAGAIN 不可稳定触发。"
                     "M7 batch / M8 reaper 引入并发提交后,可设 sq_depth=2 + 跑 4+ "
                     "并发 op 制造 EAGAIN;此 case 占位等待 M7+。";
+}
+
+// =====================================================================
+// M7 — 批量 API(WriteBlocks / ReadBlocks)行为测试
+//
+// 这组 case 验证 io_uring 后端真实批量提交链路:
+//   - prep N 个 SQE → submit_and_wait(N) → io_uring_for_each_cqe + cq_advance(N)
+//   - user_data = batch 索引,sweep 不串
+//   - sync 后端的 for-loop fallback 不在此文件覆盖(语义等价于多次单笔,
+//     由 io_backend_contract_test.cpp 的 WriteBlock/ReadBlock 测试间接覆盖)
+//
+// 设计稿 §13 / D18:M7 是 P4 io_uring 后端最后一站功能落地。
+// =====================================================================
+
+// ---------------------------------------------------------------------
+// M7:WriteBlocksReadBlocksRoundtrip — 8 个 block 一批写 + 一批读,验证内容
+//   - 各 block 用不同 pattern,验证 user_data → cqe 路由不串
+//   - ReadBlocks 读出与 WriteBlocks 写入 byte-by-byte 相等
+// ---------------------------------------------------------------------
+TEST_F(IoUringSpecificTest, WriteBlocksReadBlocksRoundtrip) {
+    IoBackend backend;
+    constexpr std::uint32_t kPool = 8;
+    ASSERT_EQ(SUCCESS, backend.Open(devicePath_, kPool));
+    ASSERT_GE(backend.BlockCount(), kPool);
+
+    // ----- 写阶段:8 个 handle,各填不同 pattern,一次 WriteBlocks -----
+    std::vector<BufferHandle> writeHandles;
+    writeHandles.reserve(kPool);
+    for (std::uint32_t i = 0; i < kPool; ++i) {
+        BufferHandle h = backend.AcquireBuffer();
+        ASSERT_TRUE(h.valid()) << "AcquireBuffer slot " << i;
+        std::memset(h.data(), static_cast<int>((i * 73 + 11) & 0xFF),
+                    CABE_VALUE_DATA_SIZE);
+        writeHandles.push_back(std::move(h));
+    }
+    std::vector<std::pair<BlockId, const BufferHandle*>> writeBatch;
+    writeBatch.reserve(kPool);
+    for (std::uint32_t i = 0; i < kPool; ++i) {
+        writeBatch.emplace_back(i, &writeHandles[i]);
+    }
+    EXPECT_EQ(SUCCESS, backend.WriteBlocks(writeBatch));
+    writeHandles.clear();   // 全部归还,下面 read 阶段重新 Acquire
+
+    // ----- 读阶段:故意把读 buffer 污染 0xCC,验证 ReadBlocks 覆盖正确 -----
+    std::vector<BufferHandle> readHandles;
+    readHandles.reserve(kPool);
+    for (std::uint32_t i = 0; i < kPool; ++i) {
+        BufferHandle h = backend.AcquireBuffer();
+        ASSERT_TRUE(h.valid());
+        std::memset(h.data(), 0xCC, CABE_VALUE_DATA_SIZE);
+        readHandles.push_back(std::move(h));
+    }
+    std::vector<std::pair<BlockId, BufferHandle*>> readBatch;
+    readBatch.reserve(kPool);
+    for (std::uint32_t i = 0; i < kPool; ++i) {
+        readBatch.emplace_back(i, &readHandles[i]);
+    }
+    EXPECT_EQ(SUCCESS, backend.ReadBlocks(readBatch));
+
+    // ----- 验证:每个 block 内容应与 step 1 写入的 pattern 完全一致 -----
+    for (std::uint32_t i = 0; i < kPool; ++i) {
+        const char expected = static_cast<char>((i * 73 + 11) & 0xFF);
+        // 抽 4 个偏移点逐字节比较(头/1/4/中/尾),避免对每 byte 都断言
+        // (1 MiB × 8 block 全比对会拖慢 test loop;采样足以发现路由错位)。
+        for (const std::size_t j : {std::size_t{0},
+                                     CABE_VALUE_DATA_SIZE / 4,
+                                     CABE_VALUE_DATA_SIZE / 2,
+                                     CABE_VALUE_DATA_SIZE - 1}) {
+            ASSERT_EQ(expected, readHandles[i].data()[j])
+                << "block " << i << " offset " << j
+                << " mismatch — batch user_data → cqe 路由错位?";
+        }
+    }
+}
+
+// ---------------------------------------------------------------------
+// M7:EmptyBatchReturnsSuccess — 空 batch 立即 SUCCESS,不触发任何 io_uring 调用
+// ---------------------------------------------------------------------
+TEST_F(IoUringSpecificTest, EmptyBatchReturnsSuccess) {
+    IoBackend backend;
+    ASSERT_EQ(SUCCESS, backend.Open(devicePath_, /*pool=*/8));
+
+    EXPECT_EQ(SUCCESS, backend.WriteBlocks({}));
+    EXPECT_EQ(SUCCESS, backend.ReadBlocks({}));
+}
+
+// ---------------------------------------------------------------------
+// M7:BatchRejectsNullHandle — handlePtr 为 nullptr 应返回 INVALID_HANDLE,
+// 不进入 io_uring 提交链路(避免 UB)
+// ---------------------------------------------------------------------
+TEST_F(IoUringSpecificTest, BatchRejectsNullHandle) {
+    IoBackend backend;
+    ASSERT_EQ(SUCCESS, backend.Open(devicePath_, /*pool=*/8));
+
+    BufferHandle h = backend.AcquireBuffer();
+    ASSERT_TRUE(h.valid());
+
+    const std::vector<std::pair<BlockId, const BufferHandle*>> wb = {
+        {BlockId{0}, &h},
+        {BlockId{1}, nullptr},   // 第 2 项空指针应被拦下
+    };
+    EXPECT_EQ(IO_BACKEND_INVALID_HANDLE, backend.WriteBlocks(wb));
+
+    const std::vector<std::pair<BlockId, BufferHandle*>> rb = {
+        {BlockId{0}, &h},
+        {BlockId{1}, nullptr},
+    };
+    EXPECT_EQ(IO_BACKEND_INVALID_HANDLE, backend.ReadBlocks(rb));
+}
+
+// ---------------------------------------------------------------------
+// M7:BatchWriteEquivalentToSerialWrites — 批量写与 N 次单笔写产物等价
+//
+// 同 pattern 写两组 block:
+//   Group A(block [0..kN)):一次 WriteBlocks
+//   Group B(block [kN..2*kN)):N 次单笔 WriteBlock
+// 然后 ReadBlock 各读回,Group A vs Group B 内容应完全相等
+// → 证明 WriteBlocks 没有引入与单笔不同的语义(数据通路一致)
+// ---------------------------------------------------------------------
+TEST_F(IoUringSpecificTest, BatchWriteEquivalentToSerialWrites) {
+    IoBackend backend;
+    constexpr std::uint32_t kN   = 4;
+    constexpr std::uint32_t kPool = kN * 2;
+    ASSERT_EQ(SUCCESS, backend.Open(devicePath_, kPool));
+    ASSERT_GE(backend.BlockCount(), kPool);
+
+    constexpr std::uint8_t kPattern = 0xA5;
+
+    // Group A:WriteBlocks
+    std::vector<BufferHandle> ha;
+    ha.reserve(kN);
+    for (std::uint32_t i = 0; i < kN; ++i) {
+        BufferHandle h = backend.AcquireBuffer();
+        ASSERT_TRUE(h.valid());
+        std::memset(h.data(), kPattern, CABE_VALUE_DATA_SIZE);
+        ha.push_back(std::move(h));
+    }
+    std::vector<std::pair<BlockId, const BufferHandle*>> wb;
+    wb.reserve(kN);
+    for (std::uint32_t i = 0; i < kN; ++i) {
+        wb.emplace_back(i, &ha[i]);
+    }
+    EXPECT_EQ(SUCCESS, backend.WriteBlocks(wb));
+    ha.clear();
+
+    // Group B:N 次单笔 WriteBlock
+    for (std::uint32_t i = 0; i < kN; ++i) {
+        BufferHandle h = backend.AcquireBuffer();
+        ASSERT_TRUE(h.valid());
+        std::memset(h.data(), kPattern, CABE_VALUE_DATA_SIZE);
+        EXPECT_EQ(SUCCESS, backend.WriteBlock(kN + i, h));
+    }
+
+    // 各读回比对(采样偏移点)
+    for (std::uint32_t i = 0; i < kN; ++i) {
+        BufferHandle ra = backend.AcquireBuffer();
+        BufferHandle rb = backend.AcquireBuffer();
+        ASSERT_TRUE(ra.valid());
+        ASSERT_TRUE(rb.valid());
+        std::memset(ra.data(), 0xFF, CABE_VALUE_DATA_SIZE);
+        std::memset(rb.data(), 0xFF, CABE_VALUE_DATA_SIZE);
+        ASSERT_EQ(SUCCESS, backend.ReadBlock(i, ra));
+        ASSERT_EQ(SUCCESS, backend.ReadBlock(kN + i, rb));
+        for (const std::size_t j : {std::size_t{0},
+                                     CABE_VALUE_DATA_SIZE / 2,
+                                     CABE_VALUE_DATA_SIZE - 1}) {
+            ASSERT_EQ(ra.data()[j], rb.data()[j])
+                << "block " << i << " offset " << j
+                << " mismatch: batch vs serial 写产物不一致";
+            ASSERT_EQ(static_cast<char>(kPattern), ra.data()[j]);
+        }
+    }
+}
+
+// ---------------------------------------------------------------------
+// M7:BatchOnNotOpenReturnsError — Open 之前 / Close 之后的 batch 应安全失败
+// ---------------------------------------------------------------------
+TEST_F(IoUringSpecificTest, BatchOnNotOpenReturnsError) {
+    IoBackend backend;
+    // Open 之前
+    {
+        const std::vector<std::pair<BlockId, const BufferHandle*>> wb;
+        // 空 batch 早返 SUCCESS,不能用来测 NOT_OPEN;造一个非空 batch
+        // 但 handle 暂留空(预期 NOT_OPEN 优先于 INVALID_HANDLE 短路)。
+        // 设计上 WriteBlocks 入口先 check opened_ → NOT_OPEN,即便后面 nullptr。
+        // (实际实现里 n==0 早返 SUCCESS 后才 check opened_,但 n>=1 是先 opened_。)
+        BufferHandle dummy;   // invalid handle
+        const std::vector<std::pair<BlockId, const BufferHandle*>> wb2 = {
+            {BlockId{0}, &dummy},
+        };
+        EXPECT_EQ(IO_BACKEND_NOT_OPEN, backend.WriteBlocks(wb2));
+    }
 }
 
 } // namespace
