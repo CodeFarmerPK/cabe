@@ -23,15 +23,17 @@ originSessionId: 5e75530e-aa98-44be-b0dc-01b60f844823
   - M4 CMake `CABE_IO_BACKEND` 选项 + CMakePresets + `scripts/run-tests.sh --backend=`
   - M5 删除旧 `storage/storage.*` 与 `buffer/buffer_pool.*`
   - M6 文档更新 + bench 基线归档（`p3-post-io-abstraction`）
-- **P4** io_uring 后端 + registered buffer pool（io_uring 接管 BufferPool） — 🚧 实施中（M1-M4 完成,M5 待启动）
+- **P4** io_uring 后端 + registered buffer pool（io_uring 接管 BufferPool） — 🚧 实施中（M1-M5 完成,M6 待启动）
   - 设计稿:`doc/p4_io_uring_design.md`(2026-04-28 v1.0)
-  - 进度:9 个 milestone 中 4 个完成(M1 骨架+TSAN阻断 / M2 Open-Close / M3 W-R / M4 register_buffers+FIXED)
-  - bench 验证(2026-04-29):M4 完成后 cpu_time 加速 16-82%,远超 W4.6 验收门(≥5%);
-    详见 `bench/baselines/p4-pre-fixed-*.json`(M3)与 `p4-post-fixed-*.json`(M4)
+  - 进度:9 个 milestone 中 5 个完成(M1 骨架+TSAN阻断 / M2 Open-Close / M3 W-R /
+    M4 register_buffers+FIXED / M5 register_files+IOSQE_FIXED_FILE)
+  - bench 验证:M4 完成 cpu_time 加速 16-82%(详见 `bench/baselines/p4-pre-fixed-*.json`
+    与 `p4-post-fixed-*.json`);M5 完成待跑 bench 归档 `p4-post-fixed-files`
+    (预期再 +1-3% cpu_time,fdget/fdput 摊销)
   - 决策:19 项中 17 项落地;D7 第二部分(Options.io_uring_sq_depth)与 D10
     (CABE_HAVE_* feature gate)待 M6 闭环
   - 风险:12 项中 11 项闭环;R12(sq_depth >= pool_count 校验)待 M6 引入 Options 字段一并加
-  - 注释/文档同步状态:截至 2026-05-14 已统一刷到 M4 标号
+  - 注释/文档同步状态:截至 M5 已统一刷到 M5 标号
   - 详见下文「## P4 实施计划」(各 milestone 已加 ✅/❌ 状态)
 - **P5** WAL + 崩溃恢复 — 计划中
 - **P6** 多线程 Reactor 引擎 — 计划中
@@ -84,8 +86,12 @@ bench 归档:
   归档基线 `p4-post-fixed`;cpu_time 加速 16-82%(small op GUP 消除受益最大);
   新增 `test/io/io_uring_specific_test.cpp::RegisterBuffersFailsWhenPoolTooLarge`
   (root 下 SKIP,需 setpriv 降权才能真实跑 D15 路径)
-- **M5** ❌ `io_uring_register_files` + `IOSQE_FIXED_FILE`(下一步;预期 +1-3%);
-  注意 `p4-post-fixed` 名已被 M4 占用,M5 归档建议用 `p4-post-fixed-files`
+- **M5** ✅ `io_uring_register_files` + `IOSQE_FIXED_FILE`;Open 内 register fd 一次,
+  WriteBlock/ReadBlock 走 `prep_*_fixed(fd_idx=0, ...)` + `sqe->flags |= IOSQE_FIXED_FILE`,
+  Close 内 unregister_files 先于 unregister_buffers;失败 rollback 路径
+  (D15 一致姿态):unregister_buffers → queue_exit → munmap → close fd;
+  bench 归档名 `p4-post-fixed-files`(避免与 M4 的 `p4-post-fixed` 重名),
+  预期 +1-3% cpu_time(fdget/fdput 摊销)
 - **M6** ❌ `Options.io_uring_sq_depth`(D7 第二部分)+ Open 前置校验
   sq_depth >= pool_count(R12)+ io_uring 专属测试扩展(CloseDrainsInflight /
   RegisterBufferIndexMatchesSlot / OpenRejectsSqDepth / WriteBlockEAGAINRetries)+

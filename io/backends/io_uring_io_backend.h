@@ -3,7 +3,7 @@
  * Created Time: 2026-04-28
  * Created by: CodeFarmerPK
  *
- * IoUringIoBackend —— P4 io_uring 后端声明(M4 已落地,M5 待启动)。
+ * IoUringIoBackend —— P4 io_uring 后端声明(M5 已落地,M6 待启动)。
  *
  * 进度(详见 doc/p4_io_uring_design.md §13;接口 API 自 M1 以来零变化,
  * Engine 调用方完全无感):
@@ -12,15 +12,17 @@
  *   M3 ✅ 朴素 WriteBlock/ReadBlock(Model A,prep_write/prep_read,裸 fd)
  *   M4 ✅ io_uring_register_buffers + WRITE_FIXED/READ_FIXED + fixed_buf_index_
  *         真用(bench cpu_time 加速 16–82%,远超 5% 验收门)
- *   M5 ❌ io_uring_register_files + IOSQE_FIXED_FILE(下一步)
+ *   M5 ✅ io_uring_register_files + IOSQE_FIXED_FILE(register fd 一次,
+ *         WriteBlock/ReadBlock 走 fd_idx=0,跳过 fdget/fdput)
  *   M6 ❌ Options.io_uring_sq_depth + io_uring 专属测试扩展 + 部署文档
  *   M7 ❌ 内部 batch API(WriteBlocks/ReadBlocks)+ Engine 多 chunk 路径接入
  *   M8 ❌ (可选)Model A → Model B 升级评估(reaper 线程,M7 数据决定)
  *   M9 ❌ bench 归档 + README/roadmap/设计稿状态收尾
  *
-* 当前实现形态(截至 M4):
- *   - 设备:O_DIRECT | O_SYNC | O_RDWR 打开裸块设备(同 sync 后端);fd 仍是
- *           裸 fd,M5 起 register_files + IOSQE_FIXED_FILE
+ * 当前实现形态(截至 M5):
+ *   - 设备:O_DIRECT | O_SYNC | O_RDWR 打开裸块设备(同 sync 后端);fd 已
+ *           registered(io_uring_register_files),SQE 用 IOSQE_FIXED_FILE +
+ *           fd_idx=0 提交,跳过 fdget/fdput
  *   - Buffer pool:mmap(MAP_ANONYMOUS) 一大块,LIFO slot;Open 内整片
  *                 register 为 io_uring fixed buffer(n × 1 MiB iovec,
  *                 fixed_buf_index_ == slot_index_)
