@@ -182,6 +182,47 @@ elseif(CABE_IO_BACKEND STREQUAL "io_uring")
     find_package(PkgConfig REQUIRED)
     pkg_check_modules(LIBURING REQUIRED IMPORTED_TARGET liburing>=2.9)
     target_link_libraries(cabe_lib PUBLIC PkgConfig::LIBURING)
+    # ============================================================
+    # P4 M6 / D10: io_uring 新内核特性 feature gate(try_compile)
+    # ============================================================
+    # 当前 M6 不直接使用下列任何一个 flag(Model A 串行 + 无 reactor),
+    # 但提前探测并 PUBLIC define `CABE_HAVE_*` 宏,让 M8 Model B(reaper)
+    # 和 P5+ 引入这些 flag 时只需 `#ifdef CABE_HAVE_*` 一句话兜底,
+    # 不再需要 CMake 改动。Fedora 43 内核 6.16+ 三个都有,但代码结构
+    # 仍保持可移植形态(README "Supported Platform" 章节承诺)。
+    #
+    # 添加新 flag 探测的模板:复制下面任意一段,改 flag 名 + 测试代码,
+    # 加 CABE_HAVE_<FLAG> 缓存变量。
+    include(CheckCXXSourceCompiles)
+    set(CMAKE_REQUIRED_INCLUDES_BACKUP "${CMAKE_REQUIRED_INCLUDES}")
+    set(CMAKE_REQUIRED_LIBRARIES_BACKUP "${CMAKE_REQUIRED_LIBRARIES}")
+    get_target_property(_liburing_include_dirs PkgConfig::LIBURING INTERFACE_INCLUDE_DIRECTORIES)
+    if(_liburing_include_dirs)
+        set(CMAKE_REQUIRED_INCLUDES "${_liburing_include_dirs}")
+    endif()
+    # IORING_SETUP_SINGLE_ISSUER:kernel 6.0+,告诉内核只有一个 submitter 线程,
+    # 跳过部分原子操作。M8 Model B 引入 reaper 线程后用得上(那时反而不能用,
+    # 因为提交线程不止一个,放这里只是验证 flag 存在)。
+    check_cxx_source_compiles("
+        #include <liburing.h>
+        int main() { return (IORING_SETUP_SINGLE_ISSUER != 0) ? 0 : 1; }
+    " CABE_HAVE_IORING_SETUP_SINGLE_ISSUER)
+    # IORING_SETUP_DEFER_TASKRUN:kernel 5.18+,完成回调延迟到用户 enter 时执行,
+    # 少 IPI / wakeup。M8 / P6 reactor 阶段评估。
+    check_cxx_source_compiles("
+        #include <liburing.h>
+        int main() { return (IORING_SETUP_DEFER_TASKRUN != 0) ? 0 : 1; }
+    " CABE_HAVE_IORING_SETUP_DEFER_TASKRUN)
+    set(CMAKE_REQUIRED_INCLUDES "${CMAKE_REQUIRED_INCLUDES_BACKUP}")
+    set(CMAKE_REQUIRED_LIBRARIES "${CMAKE_REQUIRED_LIBRARIES_BACKUP}")
+    if(CABE_HAVE_IORING_SETUP_SINGLE_ISSUER)
+        target_compile_definitions(cabe_lib PUBLIC CABE_HAVE_IORING_SETUP_SINGLE_ISSUER=1)
+    endif()
+    if(CABE_HAVE_IORING_SETUP_DEFER_TASKRUN)
+        target_compile_definitions(cabe_lib PUBLIC CABE_HAVE_IORING_SETUP_DEFER_TASKRUN=1)
+    endif()
+    message(STATUS "io_uring features: SINGLE_ISSUER=${CABE_HAVE_IORING_SETUP_SINGLE_ISSUER} "
+            "DEFER_TASKRUN=${CABE_HAVE_IORING_SETUP_DEFER_TASKRUN}")
 elseif(CABE_IO_BACKEND STREQUAL "spdk")
     target_compile_definitions(cabe_lib PUBLIC CABE_IO_BACKEND_SPDK=1)
     message(FATAL_ERROR

@@ -121,7 +121,13 @@ SyncIoBackend::~SyncIoBackend() {
 }
 
 int32_t SyncIoBackend::Open(const std::string& devicePath,
-                            const std::uint32_t bufferPoolCount) {
+                            const std::uint32_t bufferPoolCount,
+                            const std::uint32_t sqDepthHint) {
+    // sqDepthHint 是 io_uring 后端的 SQ depth(P4 M6 / D7),sync 后端忽略。
+    // 显式 (void) 让 -Wunused-parameter 失效(本项目 -Wno-unused-parameter
+    // 已全局关 unused 警告,这里再显式标记纯粹是文档化"我知道这个参数
+    // 故意不用")。
+    (void) sqDepthHint;
     // ---- 状态机守卫 ----
     if (closed_.load(std::memory_order_acquire)) {
         // 已经走过一轮 Close → terminal。想再开必须销毁实例。

@@ -145,12 +145,93 @@ measurement at the module and engine level.
 | P1  | 线程安全（shared_mutex + atomic）+ Google Benchmark 骨架 | ✅ 完成 |
 | P2  | C++ API 契约定型(Pimpl + Status)+ 裸设备语义重构 | ✅ 完成 |
 | P3  | IoBackend 抽象层（编译期 dispatch，仅 sync 后端） | ✅ 完成 |
-| P4  | io_uring 后端 + registered buffer pool（接管 BufferPool） | 🚧 进行中（M1-M5 完成,M6 待启动 / [设计稿](doc/p4_io_uring_design.md)） |
+| P4  | io_uring 后端 + registered buffer pool（接管 BufferPool） | 🚧 进行中（M1-M6 完成,M7 待启动 / [设计稿](doc/p4_io_uring_design.md)） |
 | P5  | WAL + 崩溃恢复 | 计划 |
 | P6  | 多线程 reactor 引擎 | 计划 |
 | P7  | 自研 B+ 树 + 细粒度并发 | 计划 |
 | P8  | scatter-gather 多 chunk 合并 I/O | 计划 |
 | P9  | SPDK 用户态驱动后端（可选） | 不确定 |
+
+---
+
+## Production deployment notes(io_uring 后端)
+
+`CABE_IO_BACKEND=io_uring` 在生产部署时需要注意以下系统级前置条件,
+**违反这些约束 Engine::Open 会直接失败**(设计原则:不静默 fallback 到
+非 FIXED 路径,详见设计稿 D15)。
+
+### 1. RLIMIT_MEMLOCK(必须放宽)
+
+io_uring 的 `register_buffers` 把 BufferPool 全部 1 MiB chunks 一次性 pin
+到内核(M4 红利:跳过每次 I/O 的 GUP / page pin)。默认 Fedora 43 的
+`RLIMIT_MEMLOCK` 软限制是 **64 KiB**,远小于默认 pool 16 × 1 MiB = 16 MiB,
+导致 `register_buffers` 返回 `-ENOMEM` → Open 失败。
+
+**修复方式**(任选其一):
+
+```bash
+# (A) 交互式 shell
+ulimit -l unlimited
+
+# (B) systemd unit
+[Service]
+LimitMEMLOCK=infinity
+
+# (C) /etc/security/limits.conf(永久,所有进程)
+*  soft  memlock  unlimited
+*  hard  memlock  unlimited
+
+# (D) 给可执行文件加 cap(进程级,不需 sysctl)
+sudo setcap cap_ipc_lock=ep /path/to/cabe_binary
+```
+
+> 测试覆盖:`test/io/io_uring_specific_test.cpp::RegisterBuffersFailsWhenPoolTooLarge`
+> 强制把 ulimit 压到 64 KiB 验证 Open 失败路径,确认 D15 rollback 完整。
+> 该 test 在 root / CAP_IPC_LOCK 下自动 SKIP(内核 `__io_account_mem`
+> 入口对 CAP_IPC_LOCK 直接 return 0 跳过 RLIMIT 校验),验 D15 真路径需以
+> non-root 身份跑(`setpriv --reuid=...`)。
+
+### 2. 内核 io_uring 未被禁用
+
+某些 hardened kernel / 容器默认 seccomp profile 会禁 io_uring syscall(出于
+io_uring 早期 CVE 历史的保守姿态)。检查:
+
+```bash
+# 检查 sysctl 是否禁用 io_uring
+cat /proc/sys/kernel/io_uring_disabled    # 期望 = 0(默认),非零说明被禁
+
+# Docker 容器需在 docker run 加:
+docker run --security-opt seccomp=unconfined ...
+# 或自定义 profile 明确放行 io_uring_setup / io_uring_enter / io_uring_register
+
+# Kubernetes 同理,需 securityContext.seccompProfile 不为默认 RuntimeDefault
+```
+
+已知 io_uring **不可用**的环境(Open 会返回 IOError):
+- Docker 默认 seccomp(< 23.0 普遍禁;新版本部分放行)
+- Kubernetes 默认 PodSecurityContext(< 1.28 RuntimeDefault 多数禁)
+- 某些 hardened distro 如 GrapheneOS、CoreOS profile
+
+这些环境下建议改用 `CABE_IO_BACKEND=sync`(`cmake -DCABE_IO_BACKEND=sync`),
+功能完全等价,只是性能少了 io_uring registered buffer/file 的红利(M4-M5 收益)。
+
+### 3. liburing 版本
+
+`liburing >= 2.9` 是当前 CMake 锁定的最低版本(Fedora 43 当前包版本作为
+floor)。`pkg-config --modversion liburing` 检查;低于此版本 CMake configure
+阶段直接失败。
+
+### 4. `Options.io_uring_sq_depth` 配置
+
+| 场景 | 推荐值 |
+|---|---|
+| 默认(Model A 1:1 串行) | **64**(默认值,不必动) |
+| M7 batch + 单 NVMe | 与 `buffer_pool_count` 同或略大 |
+| M7 batch + 多 NVMe 高并发 | 128-256 |
+
+约束(Open 时校验,违反返回 InvalidArgument):
+- 必须是 **2 的幂**(D7)
+- 必须 **>= `buffer_pool_count`**(R12)
 
 ---
 

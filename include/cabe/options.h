@@ -34,6 +34,23 @@ namespace cabe {
         // 影响同时可进行的 I/O 操作数量。
         // P3(io_uring)引入后,此值决定异步批量 I/O 的并行深度上限。
         uint32_t buffer_pool_count = 8;
+
+        // io_uring 后端专用:Submission Queue 深度(P4 M6 / D7 第二部分)。
+        //
+        // 约束(Open 时校验,违反返回 InvalidArgument):
+        //   - 必须是 2 的幂(io_uring_queue_init 旧内核硬性要求;统一锁紧
+        //     约束便于跨版本兼容)
+        //   - 必须 >= buffer_pool_count(R12;M7 batch API 上线后,一次
+        //     可同时 in-flight 的 op 上限是 buffer_pool_count,因此 SQ depth
+        //     必须容得下)
+        //
+        // sync 后端忽略此字段(SyncIoBackend::Open 接收同样参数但不使用,
+        // 保持 IoBackendTraits 接口一致)。
+        //
+        // 默认 64:Model A 一次只发 1 个 op,depth 数值不影响当前 M5 性能;
+        // M7 batch 起决定单次 batch 可同时 in-flight 上限,届时按设备
+        // 队列深度调整,典型 64-256。
+        uint32_t io_uring_sq_depth = 64;
     };
 
     // 每次 Get 操作的选项。

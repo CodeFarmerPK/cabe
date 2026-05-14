@@ -1,9 +1,12 @@
 # P4 io_uring 分阶段实施设计
 
 > **状态**:草稿 v1.0(讨论稿) · 2026-04-28
-> **实施进度**(2026-05-14):M1 ✅ / M2 ✅ / M3 ✅ / M4 ✅ / M5 ✅ / M6 ❌ / M7 ❌ / M8 ❌ / M9 ❌
+> **实施进度**(2026-05-14):M1 ✅ / M2 ✅ / M3 ✅ / M4 ✅ / M5 ✅ / M6 ✅ / M7 ❌ / M8 ❌ / M9 ❌
 > M4 bench 验证 cpu_time 加速 16-82%,远超 W4.6 验收门(≥ 5%);
 > M5 落地 register_files + IOSQE_FIXED_FILE,bench 归档名 `p4-post-fixed-files`,预期 +1-3%。
+> M6 落地 Options.io_uring_sq_depth(D7)+ R12 校验 + 4 个专属 test + README 部署文档 +
+> CABE_HAVE_* feature gate(D10);**19 项决策与 12 项风险全部闭环**,后续 M7-M9 不再有
+> 新设计要锁。
 > 详细进度记录见 `memory/project_roadmap.md` 的 "P4 实施计划" 章节。
 > **作者**:CodeFarmerPK + Claude(Opus 4.7, 1M context)
 > **基线**:P3 已交付的 IoBackend 抽象层(`io/io_backend.h` + `io/buffer_handle.{h,cpp}` + `io/backends/sync_*`)

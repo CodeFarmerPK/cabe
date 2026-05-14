@@ -50,7 +50,12 @@ public:
     //   每次 cabe::Engine::Open 都 new 一个新 Engine 实例,老实例在 unique_ptr
     //   重置时析构。
     //   P4 持久化引入后会重新设计该生命周期。
-    int32_t Open(const std::string& devicePath, uint32_t bufferPoolCount = 8);
+    // 第 3 个参数 sqDepth(P4 M6 / D7)是 io_uring 后端的 SQ depth,
+    // 透传到 io_.Open 的同名参数。sync 后端忽略此值。
+    // default = 64 让旧 2-arg 调用点(test fixtures 等)不需要逐一改动。
+    int32_t Open(const std::string& devicePath,
+                 uint32_t bufferPoolCount = 8,
+                 uint32_t sqDepth         = 64);
     // 关闭引擎
     int32_t Close();
 
@@ -137,6 +142,12 @@ private:
     // 记录 Open 时使用的 bufferPoolCount,检测"同 path 但 pool 参数不同"
     // 的幂等伪装。0 = 未打开。
     uint32_t bufferPoolCount_ = 0;
+
+    // P4 M6:记录 Open 时使用的 io_uring SQ depth。同 path + 同 pool 但
+    // 不同 sqDepth 的二次 Open 应拒绝(否则用户以为生效了新 sq_depth,
+    // 实际仍是首次 Open 时的值,sync 后端虽然忽略此值但仍参与幂等校验
+    // 保持 Engine 行为一致)。0 = 未打开。
+    uint32_t sqDepth_ = 0;
 };
 
 

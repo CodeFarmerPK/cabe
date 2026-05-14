@@ -23,17 +23,16 @@ originSessionId: 5e75530e-aa98-44be-b0dc-01b60f844823
   - M4 CMake `CABE_IO_BACKEND` 选项 + CMakePresets + `scripts/run-tests.sh --backend=`
   - M5 删除旧 `storage/storage.*` 与 `buffer/buffer_pool.*`
   - M6 文档更新 + bench 基线归档（`p3-post-io-abstraction`）
-- **P4** io_uring 后端 + registered buffer pool（io_uring 接管 BufferPool） — 🚧 实施中（M1-M5 完成,M6 待启动）
+- **P4** io_uring 后端 + registered buffer pool（io_uring 接管 BufferPool） — 🚧 实施中（M1-M6 完成,M7 待启动）
   - 设计稿:`doc/p4_io_uring_design.md`(2026-04-28 v1.0)
-  - 进度:9 个 milestone 中 5 个完成(M1 骨架+TSAN阻断 / M2 Open-Close / M3 W-R /
-    M4 register_buffers+FIXED / M5 register_files+IOSQE_FIXED_FILE)
-  - bench 验证:M4 完成 cpu_time 加速 16-82%(详见 `bench/baselines/p4-pre-fixed-*.json`
-    与 `p4-post-fixed-*.json`);M5 完成待跑 bench 归档 `p4-post-fixed-files`
-    (预期再 +1-3% cpu_time,fdget/fdput 摊销)
-  - 决策:19 项中 17 项落地;D7 第二部分(Options.io_uring_sq_depth)与 D10
-    (CABE_HAVE_* feature gate)待 M6 闭环
-  - 风险:12 项中 11 项闭环;R12(sq_depth >= pool_count 校验)待 M6 引入 Options 字段一并加
-  - 注释/文档同步状态:截至 M5 已统一刷到 M5 标号
+  - 进度:9 个 milestone 中 6 个完成(M1 骨架+TSAN阻断 / M2 Open-Close / M3 W-R /
+    M4 register_buffers+FIXED / M5 register_files+IOSQE_FIXED_FILE /
+    M6 Options.sq_depth+R12 校验+4 个专属 test+README 部署文档+CABE_HAVE_* 探测)
+  - bench 验证:M4 完成 cpu_time 加速 16-82%;M5 跑过 `p4-m5-post-fixed-files`
+    baseline(cpu_time 落在 ±5% 测试环境噪声内,功能正确性由 contract test 保证)
+  - 决策:**19 项全部落地**(D7 第二部分 Options 字段 + D10 CABE_HAVE_* 都在 M6 闭环)
+  - 风险:**12 项全部闭环**(R12 sq_depth >= pool_count 校验在 M6 与 Options 字段一并加)
+  - 注释/文档同步状态:截至 M6 已统一刷到 M6 标号
   - 详见下文「## P4 实施计划」(各 milestone 已加 ✅/❌ 状态)
 - **P5** WAL + 崩溃恢复 — 计划中
 - **P6** 多线程 Reactor 引擎 — 计划中
@@ -92,11 +91,14 @@ bench 归档:
   (D15 一致姿态):unregister_buffers → queue_exit → munmap → close fd;
   bench 归档名 `p4-post-fixed-files`(避免与 M4 的 `p4-post-fixed` 重名),
   预期 +1-3% cpu_time(fdget/fdput 摊销)
-- **M6** ❌ `Options.io_uring_sq_depth`(D7 第二部分)+ Open 前置校验
-  sq_depth >= pool_count(R12)+ io_uring 专属测试扩展(CloseDrainsInflight /
-  RegisterBufferIndexMatchesSlot / OpenRejectsSqDepth / WriteBlockEAGAINRetries)+
-  README "Production deployment notes"(ulimit / systemd `LimitMEMLOCK`,R7)+
-  CABE_HAVE_* feature gate try_compile(D10)
+- **M6** ✅ `Options.io_uring_sq_depth`(D7 第二部分,默认 64)+ Open 前置校验
+  `sq_depth >= pool_count`(R12)与 `sq_depth` 是 2 的幂(D7);IoBackendTraits
+  trait Open 加 3rd 参数 sqDepth(sync 后端忽略,签名一致);Engine 公开 API
+  透传 Options.io_uring_sq_depth → 内部 Engine.Open → io_.Open;io_uring 专属
+  测试新增 4 个 + 1 个 SKIP 占位;README "Production deployment notes" 章节就位
+  (ulimit / systemd LimitMEMLOCK / Docker seccomp / Options.sq_depth);CMake
+  CABE_HAVE_IORING_SETUP_SINGLE_ISSUER / IORING_SETUP_DEFER_TASKRUN feature gate
+  (D10,为 M8 / P6 reactor 预留接入点)
 - **M7** ❌ 内部 batch API(`WriteBlocks` / `ReadBlocks`)+ Engine 多 chunk 路径
   接入;归档基线 `p4-post-batch`(时机灵活,M5–M6 稳定后再做)
 - **M8** ❌(可选)Model A → Model B 升级评估;触发条件:M7 数据显示 Model A

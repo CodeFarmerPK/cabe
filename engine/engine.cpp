@@ -18,7 +18,7 @@ Engine::~Engine() {
     Close();
 }
 
-int32_t Engine::Open(const std::string& devicePath, const uint32_t bufferPoolCount) {
+int32_t Engine::Open(const std::string& devicePath, const uint32_t bufferPoolCount, const uint32_t sqDepth) {
     std::unique_lock lock(mutex_);
     // 拒绝"Close 后在同实例上再 Open":metaIndex / chunkIndex / freeList /
     // nextChunkId 不会被 Close 重置,复用实例会让内存索引和新设备内容错位
@@ -31,10 +31,14 @@ int32_t Engine::Open(const std::string& devicePath, const uint32_t bufferPoolCou
     }
 
     if (isOpen_) {
-        // 幂等分支:path 和 bufferPoolCount 都一致才算"同一次 Open 的重复调用"。
-        // 任一不同都拒绝——静默忽略新参数(尤其是 pool size)会让调用方误以为
-        // 自己扩/缩了 buffer pool,实际仍是首次 Open 时的尺寸。
-        if (devicePath == devicePath_ && bufferPoolCount == bufferPoolCount_) {
+        // 幂等分支:path、bufferPoolCount、sqDepth 全部一致才算"同一次 Open
+        // 的重复调用"。任一不同都拒绝——静默忽略新参数(尤其是 pool size /
+        // sq_depth)会让调用方误以为自己改了配置,实际仍是首次 Open 时的值。
+        // P4 M6 加 sqDepth 到幂等校验(sync 后端虽然忽略 sqDepth,但仍参与
+        // 校验保持 Engine 行为对两类后端一致)。
+        if (devicePath == devicePath_
+            && bufferPoolCount == bufferPoolCount_
+            && sqDepth == sqDepth_) {
             return SUCCESS;
         }
         return ENGINE_ALREADY_OPEN;
@@ -44,9 +48,13 @@ int32_t Engine::Open(const std::string& devicePath, const uint32_t bufferPoolCou
     // io_ 内部按顺序处理:
     //   stat + S_ISBLK + open(O_DIRECT|O_SYNC) + ioctl(BLKGETSIZE64)
     //   → mmap pool + freeStack 倒序填充
+    //   → io_uring 后端:queue_init + register_buffers + register_files
     // 任一阶段失败,io_ 内部已自行回滚(close fd / munmap),返回原 DEVICE_*/POOL_*
     // 错误码,Engine 直接透传即可,不必再做手动清理。
-    const int32_t ret = io_.Open(devicePath, bufferPoolCount);
+    //
+    // P4 M6 起 sqDepth 透传到 io_.Open;sync 后端忽略,io_uring 后端用作
+    // io_uring_queue_init 的 entries 并做 D7/R12 校验。
+    const int32_t ret = io_.Open(devicePath, bufferPoolCount, sqDepth);
     if (ret != SUCCESS) {
         return ret;
     }
@@ -72,6 +80,7 @@ int32_t Engine::Open(const std::string& devicePath, const uint32_t bufferPoolCou
         return MEMORY_INSERT_FAIL;
     }
     bufferPoolCount_ = bufferPoolCount;
+    sqDepth_         = sqDepth;          // P4 M6:记录用于 re-Open 幂等校验
     isOpen_ = true;
     return SUCCESS;
 }
@@ -91,6 +100,7 @@ int32_t Engine::Close() {
 
     devicePath_.clear();
     bufferPoolCount_ = 0;
+    sqDepth_         = 0;     // P4 M6:同 bufferPoolCount_ 清零
     isOpen_ = false;
     // 标记此实例已走过一次 Open→Close,Open 检测到 usedOnce_ 即拒绝。
     // 即使 io_.Close 失败(极罕见 EIO),此实例也不可复用 —— 避免半 closed

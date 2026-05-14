@@ -3,28 +3,36 @@
  * Created Time: 2026-04-28
  * Created by: CodeFarmerPK
  *
- * IoUringIoBackend —— P4 io_uring 后端实现(M5 已落地,M6 待启动)。
+ * IoUringIoBackend —— P4 io_uring 后端实现(M6 已落地,M7 待启动)。
  *
- * 截至 M5 状态:Open / Close / AcquireBuffer / IsOpen / BlockCount / is_closed /
+ * 截至 M6 状态:Open / Close / AcquireBuffer / IsOpen / BlockCount / is_closed /
  *          ReturnBuffer_Internal / WriteBlock / ReadBlock 全部真实实现。
  *          WriteBlock / ReadBlock 走 Model A(粗 io_mutex_ +
  *          io_uring_prep_write_fixed / prep_read_fixed + submit_and_wait(1)),
- *          fd 已 registered(io_uring_register_files),SQE 用 IOSQE_FIXED_FILE +
- *          fd_idx=0 提交,跳过每次 op 的 fdget / fdput 内核开销。
+ *          fd 已 registered + SQE 用 IOSQE_FIXED_FILE + fd_idx=0 提交。
+ *          SQ depth 从 Options.io_uring_sq_depth 取(D7),Open 校验
+ *          sq_depth >= pool_count(R12)且是 2 的幂(D7)。
  *
- * M5 落地的功能(M4 基础上新增):
- *   - Open: 第 4.6 阶段加 io_uring_register_files(&ring, &fd, 1),失败按
- *           D15 完整 rollback(unregister_buffers → queue_exit → munmap → close fd)
- *   - WriteBlock: prep_write_fixed 的 fd 字段改 0 + sqe->flags |= IOSQE_FIXED_FILE
- *   - ReadBlock:  对称,prep_read_fixed + IOSQE_FIXED_FILE
- *   - Close: 反注册顺序加 unregister_files(在 unregister_buffers 之前,
- *           对称 Open 内 register 顺序)
+ * M6 落地的功能(M5 基础上新增):
+ *   - 公开 API:include/cabe/options.h 加 io_uring_sq_depth 字段(D7 第二部分)
+ *   - IoBackendTraits trait Open 加 3rd 参数 sqDepth(sync 后端忽略)
+ *   - Open 校验:sq_depth >= pool_count(R12)+ sq_depth 是 2 的幂(D7)
+ *   - io_uring_queue_init 用 sqDepth 替代 kDefaultSqDepth 硬编码
+ *   - Engine 公开 API 透传 Options.io_uring_sq_depth → 内部 Engine.Open
+ *     → io_.Open(同实例 re-Open 幂等校验包含 sqDepth)
+ *   - 4 个 io_uring 专属测试(test/io/io_uring_specific_test.cpp):
+ *       - OpenRejectsSqDepthLessThanPoolCount(R12 验证)
+ *       - OpenRejectsSqDepthNotPowerOfTwo(D7 验证)
+ *       - RegisterBufferIndexMatchesSlot(buf_index 一一映射验证)
+ *       - CloseDrainsInflightSubmissions(大量 W/R 后 Close 干净)
+ *       - WriteBlockEAGAINRetriesOnce(SKIP,等 M7 batch 才能触发)
+ *   - README "Production deployment notes" 章节(R7):ulimit / systemd
+ *     LimitMEMLOCK / hardened kernel / Docker seccomp / Options.sq_depth 配置
+ *   - CMakeLists CABE_HAVE_* feature gate try_compile(D10):探测
+ *     IORING_SETUP_SINGLE_ISSUER / IORING_SETUP_DEFER_TASKRUN 标志,
+ *     给 M8 / P6 reactor 阶段留接入点
  *
- * M5 不做的(留给后续 milestone,详见 doc/p4_io_uring_design.md §13):
- *   M6: Options.io_uring_sq_depth(D7)+ Open 校验 sq_depth >= pool_count(R12)
- *       + specific test 扩展(CloseDrainsInflight / RegisterBufferIndexMatchesSlot
- *       / OpenRejectsSqDepth / WriteBlockEAGAINRetries)+ README "Production
- *       deployment notes"(R7)+ CABE_HAVE_* feature gate(D10)
+ * M6 不做的(留给后续 milestone,详见 doc/p4_io_uring_design.md §13):
  *   M7: WriteBlocks / ReadBlocks 批量 API + Engine 多 chunk 路径接入(D18)
  *   M8: (可选)Model A → Model B 升级(reaper 线程,M7 数据决定)
  *   M9: bench 归档 + README/roadmap/设计稿状态收尾
@@ -143,7 +151,8 @@ IoUringIoBackend::~IoUringIoBackend() {
 }
 
 int32_t IoUringIoBackend::Open(const std::string& devicePath,
-                                const std::uint32_t bufferPoolCount) {
+                               const std::uint32_t bufferPoolCount,
+                               const std::uint32_t sqDepth) {
     // ---- 状态机守卫 ----
     if (closed_.load(std::memory_order_acquire)) {
         // 已经走过一轮 Close → terminal。想再开必须销毁实例。
@@ -161,6 +170,29 @@ int32_t IoUringIoBackend::Open(const std::string& devicePath,
         return POOL_INVALID_PARAMS;
     }
 
+    // ---- M6 / D7 / R12:sqDepth 校验 ----
+    //
+    // R12:sqDepth 必须 >= bufferPoolCount。M7 batch 上线后,一次同时
+    // in-flight 的 op 上限是 bufferPoolCount(因为每个 op 占一个 buffer
+    // slot),sqDepth 必须容得下。Model A 当前 1:1 串行不会撞此上限,但
+    // 提前校验避免 M7 上线后才发现配置错误。
+    //
+    // D7:sqDepth 必须是 2 的幂。io_uring_queue_init 旧内核(< 5.10)硬性
+    // 要求,新内核宽松但内部仍向上对齐到 2 的幂(浪费 entries)。统一
+    // 锁紧约束便于跨版本一致行为。0 也不是 2 的幂,自然被拦下。
+    //
+    // 上限:bufferPoolCount 隐含的 IORING_MAX_REG_BUFFERS = 16384 由
+    // register_buffers 自身校验(M4 实测路径);此处不再前置校验。
+    if (sqDepth < bufferPoolCount) {
+        CABE_LOG_WARN("IoUringIoBackend::Open: sq_depth=%u < pool_count=%u (R12)",
+                      sqDepth, bufferPoolCount);
+        return POOL_INVALID_PARAMS;
+    }
+    if (sqDepth == 0 || (sqDepth & (sqDepth - 1)) != 0) {
+        CABE_LOG_WARN("IoUringIoBackend::Open: sq_depth=%u not a power of two (D7)",
+                      sqDepth);
+        return POOL_INVALID_PARAMS;
+    }
     // ===== 第 1 阶段:打开裸块设备(等价 sync 后端逻辑)=====
     //
     // S_ISBLK 必须前置于 open(O_DIRECT) —— Linux do_dentry_open 在 O_DIRECT
@@ -252,7 +284,10 @@ int32_t IoUringIoBackend::Open(const std::string& devicePath,
     //
     // 失败时 unique_ptr 析构会 free RingState 内存;io_uring 未 init 成功,
     // 不可调 io_uring_queue_exit(那会触碰未初始化字段)。
-    const int qrc = ::io_uring_queue_init(kDefaultSqDepth,
+    //
+    // M6 起 sqDepth 从入参 / Options.io_uring_sq_depth 取,M2-M5 阶段曾经
+    // 硬编码为 kDefaultSqDepth = 64。
+    const int qrc = ::io_uring_queue_init(sqDepth,
                                           &new_ring_state->ring, 0);
     if (qrc < 0) {
         CABE_LOG_ERROR("IoUringIoBackend::Open: io_uring_queue_init failed, errno=%d",

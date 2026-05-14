@@ -59,15 +59,24 @@ concept IoBackendTraits = requires(
     const T                 ct,
     const std::string&      path,
     std::uint32_t           poolCount,
+    std::uint32_t           sqDepth,   // M6:io_uring SQ depth(sync 后端忽略)
     BlockId                 blockId,
     BufferHandle&           handle,
     const BufferHandle&     chandle
 ) {
     // 生命周期
-    { t.Open(path, poolCount) }        -> std::same_as<std::int32_t>;
-    { t.Close() }                      -> std::same_as<std::int32_t>;
-    { ct.IsOpen() }                    -> std::same_as<bool>;
-    { ct.BlockCount() }                -> std::same_as<std::uint64_t>;
+//
+    // Open 的第 3 个参数 sqDepth(P4 M6 起加):
+    //   - sync 后端:忽略此值,签名一致只为 trait 一致
+    //   - io_uring 后端:用作 io_uring_queue_init 的 entries 参数;
+    //     校验 sq_depth >= pool_count(R12)且是 2 的幂(D7)
+    //
+    // 各 backend 的 Open 提供 default 参数(== 64),保证 2-arg 调用
+    // (旧 contract test / 旧测试 fixture)仍合法,无需逐一改动。
+    { t.Open(path, poolCount, sqDepth) } -> std::same_as<std::int32_t>;
+    { t.Close() }                        -> std::same_as<std::int32_t>;
+    { ct.IsOpen() }                      -> std::same_as<bool>;
+    { ct.BlockCount() }                  -> std::same_as<std::uint64_t>;
 
     // Buffer 生命周期(归还由 BufferHandle 析构 → BufferHandleImpl::~ 完成)
     { t.AcquireBuffer() }              -> std::same_as<BufferHandle>;

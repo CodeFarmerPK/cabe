@@ -174,7 +174,10 @@ namespace cabe {
         auto engine_ptr = std::unique_ptr<Engine>(new Engine());
         engine_ptr->impl_ = std::make_unique<Impl>();
 
-        const int32_t rc = engine_ptr->impl_->engine.Open(opts.device_path, opts.buffer_pool_count);
+        // P4 M6:把 Options.io_uring_sq_depth 传给内部 Engine,内部 Engine 再
+        // 透传给 io_.Open(sync 后端忽略此值,io_uring 后端做 D7/R12 校验后
+        // 作为 io_uring_queue_init 的 entries)。
+        const int32_t rc = engine_ptr->impl_->engine.Open(opts.device_path, opts.buffer_pool_count, opts.io_uring_sq_depth);
         if (rc != SUCCESS) {
             CABE_LOG_ERROR("Engine::Open: internal Open failed with code %d, device_path=%s",
                 rc, opts.device_path.c_str());

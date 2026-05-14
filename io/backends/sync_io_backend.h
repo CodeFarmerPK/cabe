@@ -66,7 +66,13 @@ public:
     // Close 在 (opened=false) 状态下幂等 SUCCESS、不进入 terminal
     // Close 在 (opened=true) 时进入 terminal,后续 Open 一律 IO_BACKEND_ALREADY_OPEN
     // 想"重新打开"必须销毁实例构造新的(与 Engine usedOnce_ 一致)
-    int32_t       Open(const std::string& devicePath, std::uint32_t bufferPoolCount);
+    // 第 3 个参数 sqDepthHint 是 io_uring 后端的 SQ depth(P4 M6 / D7 加),
+    // sync 后端忽略此值;签名一致只为 IoBackendTraits 一致(io_uring 与
+    // sync 两个 backend 共享相同 Open 签名)。default = 64 让旧 2-arg 调用点
+    // (contract test 等)不需要逐一改动。
+    int32_t       Open(const std::string& devicePath,
+                       std::uint32_t      bufferPoolCount,
+                       std::uint32_t      sqDepthHint = 64);
     int32_t       Close();
     bool          IsOpen()      const noexcept;
     std::uint64_t BlockCount()  const noexcept;

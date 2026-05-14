@@ -3,10 +3,10 @@
  * Created Time: 2026-04-28
  * Created by: CodeFarmerPK
  *
- * IoUringIoBackend —— P4 io_uring 后端声明(M5 已落地,M6 待启动)。
+ * IoUringIoBackend —— P4 io_uring 后端声明(M6 已落地,M7 待启动)。
  *
- * 进度(详见 doc/p4_io_uring_design.md §13;接口 API 自 M1 以来零变化,
- * Engine 调用方完全无感):
+ * 进度(详见 doc/p4_io_uring_design.md §13;Engine 公开 API 自 M6 起多了
+ * Options.io_uring_sq_depth 一个可选字段,默认 64 完全向下兼容):
  *   M1 ✅ 骨架 + liburing 接入 + TSAN/io_uring 双层阻断
  *   M2 ✅ Open/Close + buffer pool + ring 真实实现(状态机 + Q7 行为对齐 sync)
  *   M3 ✅ 朴素 WriteBlock/ReadBlock(Model A,prep_write/prep_read,裸 fd)
@@ -14,7 +14,9 @@
  *         真用(bench cpu_time 加速 16–82%,远超 5% 验收门)
  *   M5 ✅ io_uring_register_files + IOSQE_FIXED_FILE(register fd 一次,
  *         WriteBlock/ReadBlock 走 fd_idx=0,跳过 fdget/fdput)
- *   M6 ❌ Options.io_uring_sq_depth + io_uring 专属测试扩展 + 部署文档
+ *   M6 ✅ Options.io_uring_sq_depth(D7)+ R12 校验 + 4 个 specific test +
+ *         README "Production deployment notes"(R7)+ CABE_HAVE_* feature
+ *         gate(D10)
  *   M7 ❌ 内部 batch API(WriteBlocks/ReadBlocks)+ Engine 多 chunk 路径接入
  *   M8 ❌ (可选)Model A → Model B 升级评估(reaper 线程,M7 数据决定)
  *   M9 ❌ bench 归档 + README/roadmap/设计稿状态收尾
@@ -26,8 +28,8 @@
  *   - Buffer pool:mmap(MAP_ANONYMOUS) 一大块,LIFO slot;Open 内整片
  *                 register 为 io_uring fixed buffer(n × 1 MiB iovec,
  *                 fixed_buf_index_ == slot_index_)
- *   - Ring:io_uring_queue_init(64, ..., 0);SQ depth 由 kDefaultSqDepth
- *           硬编码,M6 起从 Options.io_uring_sq_depth 取
+ *   - Ring:io_uring_queue_init(sqDepth, ..., 0);M6 起 sqDepth 由
+ *           Options.io_uring_sq_depth 透传(默认 64,Open 校验 sq>=pool 且 2 幂)
  *   - 提交模型:Model A(粗 io_mutex_ + io_uring_submit_and_wait(1) +
  *               EAGAIN 一次退避),M7/M8 视情况升级
  *
@@ -88,7 +90,15 @@ public:
     // M1 stub:Open 返回 IO_BACKEND_NOT_OPEN(暂未实现真实路径);
     //          Close 在未 Open 上幂等 SUCCESS,不进入 terminal,
     //          允许 M2 起在同实例上首次 Open 成功。
-    int32_t       Open(const std::string& devicePath, std::uint32_t bufferPoolCount);
+    // 第 3 个参数 sqDepth(P4 M6 / D7):io_uring SQ depth。
+    //   - 必须是 2 的幂(io_uring_queue_init 老内核硬性要求,统一锁紧)
+    //   - 必须 >= bufferPoolCount(R12,M7 batch 上限保护)
+    //   - 校验失败返回 POOL_INVALID_PARAMS(与 bufferPoolCount==0 同分类)
+    // default = 64 让旧 2-arg 调用点(contract test 等)不需要逐一改动;
+    // sync 后端有同形签名(但忽略此值),IoBackendTraits 共契约。
+    int32_t       Open(const std::string& devicePath,
+                       std::uint32_t      bufferPoolCount,
+                       std::uint32_t      sqDepth = 64);
     int32_t       Close();
     bool          IsOpen()      const noexcept;
     std::uint64_t BlockCount()  const noexcept;
