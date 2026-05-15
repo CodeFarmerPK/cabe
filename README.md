@@ -146,7 +146,8 @@ measurement at the module and engine level.
 | P2  | C++ API 契约定型(Pimpl + Status)+ 裸设备语义重构 | ✅ 完成 |
 | P3  | IoBackend 抽象层（编译期 dispatch，仅 sync 后端） | ✅ 完成 |
 | P4  | io_uring 后端 + registered buffer pool（接管 BufferPool） | ✅ 完成（M1-M7 落地,M8 评估 = 不做,M9 收尾 / [设计稿](doc/p4_io_uring_design.md) / [bench 总结](bench/baselines/p4-summary.md)） |
-| P5  | WAL + 崩溃恢复 | 计划 |
+| P4.5 | FreeList 三容器轮换 + 严格升序分配 + 异步 sort + TRIM 集成 | 计划 / [设计稿](doc/p4.5_freelist_design.md) |
+| P5  | WAL + 崩溃恢复 | 计划（采用完整 WAL 方案） |
 | P6  | 多线程 reactor 引擎 | 计划 |
 | P7  | 自研 B+ 树 + 细粒度并发 | 计划 |
 | P8  | scatter-gather 多 chunk 合并 I/O | 计划 |
@@ -241,6 +242,7 @@ floor)。`pkg-config --modversion liburing` 检查;低于此版本 CMake configu
 
 - [P4 io_uring 分阶段实施设计](doc/p4_io_uring_design.md) — 19 项决策(D1–D19)、9 个里程碑(M1–M9)、12 项风险点(R1–R12);v1.0(2026-04-28 定稿 / 2026-05-14 已实施)
 - [P4 bench 总结](bench/baselines/p4-summary.md) — P4 各档 bench 归档对照,M4 cpu_time 加速 16-82%
+- [P4.5 FreeList 改造设计](doc/p4.5_freelist_design.md) — 三容器轮换 + 异步 sort + TRIM 集成;22 项决策(D1-D20 + D-NEW-1~3)、19 项风险点、5 个 milestone(M1-M5);v1.0(2026-05-15 定稿)
 
 ---
 

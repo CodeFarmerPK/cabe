@@ -23,6 +23,7 @@
 
 // NOLINTBEGIN(cppcoreguidelines-macro-usage)
 #define CABE_LOG_DEBUG(fmt, ...) ((void)0)
+#define CABE_LOG_INFO(fmt, ...) ((void)0)
 #define CABE_LOG_WARN(fmt, ...)  ((void)0)
 #define CABE_LOG_ERROR(fmt, ...) ((void)0)
 #define CABE_LOG_FATAL(fmt, ...) ((void)0)

@@ -2,95 +2,218 @@
  * Project: Cabe
  * Created Time: 2026-03-30 15:10
  * Created by: CodeFarmerPK
+ *
+ * P4.5 M1 改造(2026-05-15):FreeList 三容器轮换骨架。
+ *   见 free_list.h 顶部注释与 doc/p4.5_freelist_design.md。
+ *
+ *   M1 落地范围:
+ *     - SetMaxBlockCount 全量装载 [0, n) 到 containers_[0](降序)
+ *     - 严格升序 Allocate(pop_back 取最小 BlockId)
+ *     - Release / ReleaseBatch 进 active recycle(O(1) push)
+ *     - Stats getter(FreeCount / AllocatableCount / PendingRecycleCount 等)
+ *     - SetTrimContext / SetTuning 上下文存储
+ *
+ *   M1 不做(留后续 milestone):
+ *     - 切换触发与角色互换(M2)
+ *     - 后台 sort worker 线程(M3)
+ *     - ioctl(BLKDISCARD) 同步 TRIM(M4)
+ *     - 写保护(reject_ratio 拒绝,M4)
+ *     - 完整 RebuildFromActive(M4)
  */
 
 #include "free_list.h"
 
-void FreeList::SetMaxBlockCount(const uint64_t maxBlockCount) {
-    maxBlockCount_ = maxBlockCount;
+#include "common/logger.h"
+
+// ============================================================
+// 生命周期
+// ============================================================
+
+int32_t FreeList::SetMaxBlockCount(const uint64_t n) {
+    // 多次调用契约(D-18):同 n 幂等,不同 n 拒绝
+    if (initialized_) {
+        if (n == max_block_count_) {
+            return SUCCESS;
+        }
+        return CABE_INVALID_DATA_SIZE;
+    }
+
+    max_block_count_ = n;
+
+    if (n == 0) {
+        // 单测 fixture 路径:无容量,Allocate 立即 NO_SPACE
+        free_idx_         = 0;
+        active_idx_       = 1;
+        inactive_idx_     = 2;
+        initial_capacity_ = 0;
+        initialized_      = true;
+        return SUCCESS;
+    }
+
+    // 装载 [0, n) 到 containers_[0],降序存储 — pop_back 取最小实现升序分配
+    containers_[0].clear();
+    try {
+        containers_[0].reserve(n);
+    } catch (...) {
+        max_block_count_ = 0;
+        return MEMORY_INSERT_FAIL;
+    }
+    for (uint64_t i = n; i > 0; --i) {
+        containers_[0].push_back(static_cast<BlockId>(i - 1));
+    }
+    containers_[1].clear();
+    containers_[2].clear();
+
+    free_idx_         = 0;
+    active_idx_       = 1;
+    inactive_idx_     = 2;
+    initial_capacity_ = n;
+    initialized_      = true;
+
+    CABE_LOG_INFO("FreeList initialized: max_block_count=%lu, "
+                  "switch_ratio=%.2f, reject_ratio=%.2f, "
+                  "symmetric_ratio=%.2f, min_recycle_threshold=%lu",
+                  static_cast<unsigned long>(n),
+                  switch_ratio_, reject_ratio_, symmetric_ratio_,
+                  static_cast<unsigned long>(min_recycle_threshold_));
+    return SUCCESS;
 }
 
-int32_t FreeList::Allocate(BlockId* blockId) {
-    if (blockId == nullptr) {
+void FreeList::SetTrimContext(const int dev_fd, const bool trim_supported) {
+    dev_fd_         = dev_fd;
+    trim_supported_ = trim_supported;
+}
+
+void FreeList::SetTuning(const double switch_ratio,
+                         const double reject_ratio,
+                         const double symmetric_ratio,
+                         const uint64_t min_recycle_threshold) {
+    // 单字段独立校验:超界值静默忽略(保持已有默认),避免 Engine.Open
+    // 因 freelist tuning 参数不合理而失败。Options 入口层做严格校验更合适。
+    if (switch_ratio > 0.0 && switch_ratio < 1.0) {
+        switch_ratio_ = switch_ratio;
+    }
+    if (reject_ratio > 0.0 && reject_ratio < 1.0) {
+        reject_ratio_ = reject_ratio;
+    }
+    if (symmetric_ratio > 0.0) {
+        symmetric_ratio_ = symmetric_ratio;
+    }
+    if (min_recycle_threshold >= 1) {
+        min_recycle_threshold_ = min_recycle_threshold;
+    }
+}
+
+// ============================================================
+// 业务核心
+// ============================================================
+
+int32_t FreeList::Allocate(BlockId* out) {
+    if (out == nullptr) {
         return MEMORY_NULL_POINTER_EXCEPTION;
     }
-
-    // 优先走复用路径:freeBlocks_ 里的 blockId 都是已经被 Release 过的,
-    // 不占用"新空间",即使 maxBlockCount_ 已达上限也能分配出去。
-    if (!freeBlocks_.empty()) {
-        *blockId = freeBlocks_.back();
-        freeBlocks_.pop_back();
-        return SUCCESS;
+    if (!initialized_) {
+        return POOL_NOT_INITIALIZED;
     }
 
-    // 走 nextBlockId_++ 路径:检查是否达到设备容量上限。
-    // maxBlockCount_ == 0 表示未配置上限(单元测试路径),跳过校验。
-    if (maxBlockCount_ != 0 && nextBlockId_ >= maxBlockCount_) {
+    // P4.5 M1:从 freeList 单容器分配,不触发切换、不做写保护
+    //   - M2 在这里加 ShouldTriggerSwitch / StartSwitch 调用
+    //   - M4 在这里加全局写保护(全局可用 ≤ max × (1 - reject_ratio) 拒绝)
+    if (containers_[free_idx_].empty()) {
         return DEVICE_NO_SPACE;
     }
-    *blockId = nextBlockId_++;
 
-
+    *out = containers_[free_idx_].back();
+    containers_[free_idx_].pop_back();
     return SUCCESS;
 }
 
-int32_t FreeList::Release(const BlockId blockId) {
-    // Double-release 检测：同一 blockId 出现两次会让两次 Allocate 返回同一
-    // 物理块 → 两个 key 共享磁盘块 → 静默数据损坏。
-    // O(N) 扫描，N = freeBlocks_.size()（正常运行时较小，可接受）。
-    for (const BlockId existing : freeBlocks_) {
-        if (existing == blockId) {
-            return FREE_LIST_DOUBLE_RELEASE;
-        }
+int32_t FreeList::Release(const BlockId id) {
+    if (!initialized_) {
+        return POOL_NOT_INITIALIZED;
     }
-    // 先 reserve 保证容量，之后的 push_back 对 trivially-copyable
-    // 类型（BlockId = uint64_t）是 noexcept。bad_alloc 只可能在 reserve
-    // 阶段抛出，此时 blockId 还没被吞，返回错误后调用方能决定重试或
-    // 泄漏，不会出现"放进来一半"的中间状态。
+
+    // P4.5 M1:进 active recycle(无 TRIM,无对称水位检测)
+    //   - M2 在这里加对称水位标志(switch_pending_)
+    //   - M4 在这里加 IssueTrim 同步发 ioctl(BLKDISCARD)
     try {
-        freeBlocks_.reserve(freeBlocks_.size() + 1);
+        containers_[active_idx_].push_back(id);
     } catch (...) {
         return MEMORY_INSERT_FAIL;
     }
-    freeBlocks_.push_back(blockId); // noexcept for BlockId
     return SUCCESS;
 }
 
-int32_t FreeList::ReleaseBatch(const std::vector<BlockId>& blockIds) {
-    if (blockIds.empty()) {
+int32_t FreeList::ReleaseBatch(const std::vector<BlockId>& ids) {
+    if (!initialized_) {
+        return POOL_NOT_INITIALIZED;
+    }
+    if (ids.empty()) {
         return SUCCESS;
     }
 
-    // 先完整验证，再 reserve + insert，保证原子性：
-    //   - 与已有 freeBlocks_ 无重叠（batch 外 double-release）
-    //   - batch 内部无重复（batch 内 double-release）
-    // 与 Release() 的 O(N) 扫描保持一致的防护强度。
-    for (size_t i = 0; i < blockIds.size(); ++i) {
-        for (const BlockId existing : freeBlocks_) {
-            if (existing == blockIds[i]) return FREE_LIST_DOUBLE_RELEASE;
-        }
-        for (size_t j = i + 1; j < blockIds.size(); ++j) {
-            if (blockIds[i] == blockIds[j]) return FREE_LIST_DOUBLE_RELEASE;
-        }
-    }
-
+    // 原子性(D-15):reserve 失败 → 整批不 push,recycle 状态不变
     try {
-        freeBlocks_.reserve(freeBlocks_.size() + blockIds.size());
+        containers_[active_idx_].reserve(
+            containers_[active_idx_].size() + ids.size());
     } catch (...) {
         return MEMORY_INSERT_FAIL;
     }
-    freeBlocks_.insert(freeBlocks_.end(), blockIds.begin(), blockIds.end());
+    // reserve 成功后 push_back 对 trivially-copyable BlockId 是 noexcept
+    for (const BlockId id : ids) {
+        containers_[active_idx_].push_back(id);
+    }
     return SUCCESS;
 }
 
-size_t FreeList::FreeCount() const {
-    return freeBlocks_.size();
+// ============================================================
+// P5 WAL recovery 用(D-13;P4.5 M4 完整实现)
+// ============================================================
+
+int32_t FreeList::RebuildFromActive(std::span<const BlockId> /*active*/) {
+    // P4.5 M1 占位 — 接口签名固化,实现留 M4:
+    //   1. 等正在进行的切换完成(M3 后台 sort 完成检测)
+    //   2. 排序 active(便于求补集)
+    //   3. 重置三容器,装载 [0, max) - active 到 containers_[0](降序)
+    //   4. 重置 idx / initial_capacity / switch_count
+    //
+    // M1 阶段尚未对接 P5 WAL recovery,此调用返回 CABE_INVALID_DATA_SIZE
+    // 提醒调用方"尚未实现",避免静默成功导致 recovery 路径无声错误。
+    return CABE_INVALID_DATA_SIZE;
 }
 
-BlockId FreeList::NextBlockId() const {
-    return nextBlockId_;
+// ============================================================
+// 观察 / Stats(独立 getter,D-14)
+// ============================================================
+
+uint64_t FreeList::FreeCount() const {
+    // 全局可用 = 三容器之和(兼容旧语义)
+    return static_cast<uint64_t>(containers_[0].size())
+         + static_cast<uint64_t>(containers_[1].size())
+         + static_cast<uint64_t>(containers_[2].size());
+}
+
+uint64_t FreeList::AllocatableCount() const {
+    return static_cast<uint64_t>(containers_[free_idx_].size());
+}
+
+uint64_t FreeList::PendingRecycleCount() const {
+    return static_cast<uint64_t>(containers_[active_idx_].size())
+         + static_cast<uint64_t>(containers_[inactive_idx_].size());
+}
+
+uint64_t FreeList::SwitchCount() const {
+    return switch_count_.load(std::memory_order_relaxed);
 }
 
 uint64_t FreeList::MaxBlockCount() const {
-    return maxBlockCount_;
+    return max_block_count_;
+}
+
+bool FreeList::TrimSupported() const {
+    return trim_supported_;
+}
+
+bool FreeList::IsSortInProgress() const {
+    return state_.load(std::memory_order_acquire) == State::Switching;
 }

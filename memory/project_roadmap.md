@@ -5,11 +5,11 @@ type: project
 originSessionId: 5e75530e-aa98-44be-b0dc-01b60f844823
 ---
 
-> **同步说明**:此文件与项目目录 `cabe/memory/project_roadmap.md` 保持一致。
-> 项目目录版本是正本(README、设计文档引用它),此处镜像供 Claude 会话自动读入。
-> 最近一次同步:2026-05-14(P4 M4 完成后)。
+> **同步说明**:此文件是正本(README、设计文档引用它);Claude memory 镜像
+> `~/.claude/projects/.../memory/project_roadmap.md` 供 Claude 会话自动读入。
+> 最近一次同步:2026-05-15(P4.5 设计稿落地 + M1 实施后)。
 
-## 完成状态（截至 2026-05-14）
+## 完成状态（截至 2026-05-15）
 
 - **P-1** Fedora 43 开发环境 — ✅ 已完成
 - **P0** BufferPool（mmap + O_DIRECT 对齐） — ✅ 已完成
@@ -37,7 +37,11 @@ originSessionId: 5e75530e-aa98-44be-b0dc-01b60f844823
   - 风险:**12 项全部闭环**(R12 sq_depth >= pool_count 校验在 M6 与 Options 字段一并加)
   - 注释/文档同步状态:M1-M9 全部刷到 P4 收尾状态
   - 详见下文「## P4 实现摘要」与「## P4 实施计划」
-- **P5** WAL + 崩溃恢复 — 计划中
+- **P4.5** FreeList 改造(三容器轮换 + 严格升序分配 + 异步 sort + TRIM 集成)— 进行中
+  (2026-05-15 设计稿落地 + M1 数据结构骨架已实施:`doc/p4.5_freelist_design.md`;
+  5 个 milestone 中 M1 ✅ 完成,M2-M5 待实施;~7 天总工程量;详见下文「## P4.5 实施计划」)
+- **P5** WAL + 崩溃恢复 — 计划中(2026-05-15 方向确定:**采用完整 WAL 方案**,
+  排除纯 checkpoint / hybrid 路线,详见下文「## P5 方向决策」)
 - **P6** 多线程 Reactor 引擎 — 计划中
 - **P7** 自研 B+ 树 + 细粒度并发 — 计划中
 - **P8** scatter-gather 多 chunk 合并 I/O — 计划中
@@ -207,6 +211,158 @@ bench 归档:
 - `feedback_robust_runtime_assumption.md` — **健壮运行环境假设**:drain 不带
   超时;不主动 fsync 校验持久化语义;不监测内核 worker punt;RLIMIT_MEMLOCK
   失败硬退出(不 fallback)
+
+## P4.5 实施计划(2026-05-15)
+
+设计稿:`doc/p4.5_freelist_design.md`(2026-05-15 v1.0 定稿,M1 已实施 / M2-M5 待实施)。
+设计稿 § 14 包含每个 milestone 的完整接口表、数据结构、状态机、单测覆盖矩阵(M1.1-M5.6
+共 30+ 子章节);此处为索引性质的摘要,展开见设计稿。
+
+**P4.5 阶段定位**:P4 io_uring 后端收尾(2026-05-14)→ P5 WAL 之间的独立小阶段。
+不并入 P5 的理由是数据结构改造的风险隔离 + 接口稳定先于持久化(P5 WAL recovery 依赖
+`RebuildFromActive` 接口)+ 与"先落地后优化"原则一致。
+
+**P4.5 范围**:
+- 仅 `storage/free_list` 模块改造,不触动 Engine 业务逻辑、不引入持久化
+- FreeList 从单 list 改为三容器轮换(freeList + 双 recycle),通过 idx swap 实现 O(1)
+  角色变换(无 memcpy 合并)
+- **严格升序分配**:freeList 用 `std::vector<BlockId>` 降序存储 + `pop_back()` 取最小
+- **异步 sort**:后台线程在锁外执行 std::sort,业务路径只有 StartSwitch / CompleteSwitch
+  的 O(1) idx swap 持锁(< 1 μs)
+- **TRIM 集成**:Delete 路径同步 `ioctl(BLKDISCARD)`,失败 WARN 容错
+- **`RebuildFromActive`**:P5 WAL recovery 用接口,P4.5 实现 + 单测
+
+**核心决策**(完整 22 项见设计稿 §3 + 附录 A):
+- D-1 / D-2:全量装载 [0, max) 到 vector,降序存储
+- D-3:freeList 已用 90% 触发切换(`switch_ratio = 0.90`,从原 75% 调高,与 cabe 删除少
+  的场景匹配)
+- D-6:对称水位 `active.size() ≥ freeList.size() × 1.5` 任一满足即触发
+- D-8:依赖 Engine 大锁,FreeList 不引入业务路径锁(只有 `worker_mu_` 处理后台协作)
+- D-10:`FreeCount()` 保留"全局可用"语义,新增 `AllocatableCount` /
+  `PendingRecycleCount` / `SwitchCount`
+- D-NEW-1:`min_recycle_threshold = 1024`,化解启动后纯写入导致 freeList 变空的死锁
+  风险(R-NEW-1)
+
+**P4.5 milestone 划分**(总工程量 ~7 天,详细见设计稿 § 14):
+
+- **M1** ✅ 数据结构骨架与接口(2026-05-15 已完成):
+  - 接口:`SetMaxBlockCount` 触发全量装载(返回 int32_t,同 n 幂等)+ `Allocate`
+    严格升序(降序 vector pop_back 取最小)+ `Release`/`ReleaseBatch` 进 active +
+    7 个 Stats getter(FreeCount / Allocatable / PendingRecycle / Switch / MaxBlock /
+    TrimSupported / IsSortInProgress)+ `SetTrimContext`/`SetTuning` 仅存储字段 +
+    `RebuildFromActive` 返回 `CABE_INVALID_DATA_SIZE` 占位
+  - 数据结构:`containers_[3]` + 3 个 idx + 5 个 atomic 状态字段(M2 起激活)+
+    4 个 tuning 字段(默认 0.90/0.90/1.5/1024)+ 2 个 TRIM 上下文字段
+  - 集成:`engine.cpp:70` 处理 SetMaxBlockCount 新 int32_t 返回值,失败回滚 `io_`
+  - 单测:22 用例 / 两 fixture(`FreeListUninitTest` 6 个 + `FreeListTest` 16 个);
+    覆盖 SetMax 契约、严格升序、Release 不立即复用、ReleaseBatch 原子性、Stats
+    语义一致、未初始化路径、Stub 行为
+  - 显式不做:切换触发(M2)/ 后台线程(M3)/ TRIM ioctl(M4)/ 写保护(M4)/
+    完整 RebuildFromActive(M4)
+  - 实际代码:~250 行新增 + ~280 行单测
+
+- **M2** 同步切换路径(~1 天):
+  - 新方法:`ShouldTriggerSwitch`(三条件复合 — `min_recycle_threshold` 前置 + freeList
+    阈值 OR 对称水位 OR switch_pending);`StartSwitch`(`sort_task_` move + idx swap +
+    state→Switching);`CompleteSwitch`(`sort_result_` move + idx swap + state→Running
+    + switch_count++)。M2 阶段 sort 在调用栈内同步执行,M3 移到后台线程
+  - 接口增量:`Allocate` 入口检测 sortDone → CompleteSwitch + pop 后检测触发 →
+    StartSwitch;`Release` 检测对称水位设置 `switch_pending_`
+  - 状态机激活:Running ↔ Switching 转换开始发生(M1 字段在位但不转换)
+  - 私有成员:`sort_task_` / `sort_result_` 引入(M2 同线程使用,M3 跨线程)
+  - 单测:7 类用例(freeList 阈值触发 / 对称水位触发 / min_recycle_threshold 阻止 /
+    切换后仍升序 / 多次连续切换稳态 / 切换中状态查询 / 残余 2 轮等待生命周期)
+  - 代码:~180 行新增 + ~250 行单测
+
+- **M3** 异步 sort worker(~2 天):
+  - 引入:`std::thread sort_worker_` + `std::mutex worker_mu_` +
+    `std::condition_variable worker_cv_` + `std::atomic<bool> stop_`
+  - 新方法:`SortWorkerFn` 后台主循环(cv.wait → 抢 sort_task_ → 锁外 std::sort →
+    回填 sort_result_ → sort_done_=true);`SetMaxBlockCount` 装载后启动线程;
+    `~FreeList` stop_+notify+join
+  - StartSwitch 改造:从同步 sort 改为 lock worker_mu_ + move sort_task_ + notify_one
+  - 跨线程协议:锁层级 Engine 锁 > worker_mu_,单向无死锁;atomic acquire/release
+    配对 sort_done_;TSAN 干净
+  - 单测:6 类(worker 生命周期 / 异步 sort 完成检测 / Switching 状态可观察 /
+    持锁时间断言 < 几 μs / Close 切换中正确退出 / TSAN 全套 pass)
+  - 代码:~220 行新增 + ~300 行单测
+
+- **M4** 周边设施(~1.5 天):
+  - TRIM 集成:`IssueTrim` 私有方法(`ioctl(BLKDISCARD, [id × CHUNK, CHUNK])`,
+    失败 WARN 不影响业务返回);Release / ReleaseBatch 调 IssueTrim
+  - 写保护:Allocate 入口判定 `available ≤ max × (1 - reject_ratio)` → NO_SPACE
+  - `RebuildFromActive` 完整实现:等正在进行的切换完成 → 排序 active → 清空三容器 →
+    用归并法构造 freeList = [0, max) - active(降序)→ 重置 idx / initial_capacity /
+    switch_count
+  - IoBackend 接口扩展:concept 加 `GetDeviceFd()`,sync / io_uring 各实现
+  - Options 字段新增(4 个 freelist_* 字段)+ `Engine::Open` 入口校验(`switch_ratio`
+    ∈ (0,1) 等)+ 透传 SetTuning / SetTrimContext
+  - 单测:10 类(TRIM 检测/失败容错/不支持设备 + 写保护触发/边界 + Rebuild 基础/
+    无序/全 active/切换中调用 + Options 字段校验)
+  - 代码:~200 行新增 + ~280 行单测
+
+- **M5** 文档与收尾(~1.5 天):
+  - 旧测试调整:`test/engine/engine_test.cpp` / `engine_thread_test.cpp` 中含
+    "BlockId 立即复用"隐式假设的用例改预期为"经切换后才复用"(`EngineCoverWrite` 等)
+  - 新增 Engine 集成测试 5 个:`EngineFreeListIntegration_PutDeleteCycle` /
+    `EngineSwitchUnderLoad` / `EngineTrimOnDelete` / `EngineWriteProtection` /
+    `EngineRebuildFromActive`(为 P5 WAL 调用提供端到端验证)
+  - 文档更新:设计稿状态 → `v1.0 已实施`;README Roadmap P4.5 → `✅ 完成`;
+    本路线图 P4.5 完成状态 + 性能数据快照;新建 `bench/baselines/p4.5-summary.md`
+  - bench 归档:`p4.5-baseline`,与 `p4-post-batch` 对比验证业务路径无回退(< 2%)
+  - 回归测试:sync 后端 + io_uring 后端 + ASAN + TSAN 全套通过
+  - 代码:~50 行 Engine 改动 + ~130 行旧测试调整 + ~250 行集成测试 + ~1500 行 markdown
+
+**风险点全部 19 项闭环**(完整见设计稿 §4 + 附录 B):
+- R-1 数据结构 → vector 降序 + pop_back
+- R-13 FreeCount 语义 → 保留旧语义 + 新增 getter
+- R-14 并发安全 → Engine 大锁 + `worker_mu_`
+- R-NEW-1 启动后死锁 → `min_recycle_threshold` 化解(关键)
+- R-NEW-3 后台线程生命周期 → 标准模式(stop_ flag + cv + join)
+
+**性能特征**(40T 设备稳态):
+- 切换间隔:30 分钟 - 数小时
+- 单次切换持锁时间:< 2 μs(StartSwitch + CompleteSwitch idx swap)
+- 系统锁占用率:~0.0000001%
+- 业务路径几乎完全无阻塞
+
+**留给 P5 的接口**:
+- `RebuildFromActive(active_blocks)`:从 chunkIndex 中所有 active 的 blockId 集合
+  反推 freeList(WAL recovery 后调用一次)。P4.5 实现 + 单测,P5 直接调用
+
+**与 P5 WAL 的关系**:
+- freeList 状态完全可从 chunkIndex 推导,**不需要 WAL 帧记录 freeList 切换 / Release**
+- freeList 切换是纯内存行为,与 WAL 完全解耦
+- 切换频率不影响 WAL 大小,WAL truncation 不影响切换语义
+
+## P5 方向决策(2026-05-15)
+
+**结论:采用完整 WAL 方案**,不做纯 checkpoint,不做 hybrid。
+
+**决策依据**(用户在 2026-05-15 对话中确认路线图后段确定性):多 NVMe + reactor +
+B+ 树 + 零拷贝 + SPDK + 可变长 value(通过参数配置全局 chunk size)都是必落地的演进项。
+WAL 在这 6 个维度下全部为更优解;checkpoint 与零拷贝(序列化阶段对立)、stop-the-world
+(reactor 延迟敏感)、多盘条带化一致性、小 chunk size 元数据爆炸等存在系统性冲突。
+
+**演进路径意义**:
+- WAL 路径 = 加层(P5 单线程 append → P6 per-reactor 段 → P7 redo log 嵌入 B+ 树
+  → P8 walpayload 零拷贝 → P9 WAL-on-SPDK,类 BlueStore 模式)
+- checkpoint 路径 = 推倒(P5 之后每一阶段都要部分推翻持久化层)
+
+**排除项**:Bitcask 风格"数据文件即 WAL"在固定 chunk size 下不能直接套用
+(Cabe chunk 是纯 value,无自描述帧头),但格式上可以借鉴 self-describing 帧的思路。
+
+**P5 朴素版边界**(待设计稿正式确认):
+- 单 WAL 文件,O_DIRECT 顺序 append
+- 帧格式 `[type:1][len:4][crc:4][payload:N][seq:8]`
+- 三种 entry:PutCommit / Delete / FreeListUpdate
+- commit 协议:WAL 帧落盘 → chunk data 落盘 → index 更新 → 返回
+- recovery:启动时全量 replay,重建 metaIndex / chunkIndex / freeList
+- 单线程 append;不做 group commit、不做 truncation、不做 checkpoint 加速 recovery
+  (这些留给 P6+ 增量加层)
+
+**待起草**:`doc/p5_wal_design.md`(类比 P4 设计稿结构)。
+
 
 ## 关键约束
 

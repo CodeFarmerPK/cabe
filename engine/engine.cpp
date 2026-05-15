@@ -67,7 +67,14 @@ int32_t Engine::Open(const std::string& devicePath, const uint32_t bufferPoolCou
     //
     // BlockCount() 由 IoBackend 保证 >= 1(否则 Open 阶段就返回 DEVICE_TOO_SMALL),
     // 所以这里不再需要 == 0 的兜底判断。
-    freeList_.SetMaxBlockCount(io_.BlockCount());
+    //
+    // P4.5 M1 起 SetMaxBlockCount 改返回 int32_t(全量装载 [0, n) 到 freeList 降序,
+    // 40T 设备 ~300 ms;装载失败返回 MEMORY_INSERT_FAIL),失败时回滚 io_。
+    if (const int32_t flRet = freeList_.SetMaxBlockCount(io_.BlockCount());
+        flRet != SUCCESS) {
+        io_.Close();
+        return flRet;
+        }
 
 
     // string 赋值在 OOM 下可能抛 bad_alloc(短路径走 SSO 不抛,长路径触发堆分配)。
@@ -213,15 +220,15 @@ int32_t Engine::Put(const std::string& key, const DataView data) {
             if (ret != SUCCESS) {
                 // 本批已 Allocate 但还未 WriteBlocks 的 blocks → 显式 Release
                 // (slots 析构会归还 handles 到 buffer pool)。
-                for (auto& s : slots) freeList_.Release(s.blockId);
+                for (auto& s : slots) (void)freeList_.Release(s.blockId);
                 failRet  = ret;
                 phaseAOk = false;
                 break;
             }
             cabe::io::BufferHandle h = io_.AcquireBuffer();
             if (!h.valid()) {
-                freeList_.Release(blockId);
-                for (auto& s : slots) freeList_.Release(s.blockId);
+                (void)freeList_.Release(blockId);
+                for (auto& s : slots) (void)freeList_.Release(s.blockId);
                 failRet  = POOL_EXHAUSTED;
                 phaseAOk = false;
                 break;
@@ -259,7 +266,7 @@ int32_t Engine::Put(const std::string& key, const DataView data) {
         }
         const int32_t wr = io_.WriteBlocks(writeBatch);
         if (wr != SUCCESS) {
-            for (auto& s : slots) freeList_.Release(s.blockId);
+            for (auto& s : slots) (void)freeList_.Release(s.blockId);
             failRet = wr;
             goto rollback;
         }
@@ -277,7 +284,7 @@ int32_t Engine::Put(const std::string& key, const DataView data) {
             const int32_t cr = chunkIndex_.Put(firstChunkId + i + j, cm);
             if (cr != SUCCESS) {
                 for (uint32_t k = j; k < slots.size(); ++k) {
-                    freeList_.Release(slots[k].blockId);
+                    (void)freeList_.Release(slots[k].blockId);
                 }
                 writtenCount += j;
                 failRet = cr;
