@@ -312,4 +312,164 @@ TEST_F(FreeListTest, ReleaseAndAllocateStressBeforeSwitch) {
     EXPECT_EQ(kHalf, static_cast<int>(freeList_.PendingRecycleCount()));
 }
 
+// ============================================================
+// P4.5 M2 — 切换路径(StartSwitch / CompleteSwitch / 状态机)
+//
+//   fixture 用 SetTuning 把 min_recycle_threshold 设为 4(生产默认 1024),
+//   switch_ratio=0.75(freeList 剩 ≤ 25% 触发),便于小规模单测触发切换。
+//   M2 阶段 sort 同步执行,切换在 Allocate 调用栈内完成。
+// ============================================================
+
+class FreeListSwitchTest : public ::testing::Test {
+protected:
+    static constexpr uint64_t kCapacity = 100;
+    void SetUp() override {
+        ASSERT_EQ(SUCCESS, freeList_.SetMaxBlockCount(kCapacity));
+        freeList_.SetTuning(0.75, 0.90, 1.5, 4);
+    }
+    FreeList freeList_;
+};
+
+// 1. freeList 阈值触发切换(free.size ≤ initial × 0.25)
+TEST_F(FreeListSwitchTest, FreeListThresholdTriggersSwitch) {
+    std::vector<BlockId> taken;
+    for (int i = 0; i < 10; ++i) {
+        BlockId b;
+        ASSERT_EQ(SUCCESS, freeList_.Allocate(&b));
+        taken.push_back(b);
+    }
+    // 满足 min_recycle_threshold(=4)前置
+    for (int i = 0; i < 5; ++i) {
+        ASSERT_EQ(SUCCESS, freeList_.Release(taken[i]));
+    }
+    EXPECT_EQ(0u, freeList_.SwitchCount());
+
+    // 继续 Allocate 把 freeList 拉到 ≤ 25(100 × 0.25)→ 触发切换
+    for (int i = 0; i < 66; ++i) {
+        BlockId b;
+        ASSERT_EQ(SUCCESS, freeList_.Allocate(&b));
+    }
+    EXPECT_GE(freeList_.SwitchCount(), 1u);
+}
+
+// 2. 对称水位触发切换(free 保持 > 25,只让 symmetric 条件成立)
+TEST_F(FreeListSwitchTest, SymmetricWatermarkTriggersSwitch) {
+    std::vector<BlockId> taken;
+    for (int i = 0; i < 70; ++i) {  // freeList=30 > 25,free_threshold 不成立
+        BlockId b;
+        ASSERT_EQ(SUCCESS, freeList_.Allocate(&b));
+        taken.push_back(b);
+    }
+    EXPECT_EQ(0u, freeList_.SwitchCount());
+    // Release 到 active ≥ free(30) × 1.5 = 45 → 标记 switch_pending_
+    for (int i = 0; i < 46; ++i) {
+        ASSERT_EQ(SUCCESS, freeList_.Release(taken[i]));
+    }
+    // 下一次 Allocate 触发(pending / symmetric,非 free_threshold)
+    BlockId b;
+    ASSERT_EQ(SUCCESS, freeList_.Allocate(&b));
+    EXPECT_GE(freeList_.SwitchCount(), 1u);
+}
+
+// 3. min_recycle_threshold 阻止启动初期切换(active < 4)
+TEST_F(FreeListSwitchTest, MinRecycleThresholdBlocksSwitch) {
+    // 纯 Allocate 不 Release:active=0 < min_recycle_threshold(4)
+    for (int i = 0; i < 90; ++i) {  // freeList=10,远低于 25 阈值
+        BlockId b;
+        ASSERT_EQ(SUCCESS, freeList_.Allocate(&b));
+    }
+    EXPECT_EQ(0u, freeList_.SwitchCount());  // 前置不满足,绝不切换
+}
+
+// 4. 切换后分配仍严格升序
+TEST_F(FreeListSwitchTest, AscendingAfterSwitch) {
+    std::vector<BlockId> taken;
+    for (int i = 0; i < 50; ++i) {
+        BlockId b;
+        ASSERT_EQ(SUCCESS, freeList_.Allocate(&b));
+        taken.push_back(b);
+    }
+    // 倒序 Release 全部 50 个 → active 累积(乱序进 active)
+    for (int i = 49; i >= 0; --i) {
+        ASSERT_EQ(SUCCESS, freeList_.Release(taken[i]));
+    }
+    // Allocate 触发切换(freeList 50 → ≤ 25)
+    for (int i = 0; i < 30; ++i) {
+        BlockId b;
+        ASSERT_EQ(SUCCESS, freeList_.Allocate(&b));
+    }
+    ASSERT_GE(freeList_.SwitchCount(), 1u);
+
+    // 切换后 sort 已把回收 BlockId 降序排列,pop_back 仍取最小 → 严格升序
+    BlockId prev;
+    ASSERT_EQ(SUCCESS, freeList_.Allocate(&prev));
+    for (int i = 0; i < 10; ++i) {
+        BlockId b;
+        if (freeList_.Allocate(&b) != SUCCESS) break;
+        EXPECT_GT(b, prev) << "not ascending after switch at i=" << i;
+        prev = b;
+    }
+}
+
+// 5. 多次切换 SwitchCount 单调不减 + 容量守恒
+TEST_F(FreeListSwitchTest, MultipleSwitchesMonotonicCount) {
+    std::vector<BlockId> live;
+    uint64_t prevSwitch = 0;
+    for (int round = 0; round < 100; ++round) {
+        BlockId b;
+        if (freeList_.Allocate(&b) == SUCCESS) {
+            live.push_back(b);
+        }
+        if (live.size() >= 6) {
+            ASSERT_EQ(SUCCESS, freeList_.Release(live.front()));
+            live.erase(live.begin());
+        }
+        const uint64_t cur = freeList_.SwitchCount();
+        EXPECT_GE(cur, prevSwitch) << "SwitchCount decreased at round " << round;
+        prevSwitch = cur;
+        EXPECT_EQ(freeList_.FreeCount() + live.size(), kCapacity)
+            << "capacity leak at round " << round;
+    }
+    EXPECT_GE(freeList_.SwitchCount(), 1u);
+}
+
+// 6. M2 同步 sort:Switching 状态外部不可观察(Allocate 返回时已回 Running)
+TEST_F(FreeListSwitchTest, SwitchStateNotObservableInM2Sync) {
+    std::vector<BlockId> taken;
+    for (int i = 0; i < 80; ++i) {
+        BlockId b;
+        ASSERT_EQ(SUCCESS, freeList_.Allocate(&b));
+        taken.push_back(b);
+    }
+    for (int i = 0; i < 10; ++i) {
+        ASSERT_EQ(SUCCESS, freeList_.Release(taken[i]));
+    }
+    for (int i = 0; i < 60; ++i) {
+        BlockId b;
+        if (freeList_.Allocate(&b) != SUCCESS) break;
+    }
+    EXPECT_FALSE(freeList_.IsSortInProgress());
+    EXPECT_GE(freeList_.SwitchCount(), 1u);
+}
+
+// 7. 跨多轮切换的容量守恒(残余不丢失,无泄漏)
+TEST_F(FreeListSwitchTest, CapacityConservedAcrossSwitches) {
+    std::vector<BlockId> live;
+    for (int round = 0; round < 300; ++round) {
+        BlockId b;
+        if (freeList_.Allocate(&b) == SUCCESS) {
+            live.push_back(b);
+        }
+        if (live.size() >= 5) {
+            ASSERT_EQ(SUCCESS, freeList_.Release(live.back()));
+            live.pop_back();
+        }
+        // 三容器全局可用 + 已分配在外的 == 总容量,任意时刻恒成立
+        EXPECT_EQ(freeList_.FreeCount() + live.size(), kCapacity)
+            << "capacity leak at round " << round
+            << " switchCount=" << freeList_.SwitchCount();
+    }
+    EXPECT_GE(freeList_.SwitchCount(), 1u);
+}
+
 }  // namespace

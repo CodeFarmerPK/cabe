@@ -3,19 +3,22 @@
  * Created Time: 2026-03-30 15:10
  * Created by: CodeFarmerPK
  *
- * P4.5 M1 改造(2026-05-15):FreeList 三容器轮换骨架。
- *   见 free_list.h 顶部注释与 doc/p4.5_freelist_design.md。
+ * P4.5 改造(2026-05-15):FreeList 三容器轮换。
+ *   见 free_list.h 顶部注释与 doc/p4.5_freelist_design.md §14。
  *
- *   M1 落地范围:
- *     - SetMaxBlockCount 全量装载 [0, n) 到 containers_[0](降序)
- *     - 严格升序 Allocate(pop_back 取最小 BlockId)
- *     - Release / ReleaseBatch 进 active recycle(O(1) push)
- *     - Stats getter(FreeCount / AllocatableCount / PendingRecycleCount 等)
- *     - SetTrimContext / SetTuning 上下文存储
+ *   M1 ✅ 落地:SetMaxBlockCount 全量装载、严格升序 Allocate、Release 进
+ *             active、Stats getter、SetTrimContext / SetTuning 上下文存储。
  *
- *   M1 不做(留后续 milestone):
- *     - 切换触发与角色互换(M2)
- *     - 后台 sort worker 线程(M3)
+ *   M2 ✅ 本次落地:
+ *     - ShouldTriggerSwitch 三条件复合判定(min_recycle 前置 + freeList
+ *       阈值 / 对称水位 / switch_pending)
+ *     - StartSwitch / CompleteSwitch 角色互换 + 状态机转换
+ *     - M2 阶段 sort 在 StartSwitch 内同步执行(M3 移到后台 worker)
+ *     - Allocate 接入切换触发 + 完成检测
+ *     - Release / ReleaseBatch 接入对称水位标记
+ *
+ *   M2 不做(留后续 milestone):
+ *     - 后台 sort worker 线程(M3,sort 改异步)
  *     - ioctl(BLKDISCARD) 同步 TRIM(M4)
  *     - 写保护(reject_ratio 拒绝,M4)
  *     - 完整 RebuildFromActive(M4)
@@ -24,6 +27,11 @@
 #include "free_list.h"
 
 #include "common/logger.h"
+
+#include <algorithm>    // std::sort
+#include <cstddef>      // std::size_t
+#include <functional>   // std::greater
+#include <utility>      // std::swap, std::move
 
 // ============================================================
 // 生命周期
@@ -116,15 +124,36 @@ int32_t FreeList::Allocate(BlockId* out) {
         return POOL_NOT_INITIALIZED;
     }
 
-    // P4.5 M1:从 freeList 单容器分配,不触发切换、不做写保护
-    //   - M2 在这里加 ShouldTriggerSwitch / StartSwitch 调用
-    //   - M4 在这里加全局写保护(全局可用 ≤ max × (1 - reject_ratio) 拒绝)
+    // M2/M3 入口:上一轮切换的 sort 已完成则完成切换。
+    //   M2 阶段 sort 同步执行(StartSwitch 内立即 sort,下方立即 CompleteSwitch),
+    //   此分支在 M2 不会命中(Allocate 返回时 state_ 必然已回 Running)。
+    //   M3 异步 sort 后,后台线程置 sort_done_,此分支才成为真正的完成入口
+    //   —— 这是 M2→M3 平滑过渡的关键:M2 先把入口写好,M3 只需让 sort 异步化
+    //   并移除下方"立即 CompleteSwitch"那一行。
+    if (state_.load(std::memory_order_acquire) == State::Switching
+        && sort_done_.load(std::memory_order_acquire)) {
+        CompleteSwitch();
+    }
+
     if (containers_[free_idx_].empty()) {
         return DEVICE_NO_SPACE;
     }
 
     *out = containers_[free_idx_].back();
     containers_[free_idx_].pop_back();
+
+    // M2:pop 后基于 freeList 剩余量检测切换触发(在 Running 状态下)。
+    //   ShouldTriggerSwitch 用 pop 之后的 freeList.size() 判断阈值,语义正确
+    //   ("拿走这一个之后还剩多少")。
+    if (state_.load(std::memory_order_acquire) == State::Running
+        && ShouldTriggerSwitch()) {
+        StartSwitch();
+        // M2 同步:StartSwitch 内已 sort 完成 + sort_done_=true,
+        // 立即 CompleteSwitch(M3 移除此行,改由下次 Allocate 入口检测
+        // sort_done_ 触发 —— 见上方入口注释)。
+        CompleteSwitch();
+    }
+
     return SUCCESS;
 }
 
@@ -133,14 +162,15 @@ int32_t FreeList::Release(const BlockId id) {
         return POOL_NOT_INITIALIZED;
     }
 
-    // P4.5 M1:进 active recycle(无 TRIM,无对称水位检测)
-    //   - M2 在这里加对称水位标志(switch_pending_)
-    //   - M4 在这里加 IssueTrim 同步发 ioctl(BLKDISCARD)
+    // P4.5 M1/M2:进 active recycle(M4 加 IssueTrim 同步发 ioctl(BLKDISCARD))
     try {
         containers_[active_idx_].push_back(id);
     } catch (...) {
         return MEMORY_INSERT_FAIL;
     }
+
+    // M2:对称水位检测 → 标记 switch_pending_(实际切换延迟到下次 Allocate)
+    MaybeMarkSwitchPending();
     return SUCCESS;
 }
 
@@ -163,7 +193,96 @@ int32_t FreeList::ReleaseBatch(const std::vector<BlockId>& ids) {
     for (const BlockId id : ids) {
         containers_[active_idx_].push_back(id);
     }
+
+    // M2:批量结束后判定一次对称水位(等价 Release 末尾的检测)
+    MaybeMarkSwitchPending();
     return SUCCESS;
+}
+
+// ============================================================
+// M2 切换内部方法(设计稿 §14 M2.1)
+// ============================================================
+
+bool FreeList::ShouldTriggerSwitch() const {
+    const std::size_t active_sz = containers_[active_idx_].size();
+
+    // 前置条件(R-NEW-1 化解):active 不够多,切换没意义且会让 freeList
+    // 变得过小甚至空 —— 启动后纯写入场景靠这一条避免死锁。
+    if (active_sz < min_recycle_threshold_) {
+        return false;
+    }
+
+    const std::size_t free_sz = containers_[free_idx_].size();
+
+    // 触发条件 1:freeList 已用 (1 - switch_ratio),即剩余 ≤ initial × (1 - r)
+    const bool free_threshold =
+        static_cast<double>(free_sz)
+        <= static_cast<double>(initial_capacity_) * (1.0 - switch_ratio_);
+
+    // 触发条件 2:对称水位 active ≥ free × symmetric_ratio
+    const bool symmetric =
+        static_cast<double>(active_sz)
+        >= static_cast<double>(free_sz) * symmetric_ratio_;
+
+    // 触发条件 3:Release 路径已标记 switch_pending_
+    const bool pending = switch_pending_.load(std::memory_order_acquire);
+
+    return free_threshold || symmetric || pending;
+}
+
+void FreeList::StartSwitch() {
+    // 抢走 active 内容,准备 sort;active 容器随后变 inactive(空)
+    sort_task_ = std::move(containers_[active_idx_]);
+    containers_[active_idx_].clear();  // move-from vector 状态 unspecified,显式 clear
+
+    // 角色互换:
+    //   旧 active 容器(刚 move 走,已空)→ 变 inactive
+    //   旧 inactive 容器(可能含上轮残余)→ 变 active,继续接收新 Release
+    std::swap(active_idx_, inactive_idx_);
+
+    state_.store(State::Switching, std::memory_order_release);
+    sort_done_.store(false, std::memory_order_release);
+    switch_pending_.store(false, std::memory_order_release);
+
+    // M2:同步执行 sort(M3 改为 lock worker_mu_ + move sort_task_ +
+    // cv.notify_one(),由后台 worker 线程锁外执行 std::sort)。
+    // 降序排列(std::greater)以配合 freeList 的 pop_back 取最小语义。
+    std::sort(sort_task_.begin(), sort_task_.end(), std::greater<BlockId>());
+    sort_result_ = std::move(sort_task_);
+    sort_task_.clear();
+    sort_done_.store(true, std::memory_order_release);
+}
+
+void FreeList::CompleteSwitch() {
+    // 已 sort 完成的内容回填到 inactive 容器
+    containers_[inactive_idx_] = std::move(sort_result_);
+    sort_result_.clear();
+    sort_done_.store(false, std::memory_order_release);
+
+    // 角色互换:
+    //   旧 inactive 容器(已 sort 完)→ 变 freeList(新分配源)
+    //   旧 freeList 容器(含未消费残余)→ 变 inactive,等下一轮 swap 进 active
+    std::swap(free_idx_, inactive_idx_);
+
+    initial_capacity_ = static_cast<uint64_t>(containers_[free_idx_].size());
+    state_.store(State::Running, std::memory_order_release);
+    switch_count_.fetch_add(1, std::memory_order_relaxed);
+}
+
+void FreeList::MaybeMarkSwitchPending() {
+    // 已在切换中(M3 异步 sort 期间),不重复标记
+    if (state_.load(std::memory_order_acquire) != State::Running) {
+        return;
+    }
+    const std::size_t active_sz = containers_[active_idx_].size();
+    if (active_sz < min_recycle_threshold_) {
+        return;
+    }
+    const std::size_t free_sz = containers_[free_idx_].size();
+    if (static_cast<double>(active_sz)
+        >= static_cast<double>(free_sz) * symmetric_ratio_) {
+        switch_pending_.store(true, std::memory_order_release);
+    }
 }
 
 // ============================================================
@@ -177,7 +296,7 @@ int32_t FreeList::RebuildFromActive(std::span<const BlockId> /*active*/) {
     //   3. 重置三容器,装载 [0, max) - active 到 containers_[0](降序)
     //   4. 重置 idx / initial_capacity / switch_count
     //
-    // M1 阶段尚未对接 P5 WAL recovery,此调用返回 CABE_INVALID_DATA_SIZE
+    // M2 阶段尚未对接 P5 WAL recovery,此调用返回 CABE_INVALID_DATA_SIZE
     // 提醒调用方"尚未实现",避免静默成功导致 recovery 路径无声错误。
     return CABE_INVALID_DATA_SIZE;
 }
