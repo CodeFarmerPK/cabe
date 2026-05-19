@@ -51,6 +51,29 @@ namespace cabe {
         // M7 batch 起决定单次 batch 可同时 in-flight 上限,届时按设备
         // 队列深度调整,典型 64-256。
         uint32_t io_uring_sq_depth = 64;
+        // ============================================================
+        // FreeList 改造可调参数(P4.5 M4 / 设计稿 D-3 / D-6 / D-7 / D-NEW-1)
+        //
+        // Engine::Open 入口严格校验(违反返回 InvalidArgument);经内部
+        // Engine::SetFreeListTuning 透传到 FreeList::SetTuning(后者对
+        // 越界值静默忽略,严格校验在 Engine::Open 分层做)。
+        // ============================================================
+
+        // freeList 已用比例触发切换(默认 0.90,即剩余 ≤ 10% 触发)。
+        // 取值范围 (0, 1)。
+        double freelist_switch_ratio = 0.90;
+
+        // 全局已用比例触发写保护(默认 0.90,即全局可用 ≤ 10% 时
+        // Allocate 返回 ResourceExhausted)。取值范围 (0, 1)。
+        double freelist_reject_ratio = 0.90;
+
+        // 对称水位触发倍数(默认 1.5,active ≥ freeList × 1.5 触发切换)。
+        // 取值范围 > 0。
+        double freelist_symmetric_ratio = 1.5;
+
+        // 切换前 active 最小 BlockId 数(默认 1024,化解启动后纯写入
+        // 导致 freeList 变空的死锁风险 R-NEW-1)。取值范围 ≥ 1。
+        uint64_t freelist_min_recycle_threshold = 1024;
     };
 
     // 每次 Get 操作的选项。

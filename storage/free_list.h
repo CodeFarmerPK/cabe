@@ -9,7 +9,7 @@
  *     M1 ✅ 数据结构骨架 + Allocate / Release / Stats 基础实现
  *     M2 ✅ StartSwitch / CompleteSwitch 同步实现 + 状态机激活
  *     M3 ✅ 本次落地 — 后台 sort worker 线程 + 跨线程同步原语(sort 异步化)
- *     M4 周边设施 — TRIM 集成 + 完整 RebuildFromActive + 写保护 + Options 透传
+ *     M4 ✅ 本次落地 — TRIM 集成 + 完整 RebuildFromActive + 写保护 + Options 透传
  *     M5 收尾     — 旧测试调整 + Engine 集成测试 + bench 归档
  *
  *   架构总览(完整论述见设计稿 §5):
@@ -229,6 +229,15 @@ private:
     // M3 后台线程主循环:cv.wait(stop_ || !sort_task_.empty())→ 抢 task →
     // 锁外 std::sort(降序)→ 回填 sort_result_ + sort_done_=true。
     void SortWorkerFn();
+
+    // P4.5 M4:对单个 BlockId 发 ioctl(BLKDISCARD)(SSD TRIM)。
+    //   - trim_supported_==false 或 dev_fd_<0 → 直接 return(D-12:不支持
+    //     设备由 Engine.Open sysfs 探测,此处跳过)
+    //   - ioctl 失败 → CABE_LOG_WARN 容错,不返回错误(D-11:TRIM 失败
+    //     不影响数据正确性,blockId 已回 active recycle,仅 SSD WAF 优化失效)
+    // const:仅读 dev_fd_/trim_supported_,不改 FreeList 状态;由 Release/
+    // ReleaseBatch(非 const)在 push_back 之后调用。
+    void IssueTrim(BlockId id) const;
 };
 
 

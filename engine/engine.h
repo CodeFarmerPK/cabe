@@ -89,6 +89,15 @@ public:
     // 是否已打开
     bool IsOpen() const;
 
+    // P4.5 M4:从 cabe::Options 透传 FreeList 可调阈值。由 engine_api.cpp
+    // 的 cabe::Engine::Open 在内部 Open 成功后调用一次(Open→首个 Put
+    // 之间无业务并发,SetTuning 仅改阈值字段,安全)。内部 Engine::Open
+    // 签名不含 Options(Pimpl 分层),故用此转发方法而非扩展 Open 签名。
+    void SetFreeListTuning(double switch_ratio,
+                           double reject_ratio,
+                           double symmetric_ratio,
+                           uint64_t min_recycle_threshold);
+
 private:
     // 分配连续的 chunkId，返回首个 chunkId
     ChunkId AllocateChunkIds(uint32_t count);

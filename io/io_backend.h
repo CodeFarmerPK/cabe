@@ -82,6 +82,12 @@ concept IoBackendTraits = requires(
     { t.Close() }                        -> std::same_as<std::int32_t>;
     { ct.IsOpen() }                      -> std::same_as<bool>;
     { ct.BlockCount() }                  -> std::same_as<std::uint64_t>;
+    { ct.BlockCount() }                  -> std::same_as<std::uint64_t>;
+
+    // P4.5 M4:暴露设备 fd。FreeList 用它发 ioctl(BLKDISCARD)(TRIM),
+    // Engine.Open 用它读 sysfs 探测 discard 支持。未 Open 时返回 -1,
+    // 调用方据此跳过 TRIM。两后端 inline 返回内部 fd_。
+    { ct.GetDeviceFd() }                 -> std::same_as<int>;
 
     // Buffer 生命周期(归还由 BufferHandle 析构 → BufferHandleImpl::~ 完成)
     { t.AcquireBuffer() }              -> std::same_as<BufferHandle>;

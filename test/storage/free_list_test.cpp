@@ -13,9 +13,19 @@
  *        不可观察")
  *   M3 — 异步 sort worker(FreeListM3Test + FreeListM3):后台线程生命
  *        周期、异步完成、Switching 可观察、析构、容量守恒
+ *   M4 — 写保护 / 完整 RebuildFromActive / TRIM 容错(FreeListM4Test)
  *
  *   poll helper(DrainUntilRunning / PollUntilSwitch)定义在 M1 测试后、
- *   M2/M3 之前,两段共用。
+ *   M2/M3/M4 之前,各段共用。
+ *
+ *   M4 写保护副作用说明:reject_ratio 默认 0.90 会让 Allocate 在全局
+ *   可用 ≤ max×(1-reject) 时返回 NO_SPACE。这会破坏 M1 "分配殆尽"
+ *   类用例(它们要求能 Allocate 满 kCapacity)。故 M1/M2/M3 fixture
+ *   统一 SetTuning 把 reject_ratio 设为 0.9999(写保护仅在 available=0
+ *   触发,等价旧"freeList 空"语义),写保护单独在 FreeListM4Test 验证。
+ *   注:(1-0.90) 在 double 下非精确,阈值截断后实际 ≈9 而非 10,
+ *   故写保护用例断言"保留非零余量 + 量级 ≈ max×(1-reject)"的行为
+ *   契约,不硬编码精确分配次数(避免浮点取整导致 flaky)。
  */
 
 #include <gtest/gtest.h>
@@ -33,6 +43,10 @@ protected:
 
     void SetUp() override {
         ASSERT_EQ(SUCCESS, freeList_.SetMaxBlockCount(kCapacity));
+        // M4 写保护会拦 Allocate(全局可用 ≤ max×(1-reject))。M1 用例
+        // 需能分配满 kCapacity,故 reject_ratio 设 0.9999 关闭写保护
+        //(仅 available=0 触发,等价旧"freeList 空");其余字段同默认。
+        freeList_.SetTuning(0.90, 0.9999, 1.5, 1024);
     }
 
     FreeList freeList_;
@@ -242,14 +256,10 @@ TEST_F(FreeListTest, SetTuningSilentlyIgnoresInvalidValues) {
 }
 
 // ============================================================
-// RebuildFromActive(M1/M2/M3 占位,M4 完整实现)
+// RebuildFromActive — M4 已完整实现,正确性测试见 FreeListM4Test。
+// (M1/M2/M3 的 "stub 返回 NotImplemented" 用例已随 M4 落地删除:
+//  现在合法输入返回 SUCCESS,旧断言不再成立。)
 // ============================================================
-
-TEST_F(FreeListTest, RebuildFromActiveM1StubReturnsNotImplemented) {
-    std::vector<BlockId> active = {1, 2, 3};
-    EXPECT_EQ(CABE_INVALID_DATA_SIZE,
-              freeList_.RebuildFromActive(std::span<const BlockId>(active)));
-}
 
 // ============================================================
 // 压力 + 行为一致性
@@ -352,7 +362,9 @@ protected:
     static constexpr uint64_t kCapacity = 100;
     void SetUp() override {
         ASSERT_EQ(SUCCESS, freeList_.SetMaxBlockCount(kCapacity));
-        freeList_.SetTuning(0.75, 0.90, 1.5, 4);
+        // reject_ratio=0.9999 关写保护:本套件验证切换行为,写保护是
+        // 正交关注点(单独由 FreeListM4Test 验证),此处不引入干扰。
+        freeList_.SetTuning(0.75, 0.9999, 1.5, 4);
     }
     FreeList freeList_;
 };
@@ -451,7 +463,9 @@ protected:
     static constexpr uint64_t kCapacity = 100;
     void SetUp() override {
         ASSERT_EQ(SUCCESS, fl_.SetMaxBlockCount(kCapacity));
-        fl_.SetTuning(0.75, 0.90, 1.5, 4);
+        // reject_ratio=0.9999 关写保护(理由同 FreeListSwitchTest):
+        // 本套件验证异步 sort worker,写保护单独在 FreeListM4Test 验证。
+        fl_.SetTuning(0.75, 0.9999, 1.5, 4);
     }
     FreeList fl_;
 };
@@ -544,7 +558,7 @@ TEST(FreeListM3, DestructDuringSwitchNoHang) {
     {
         FreeList fl;
         ASSERT_EQ(SUCCESS, fl.SetMaxBlockCount(100));
-        fl.SetTuning(0.75, 0.90, 1.5, 4);
+        fl.SetTuning(0.75, 0.9999, 1.5, 4);  // 关写保护(理由同上)
         std::vector<BlockId> taken;
         for (int i = 0; i < 10; ++i) {
             BlockId b;
@@ -586,6 +600,215 @@ TEST_F(FreeListM3Test, CapacityConservedAsyncSwitch) {
     ASSERT_TRUE(DrainUntilRunning(fl_, &live));
     EXPECT_EQ(fl_.FreeCount() + live.size(), kCapacity);
     EXPECT_GE(fl_.SwitchCount(), 1u);
+}
+
+// ============================================================
+// P4.5 M4 — 写保护 / 完整 RebuildFromActive / TRIM 容错
+//
+//   fixture 默认 reject_ratio=0.9999 关写保护、min_recycle=1024 抑制
+//   切换,让 RebuildFromActive / TRIM 用例不受这两个正交机制干扰;
+//   需要写保护或切换的用例在用例内自行 SetTuning 打开。
+//
+//   断言风格:写保护用例只断言行为契约(保留非零余量、量级 ≈
+//   max×(1-reject)),不硬编码精确分配次数 —— (1-0.90) 在 double
+//   下非精确,阈值截断后实际 ≈9,精确计数会 flaky(沿用 M2 教训:
+//   测行为契约,不测实现细节)。PollUntilSwitch 见 M2 块前定义。
+// ============================================================
+
+class FreeListM4Test : public ::testing::Test {
+protected:
+    static constexpr uint64_t kCapacity = 100;
+    void SetUp() override {
+        ASSERT_EQ(SUCCESS, freeList_.SetMaxBlockCount(kCapacity));
+        freeList_.SetTuning(0.90, 0.9999, 1.5, 1024);  // 关写保护 + 抑制切换
+    }
+    FreeList freeList_;
+};
+
+// --- 写保护(设计稿 §13.4)---
+
+// 1. 接近写满时写保护拦截:保留非零余量(区别于真耗尽),量级 ≈
+//    max×(1-reject)。reject=0.90 → 余量 ≈ 10(浮点截断后实际 ≈9)。
+TEST_F(FreeListM4Test, WriteProtectionBlocksNearFull) {
+    freeList_.SetTuning(0.90, 0.90, 1.5, 1024);  // 打开写保护
+    int ok = 0;
+    BlockId b;
+    while (freeList_.Allocate(&b) == SUCCESS) {
+        ++ok;
+    }
+    EXPECT_GT(ok, 0);
+    EXPECT_LT(ok, static_cast<int>(kCapacity));        // 未分配殆尽 = 写保护生效
+    EXPECT_EQ(DEVICE_NO_SPACE, freeList_.Allocate(&b));
+
+    const uint64_t reserved = freeList_.FreeCount();
+    EXPECT_GT(reserved, 0u);                            // 守住非零余量,非真耗尽
+    EXPECT_EQ(reserved, freeList_.AllocatableCount());  // 余量全在 free 容器
+    EXPECT_NEAR(static_cast<double>(reserved), 10.0, 2.0);  // ≈ max×(1-0.90)
+}
+
+// 2. Release 让全局可用回升,写保护解除(available 含 active 容器)
+TEST_F(FreeListM4Test, WriteProtectionRecoversAfterRelease) {
+    freeList_.SetTuning(0.90, 0.90, 1.5, 1024);
+    std::vector<BlockId> taken;
+    BlockId b;
+    while (freeList_.Allocate(&b) == SUCCESS) {
+        taken.push_back(b);
+    }
+    ASSERT_GE(taken.size(), 5u);
+    ASSERT_EQ(DEVICE_NO_SPACE, freeList_.Allocate(&b));
+    const uint64_t blocked = freeList_.FreeCount();
+
+    for (int i = 0; i < 5; ++i) {
+        ASSERT_EQ(SUCCESS, freeList_.Release(taken[i]));  // 进 active,available 回升
+    }
+    EXPECT_EQ(blocked + 5u, freeList_.FreeCount());
+    EXPECT_EQ(SUCCESS, freeList_.Allocate(&b));           // 写保护解除,可再分配
+}
+
+// --- 完整 RebuildFromActive(D-13,P5 WAL recovery 接口)---
+
+// 3. 基础:active 子集被排除,其余严格升序从 0 起
+TEST_F(FreeListM4Test, RebuildFromActiveBasic) {
+    std::vector<BlockId> active = {50, 51, 52};
+    ASSERT_EQ(SUCCESS,
+              freeList_.RebuildFromActive(std::span<const BlockId>(active)));
+    EXPECT_EQ(97u, freeList_.FreeCount());
+    EXPECT_EQ(97u, freeList_.AllocatableCount());
+
+    std::vector<BlockId> got;
+    for (int i = 0; i < 52; ++i) {
+        BlockId b;
+        ASSERT_EQ(SUCCESS, freeList_.Allocate(&b)) << "i=" << i;
+        got.push_back(b);
+    }
+    for (int i = 0; i < 50; ++i) {
+        EXPECT_EQ(static_cast<BlockId>(i), got[i]) << "i=" << i;
+    }
+    EXPECT_EQ(53u, got[50]);   // 50/51/52 被排除,跳到 53/54
+    EXPECT_EQ(54u, got[51]);
+}
+
+// 4. 空 active:freeList = 全量 [0, max),从 0 起升序
+TEST_F(FreeListM4Test, RebuildFromActiveEmpty) {
+    std::vector<BlockId> active;
+    ASSERT_EQ(SUCCESS,
+              freeList_.RebuildFromActive(std::span<const BlockId>(active)));
+    EXPECT_EQ(kCapacity, freeList_.FreeCount());
+    EXPECT_EQ(kCapacity, freeList_.AllocatableCount());
+    for (uint64_t i = 0; i < 5; ++i) {
+        BlockId b;
+        ASSERT_EQ(SUCCESS, freeList_.Allocate(&b));
+        EXPECT_EQ(static_cast<BlockId>(i), b);
+    }
+}
+
+// 5. 全量 active:freeList 空,Allocate 立即 NO_SPACE
+TEST_F(FreeListM4Test, RebuildFromActiveAll) {
+    std::vector<BlockId> active;
+    active.reserve(kCapacity);
+    for (uint64_t i = 0; i < kCapacity; ++i) {
+        active.push_back(static_cast<BlockId>(i));
+    }
+    ASSERT_EQ(SUCCESS,
+              freeList_.RebuildFromActive(std::span<const BlockId>(active)));
+    EXPECT_EQ(0u, freeList_.FreeCount());
+    EXPECT_EQ(0u, freeList_.AllocatableCount());
+    BlockId b;
+    EXPECT_EQ(DEVICE_NO_SPACE, freeList_.Allocate(&b));
+}
+
+// 6. 乱序 active:内部 sort,结果与有序输入一致
+TEST_F(FreeListM4Test, RebuildFromActiveUnordered) {
+    std::vector<BlockId> active = {52, 50, 51};
+    ASSERT_EQ(SUCCESS,
+              freeList_.RebuildFromActive(std::span<const BlockId>(active)));
+    EXPECT_EQ(97u, freeList_.FreeCount());
+    std::vector<BlockId> got;
+    for (int i = 0; i < 52; ++i) {
+        BlockId b;
+        ASSERT_EQ(SUCCESS, freeList_.Allocate(&b));
+        got.push_back(b);
+    }
+    for (int i = 0; i < 50; ++i) {
+        EXPECT_EQ(static_cast<BlockId>(i), got[i]);
+    }
+    EXPECT_EQ(53u, got[50]);
+}
+
+// 7. 去重 + 越界过滤(b ≥ max 含 ==max 边界均忽略)
+TEST_F(FreeListM4Test, RebuildFromActiveDedupAndOutOfRange) {
+    // 50 重复;100(==max)/150(>max)越界 —— 过滤后仅 {50,51,52} 生效
+    std::vector<BlockId> active = {50, 50, 51, 52, 100, 150};
+    ASSERT_EQ(SUCCESS,
+              freeList_.RebuildFromActive(std::span<const BlockId>(active)));
+    EXPECT_EQ(97u, freeList_.FreeCount());
+    EXPECT_EQ(97u, freeList_.AllocatableCount());
+    std::vector<BlockId> got;
+    for (int i = 0; i < 52; ++i) {
+        BlockId b;
+        ASSERT_EQ(SUCCESS, freeList_.Allocate(&b));
+        got.push_back(b);
+    }
+    for (int i = 0; i < 50; ++i) {
+        EXPECT_EQ(static_cast<BlockId>(i), got[i]);
+    }
+    EXPECT_EQ(53u, got[50]);
+}
+
+// 8. Rebuild 重置切换计数 / 状态机(先驱动一次真实切换再 rebuild)
+TEST_F(FreeListM4Test, RebuildResetsSwitchState) {
+    freeList_.SetTuning(0.75, 0.9999, 1.5, 4);  // 关写保护 + 易触发切换
+
+    std::vector<BlockId> taken;
+    for (int i = 0; i < 50; ++i) {
+        BlockId b;
+        ASSERT_EQ(SUCCESS, freeList_.Allocate(&b));
+        taken.push_back(b);
+    }
+    for (int i = 0; i < 10; ++i) {
+        ASSERT_EQ(SUCCESS, freeList_.Release(taken[i]));  // active=10 ≥ 4
+    }
+    for (int i = 0; i < 40; ++i) {
+        BlockId b;
+        if (freeList_.Allocate(&b) != SUCCESS) break;
+    }
+    ASSERT_TRUE(PollUntilSwitch(freeList_, 1));
+    ASSERT_GE(freeList_.SwitchCount(), 1u);
+
+    std::vector<BlockId> active = {1, 2, 3};
+    ASSERT_EQ(SUCCESS,
+              freeList_.RebuildFromActive(std::span<const BlockId>(active)));
+    EXPECT_EQ(0u, freeList_.SwitchCount());        // 切换计数清零
+    EXPECT_FALSE(freeList_.IsSortInProgress());    // 状态回 Running
+    EXPECT_EQ(kCapacity - 3u, freeList_.FreeCount());
+    BlockId b;
+    ASSERT_EQ(SUCCESS, freeList_.Allocate(&b));
+    EXPECT_EQ(0u, b);                              // 重建后从 0 起严格升序
+}
+
+// --- TRIM 容错(D-11 / D-12)---
+
+// 9. 不支持 TRIM 的设备:IssueTrim 直接 return,Release 正常
+TEST_F(FreeListM4Test, TrimNoopWhenUnsupported) {
+    EXPECT_FALSE(freeList_.TrimSupported());       // 默认未配置 TRIM
+    BlockId b;
+    ASSERT_EQ(SUCCESS, freeList_.Allocate(&b));
+    EXPECT_EQ(SUCCESS, freeList_.Release(b));      // trim_supported_=false → 跳过
+
+    freeList_.SetTrimContext(-1, false);           // dev_fd<0 也跳过
+    ASSERT_EQ(SUCCESS, freeList_.Allocate(&b));
+    EXPECT_EQ(SUCCESS, freeList_.Release(b));
+}
+
+// 10. TRIM ioctl 失败容错(D-11):非块设备 fd 上 BLKDISCARD 必失败,
+//     Release 仍 SUCCESS —— blockId 已进 active recycle,数据正确性
+//     不受影响,仅 SSD 内部 WAF 优化失效(预期 WARN 日志噪声)。
+TEST_F(FreeListM4Test, TrimFailureIsFaultTolerant) {
+    freeList_.SetTrimContext(42, true);            // fd=42 非块设备 → ioctl 失败
+    EXPECT_TRUE(freeList_.TrimSupported());
+    BlockId b;
+    ASSERT_EQ(SUCCESS, freeList_.Allocate(&b));
+    EXPECT_EQ(SUCCESS, freeList_.Release(b));       // ioctl 失败 → WARN 容错
 }
 
 }  // namespace

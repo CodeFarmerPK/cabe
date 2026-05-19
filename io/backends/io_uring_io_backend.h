@@ -111,6 +111,9 @@ public:
     int32_t       Close();
     bool          IsOpen()      const noexcept;
     std::uint64_t BlockCount()  const noexcept;
+    // P4.5 M4:设备 fd(供 FreeList TRIM / Engine 探测 discard 支持)。
+    // 未 Open 时 fd_ == -1,调用方据此跳过 TRIM。
+    [[nodiscard]] int GetDeviceFd() const noexcept { return fd_; }
 
     // ===== Buffer 生命周期 =====
     // M1 stub:返回 invalid handle(契约上同 Q3 池耗尽路径)。

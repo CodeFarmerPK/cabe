@@ -162,6 +162,25 @@ namespace cabe {
             return Status::InvalidArgument("Options.buffer_pool_count must be greater than 0");
         }
 
+        // P4.5 M4:FreeList 可调阈值入口严格校验(违反返回 InvalidArgument;
+        // FreeList::SetTuning 对越界值静默忽略,严格校验在此分层做)。
+        if (!(opts.freelist_switch_ratio > 0.0 && opts.freelist_switch_ratio < 1.0)) {
+            CABE_LOG_WARN("Engine::Open: freelist_switch_ratio out of (0,1)");
+            return Status::InvalidArgument("Options.freelist_switch_ratio must be in (0, 1)");
+        }
+        if (!(opts.freelist_reject_ratio > 0.0 && opts.freelist_reject_ratio < 1.0)) {
+            CABE_LOG_WARN("Engine::Open: freelist_reject_ratio out of (0,1)");
+            return Status::InvalidArgument("Options.freelist_reject_ratio must be in (0, 1)");
+        }
+        if (!(opts.freelist_symmetric_ratio > 0.0)) {
+            CABE_LOG_WARN("Engine::Open: freelist_symmetric_ratio not > 0");
+            return Status::InvalidArgument("Options.freelist_symmetric_ratio must be > 0");
+        }
+        if (opts.freelist_min_recycle_threshold < 1) {
+            CABE_LOG_WARN("Engine::Open: freelist_min_recycle_threshold < 1");
+            return Status::InvalidArgument("Options.freelist_min_recycle_threshold must be >= 1");
+        }
+
         // 裸设备语义:Engine 不创建、不 truncate、不 unlink device_path。
         //   - device_path 必须是已存在的块设备节点(/dev/nvmeXn1, /dev/loopX, ...)
         //   - 不存在 → ::open(2) 返回 ENOENT → DEVICE_FAILED_TO_OPEN_DEVICE → IOError
@@ -186,6 +205,14 @@ namespace cabe {
             return TranslateStatus(rc);
         }
 
+        // P4.5 M4:内部 Open 成功后,把 Options 的 FreeList 阈值透传到
+        // FreeList(内部 Engine::Open 签名不含 Options,经此转发)。此刻
+        // *result 尚未交给调用方,无业务并发。
+        engine_ptr->impl_->engine.SetFreeListTuning(
+            opts.freelist_switch_ratio,
+            opts.freelist_reject_ratio,
+            opts.freelist_symmetric_ratio,
+            opts.freelist_min_recycle_threshold);
         *result = std::move(engine_ptr);
         return Status::OK();
     }

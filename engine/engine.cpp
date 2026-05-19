@@ -9,9 +9,49 @@
 #include "common/logger.h"
 #include "util/crc32.h"
 #include "util/util.h"
+
 #include <algorithm>
 #include <cstring>
+#include <fstream>
+#include <string>
 #include <utility>
+
+#include <sys/stat.h>
+#include <sys/sysmacros.h>
+
+namespace {
+
+    // P4.5 M4:探测块设备是否支持 discard(TRIM)。
+    //
+    // 设计稿 §8.1 原写 ioctl(fd, BLKDISCARDGRANULARITY) —— Linux 无此 ioctl,
+    // 已勘误为读 sysfs queue/discard_max_bytes(>0 即支持)。fd 来自
+    // io_.GetDeviceFd();fstat 取 st_rdev 的 major/minor 定位 sysfs 节点。
+    // 读不到 / 解析失败 / =0 / 非块设备 一律视为不支持(保守:FreeList 跳过
+    // TRIM,功能不受影响,仅 SSD 内部 WAF 优化失效,符合 D-11/D-12 容错姿态)。
+    bool ProbeDiscardSupport(const int fd) {
+        if (fd < 0) {
+            return false;
+        }
+        struct ::stat st {};
+        if (::fstat(fd, &st) != 0) {
+            return false;
+        }
+        if (!S_ISBLK(st.st_mode)) {
+            return false;  // Cabe 只接受块设备,非块设备无 discard 语义
+        }
+        const std::string path = "/sys/dev/block/"
+            + std::to_string(major(st.st_rdev)) + ":"
+            + std::to_string(minor(st.st_rdev))
+            + "/queue/discard_max_bytes";
+        std::ifstream f(path);
+        unsigned long long v = 0;
+        if (f >> v) {
+            return v > 0;
+        }
+        return false;
+    }
+
+}  // namespace
 
 Engine::~Engine() {
     // Close() 在 unique_lock 内检查 isOpen_，避免析构函数裸读 isOpen_
@@ -70,12 +110,21 @@ int32_t Engine::Open(const std::string& devicePath, const uint32_t bufferPoolCou
     //
     // P4.5 M1 起 SetMaxBlockCount 改返回 int32_t(全量装载 [0, n) 到 freeList 降序,
     // 40T 设备 ~300 ms;装载失败返回 MEMORY_INSERT_FAIL),失败时回滚 io_。
-    if (const int32_t flRet = freeList_.SetMaxBlockCount(io_.BlockCount());
-        flRet != SUCCESS) {
+    if (const int32_t flRet = freeList_.SetMaxBlockCount(io_.BlockCount());flRet != SUCCESS) {
         io_.Close();
         return flRet;
-        }
+    }
 
+    // P4.5 M4:TRIM 上下文。io_.GetDeviceFd() 拿设备 fd,sysfs 探测 discard
+    // 支持,传给 FreeList。不支持(loop device 默认 / 老设备)时
+    // FreeList::IssueTrim 开头 if(!trim_supported_) 直接 return,功能不受
+    // 影响。SetFreeListTuning(reject_ratio 等)由 engine_api.cpp 在内部
+    // Open 成功后调(Options 来源在公开 API 层,内部 Open 签名不含 Options)。
+    {
+        const int  devFd         = io_.GetDeviceFd();
+        const bool trimSupported = ProbeDiscardSupport(devFd);
+        freeList_.SetTrimContext(devFd, trimSupported);
+    }
 
     // string 赋值在 OOM 下可能抛 bad_alloc(短路径走 SSO 不抛,长路径触发堆分配)。
     // 必须包 try/catch:
@@ -709,6 +758,19 @@ size_t Engine::Size() const {
 bool Engine::IsOpen() const {
     std::shared_lock lock(mutex_);
     return isOpen_;
+}
+
+void Engine::SetFreeListTuning(const double switch_ratio,
+                               const double reject_ratio,
+                               const double symmetric_ratio,
+                               const uint64_t min_recycle_threshold) {
+    // 由 engine_api.cpp 的 cabe::Engine::Open 在内部 Open 成功后、首个
+    // Put 之前调用一次。此刻 *result 尚未交给调用方,无业务并发;但为与
+    // 其他写路径一致 + 防御未来调用时序变化,仍持 unique_lock。
+    // SetTuning 仅改 FreeList 阈值字段,幂等。
+    std::unique_lock lock(mutex_);
+    freeList_.SetTuning(switch_ratio, reject_ratio,
+                        symmetric_ratio, min_recycle_threshold);
 }
 
 ChunkId Engine::AllocateChunkIds(const uint32_t count) {
