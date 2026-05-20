@@ -166,6 +166,79 @@ v0.x ─────────────────────────
 - README 含 build 指南、Roadmap 表、依赖列表
 - 文档骨架(空文件占位):`doc/p0_infra_design.md` / `doc/p1_core_design.md` / `doc/p2_api_freeze.md`
 
+**里程碑拆分**:P0 工作按 7 个里程碑推进,每个里程碑独立提 PR + review。
+
+- **M1:项目骨架与 CMake 基础**
+  - 根 `CMakeLists.txt` + 子目录 CMake(`common/` / `util/` / `test/` / `bench/`)
+  - 编译器版本检查(GCC 15+ / Clang 20+)、C++20 标准
+  - CMake 选项预留:`CABE_IO_BACKEND` / `CABE_META_INDEX` / `CABE_SANITIZER`
+  - 现有 `util/crc32` / `util/cpu_features` / `util/util` 纳入 build
+  - 退出条件:`cmake -S . -B build && cmake --build build` 在 GCC 15 与 Clang 20 下均通过
+
+- **M2:`common/structs.h` Schema 定型**
+  - `CABE_VALUE_DATA_SIZE` → `kValueSize`(D1)
+  - `DataView` / `DataBuffer` 切到 `std::byte`(D4)
+  - `BlockId` 改 8/56 编码,手动 mask/shift(D5);提供 `Make` / `dev()` / `block_idx()` / `byte_offset()` 方法
+  - 新增 `DeviceId = uint8_t`、`enum class ValueState : uint8_t`
+  - 旧 `ChunkMeta` / `DataState` 改名删除
+  - 新增 `struct ValueMeta`(24 字节对齐),含 `static_assert(sizeof(ValueMeta) == 24)` 与 `static_assert(sizeof(BlockId) == 8)`
+  - WAL 帧头 8 字节布局占位常量(`kWalFrameHeaderSize` 等)
+  - 退出条件:`common/structs.h` 编译通过、无旧名残留;静态断言全部通过
+
+- **M3:错误码段位规划 + Logger stderr 实装**
+  - `common/error_code.h`:六段(memory / io / index / wal / engine / wal_recovery),每段 1000 号
+  - 现有 memory 段(`-100xxx`)保留
+  - `common/logger.h`:stderr 最简实现(~100 行),环境变量 `CABE_LOG_LEVEL`(默认 `WARN`)控制级别
+  - 输出格式:`[LEVEL][tid][file:line] message`
+  - 退出条件:小 demo 程序能打出五级日志;段位静态不重叠的编译期断言通过
+
+- **M4:`util/hash.{h,cpp}` xxh3 接入**
+  - 决策子项:xxhash 系统库 vs 内嵌 single-header(M4 起步时拍板,写入 design 稿)
+  - 接口:`uint64_t cabe::util::Hash(DataView)` / `Hash(std::string_view)`
+  - 路由辅助:`DeviceId RouteToDevice(std::string_view key, size_t n_devices)`(D7 实装入口)
+  - 退出条件:已知向量测试 + 简单分布测试(100K random keys 的 chi-squared)通过
+
+- **M5:测试与 bench 框架接入 + util/common 测试覆盖**
+  - GTest + google-benchmark 接入 CMake(优先 `find_package`,fallback `FetchContent`)
+  - 测试目录:`test/util/` / `test/common/`;bench 目录:`bench/util/`
+  - 覆盖目标:
+    - `util/crc32`:已知向量、SSE 与软件 fallback 一致性、空 buffer 边界
+    - `util/hash`:已知向量、分布、跨平台稳定性
+    - `util/util`:时间戳单调性、wall vs monotonic 语义
+    - `util/cpu_features`:smoke test
+    - `common/structs`:`BlockId` encode/decode 往返、`ValueMeta` 字段对齐、enum 取值
+    - `common/error_code`:段位不重叠
+    - `common/logger`:级别过滤、格式输出
+  - 覆盖率工具(`gcov` / `llvm-cov`)接入,`make coverage` target 生成报告
+  - 退出条件:`ctest` 全绿;`util` + `common` 行覆盖率 ≥ 80%
+
+- **M6:Sanitizer 矩阵 + `scripts/run-tests.sh` + CI 工作流**
+  - CMake `CABE_SANITIZER` 选项实装(`address` / `thread` / `undefined` / `none`)
+  - `scripts/run-tests.sh`:`--asan` / `--tsan` / `--ubsan` / `--release` / `--all`,带失败汇总
+  - 本地四档矩阵跑通
+  - CI 工作流(GitHub Actions 或同等):
+    - 触发:push + PR
+    - 矩阵:`{GCC 15, Clang 20}` × `{address, thread, undefined, release}`
+    - 容器:Fedora 43,复用 `scripts/setup-dev.sh --ci`
+  - 退出条件:本地四档全绿 + CI 矩阵全绿
+
+- **M7:P0 设计稿固化与状态同步**
+  - `doc/p0_infra_design.md` 完整撰写:所有 schema 决策、错误码段位、术语表、CMake 选项、Sanitizer 与 CI 约定、测试/bench 约定
+  - `doc/p1_core_design.md` / `doc/p2_api_freeze.md` 骨架占位
+  - 工具库微基准 baseline 归档到 `bench/baselines/p0_utilities.json`(crc32 / hash 吞吐)
+  - `ROADMAP.md` P0 状态更新为"已实施";`README.md` 表格 P0 改为"✅ 完成"
+  - 退出条件:`doc/p0_infra_design.md` review 通过;ROADMAP / README 同步落地
+
+**里程碑依赖与并行度**:
+
+```
+       ┌──► M2 ──┐
+M1 ──► ├──► M3 ──┤──► M5 ──► M6 ──► M7
+       └──► M4 ──┘
+```
+
+M2 / M3 / M4 不互相依赖,可并行;实际建议按 M2 → M3 → M4 串行提 PR 便于 review(每 PR 集中一个主题)。M7 可与 M5/M6 部分并行起草,最终在 M6 完成后定稿。
+
 **P0 退出条件 (DoD)**:
 1. GCC 15+ 与 Clang 20+ 双工具链 build 通过
 2. ASAN / TSAN / UBSAN / Release 四档 CI 全绿
