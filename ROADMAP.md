@@ -1,0 +1,533 @@
+# Cabe 项目路线图 (v4)
+
+> 本文件描述本项目的完整演进阶段。每阶段只描述核心目标和大体范围,具体里程碑、决策、风险见各阶段独立设计稿 `doc/pN_xxx_design.md`。
+>
+> 本版整合多轮设计讨论后的全部架构决策,自 v4 起作为正式路线。
+
+---
+
+## 一、项目定位
+
+定长 value 键值存储引擎,直接操作 NVMe 裸块设备。
+
+**对外契约**:
+- 按 `key` 把**恰好 `kValueSize`(1 MiB)字节**的数据存到 NVMe 设备上
+- 持久化、可恢复、并发安全
+- 单机部署,可多 NVMe 聚合带宽
+
+**形态**:
+- 公开 API:同步调用,内部按需异步
+- 部署:Linux 用户态进程,直接打开块设备节点
+- 设备数 N 在 Open 时固定,运行期不可变
+
+---
+
+## 二、永久排除 / 延后但未排除
+
+### 永久排除(项目边界外)
+
+- 大 value 切分、value 聚合(交由上层负责)
+- 变长 value(必须恰好 `kValueSize`)
+- 对象存储 API、文件系统语义
+- 范围扫描(range scan)
+- 事务、跨设备原子操作
+- 二级索引、多机复制
+- 批量 API(`PutBatch` / `GetMulti`)
+- 运行期变更 N、数据迁移、rebalance
+- 跨平台(仅支持 Linux)
+
+### 延后但未排除(未来可能单独立项,不在本路线图)
+
+- backup / restore 工具
+- 跨进程访问协议
+- cgroup IO 限速集成
+
+---
+
+## 三、锁定的架构决策
+
+下列决策贯穿全部阶段,不再讨论。
+
+### 数据模型
+
+| # | 决策 | 内容 |
+|---|---|---|
+| D1 | value 大小 | 恒为 `kValueSize = 1 MiB`,不等则拒绝 |
+| D2 | value 在设备上 | 数据设备只放原始 value 字节,**无 header、无 padding** |
+| D3 | 元数据存放 | 仅在 RAM(`MetaIndex`)+ WAL(持久化),数据设备不存任何元数据 |
+| D4 | 命名分层 | 设备层用 `BlockId`,数据层用 `ValueMeta` / `kValueSize`;不使用 "chunk" 一词 |
+
+### 寻址与路由
+
+| # | 决策 | 内容 |
+|---|---|---|
+| D5 | `BlockId` 编码 | `uint64_t`,高 8 位 = `device_id`,低 56 位 = `block_idx`;字节偏移 = `block_idx << 20` |
+| D6 | 路由 hash | xxh3(`util/hash.{h,cpp}`),v2.0 前冻结 |
+| D7 | key → device | `device_idx = hash(key) % N`,稳定函数关系 |
+| D8 | N 不可变 | N(设备数)在 Open 时固定,变更等同 v2.0 |
+| D9 | R 不可变 | R(每 device 的 reactor 数)在 Open 时固定;**v1.0 内强制 R=1,API 不暴露** |
+
+### 持久化与恢复
+
+| # | 决策 | 内容 |
+|---|---|---|
+| D10 | value durability | FUA(`RWF_DSYNC` 或 io_uring 对应 flag);value 路径无 fsync |
+| D11 | commit 顺序 | Data(FUA) → WAL(fsync) → Index |
+| D12 | WAL 拓扑 | per-device,无中央 WAL,无跨 device 协调 |
+| D13 | WAL 帧头 | `magic:4 \| version:1 \| flags:1 \| entry_type:1 \| reserved:1`,扩展走 entry_type / flags |
+| D14 | 数据完整性 CRC | **CRC32C**(`util/crc32`);xxh3 仅用于路由 |
+| D15 | snapshot + WAL truncate | **P5 必须含**;snapshot 文件头带 version 字段 |
+
+### 并发模型
+
+| # | 决策 | 内容 |
+|---|---|---|
+| D16 | 多线程实现 | 无锁;**禁止 `mutex` / `shared_mutex` / 自旋锁** |
+| D17 | 公开 API 语义 | sync;内部按需异步对用户透明 |
+| D18 | reactor 模型 | per-(device, reactor) 状态分区;reactor 间走 lock-free MPSC queue |
+| D19 | 跨 device 通信 | 完全无;每 device 独立子系统 |
+
+### 抽象层
+
+| # | 决策 | 内容 |
+|---|---|---|
+| D20 | `IoBackend` 抽象 | C++20 concept,编译期 dispatch;CMake `CABE_IO_BACKEND` 切换 |
+| D21 | `MetaIndex` 抽象 | C++20 concept,与 `IoBackend` 对称;CMake `CABE_META_INDEX` 切换 |
+| D22 | 默认实现 | `IoBackend = Sync`(P3) → `IoUring`(P4) → `Spdk`(P10);`MetaIndex = Hash`(P3) → 可选 `BPlusTree`(P9) |
+| D23 | 切换粒度 | 编译期,不支持运行期切换 |
+
+### 其他
+
+| # | 决策 | 内容 |
+|---|---|---|
+| D24 | 零拷贝 | P8 起为默认 Put 路径;非对齐 buffer 隐性 fallback 到 copy |
+| D25 | API 冻结 | P2 一次性冻结公开 API,直到 v2.0 不破坏 |
+| D26 | 性能回归红线 | 各阶段衔接含明文红线,超出需 review 通过 |
+
+---
+
+## 四、整体阶段图与版本节奏
+
+```
+P0 ──► P1 ──► P2 ──► P3 ──► P4 ──► P4.5 ──► P5 ──► P6 ──► P7 ──► P8 ──► P9 ──► P10 ──► P11 ──► P12
+基础   单线   API +  IO +   io_    Free      WAL+   Group   Reactor 零拷    B+树    SPDK    多      可观
+设施   程版   fwd-   索引   uring  List      Metric Commit  无锁MT  贝主路 学习路径 后端    NVMe    测性
+              compat 抽象                    snap.          v1.0   径v1.1  v1.2    v1.3    激活    导出
+                                                                                            v1.4    v1.5
+v0.x ──────────────────────────────────────────────────────► v1.0 ─► v1.1 ─► v1.2 ─► v1.3 ─► v1.4 ─► v1.5
+```
+
+| 版本 | 阶段 | 含义 |
+|---|---|---|
+| v0.x | P1–P6 | 开发阶段,仅供内部测试 |
+| **v1.0** | P7 完成 | 公开 API 冻结、WAL、无锁多线程、多 device 端到端 |
+| v1.1 | P8 | + 零拷贝主路径 |
+| v1.2 | P9 | + B+ 树索引(可选实现) |
+| v1.3 | P10 | + SPDK 后端 |
+| v1.4 | P11 | + 多 device 规模化与隔离验证 |
+| v1.5 | P12 | + 可观测性导出与运维工具 |
+| v2.0 | 不在路线图 | 仅在 API 不兼容变更触发;触发条件:变 hash 函数、变 N、引入跨 device 事务、引入数据迁移 |
+
+---
+
+## 五、各阶段范围
+
+### P0 — 基础设施
+
+**目标**:让项目能 build、能跑 CI 矩阵,工具库齐备,数据 schema 与公共约定全部定型;无业务逻辑。
+
+**范围**:
+- 项目骨架、根 `CMakeLists.txt`
+- CMake 变量预留:`CABE_IO_BACKEND` / `CABE_META_INDEX` / `CABE_SANITIZER`
+- Sanitizer 矩阵(ASAN / TSAN / UBSAN / Release 四档)+ CI 工作流
+- 测试框架(GTest)与 bench 框架(google-benchmark)接入
+- 工具库:
+  - `util/crc32.{h,cpp}` — CRC32C(已有)
+  - `util/cpu_features.{h,cpp}` — 已有
+  - `util/util.h` — 时间戳(已有)
+  - **`util/hash.{h,cpp}`** — xxh3 包装(新增,D6)
+- **Logger**:`common/logger.h` 接入 stderr 最简实现,**禁止全 no-op**
+- **错误码段位规划**(`common/error_code.h`):
+  - memory: `-100xxx`
+  - io: `-101xxx`
+  - index: `-102xxx`
+  - wal: `-103xxx`
+  - engine: `-104xxx`
+  - wal_recovery: `-105xxx`
+- **核心 schema 定型**(`common/structs.h`):
+  - `inline constexpr size_t kValueSize = 1024 * 1024;`
+  - `using DeviceId = uint8_t;`
+  - `using DataView = std::span<const std::byte>;`
+  - `using DataBuffer = std::span<std::byte>;`
+  - `struct BlockId { uint64_t raw; ... };`(D5 编码,手动 mask/shift)
+  - `enum class ValueState : uint8_t { Active = 0, Deleted = 1 };`
+  - `struct ValueMeta { BlockId block; uint32_t crc; uint64_t timestamp; ValueState state; };`(24 字节对齐)
+  - WAL 帧头 8 字节布局占位常量
+- README 含 build 指南、Roadmap 表、依赖列表
+- 文档骨架(空文件占位):`doc/p0_infra_design.md` / `doc/p1_core_design.md` / `doc/p2_api_freeze.md`
+
+**P0 退出条件 (DoD)**:
+1. GCC 15+ 与 Clang 20+ 双工具链 build 通过
+2. ASAN / TSAN / UBSAN / Release 四档 CI 全绿
+3. 工具库(crc32 / hash / cpu_features / util)单测覆盖 ≥ 80%
+4. `doc/p0_infra_design.md` review 通过,锁定本阶段所有 schema 决策
+5. README 与本文件同步
+
+---
+
+### P1 — 单线程版核心引擎
+
+**目标**:跑通完整 Put / Get / Delete 路径。**单线程、无持久化、纯 RAM 索引**。
+
+**范围**:
+- `cabe::Options` / `cabe::Status` 公开类型(P2 才冻结)
+- `cabe::Engine` 公开类骨架:`Open` / `Put` / `Get` / `Delete` / `Close`
+- **内部按 per-device 形态**:`Engine` 持有 `std::vector<DeviceContext>`,P1 内 `size() == 1`
+- `struct DeviceContext { IoBackend io; FreeList free; MetaIndex index; }` 雏形
+- key 路由函数 `size_t Engine::RouteKey(string_view)`,P1 内永远返回 0
+- 朴素 I/O(syscall + O_DIRECT,不抽象)
+- 朴素 BufferPool(对齐到 4 KiB 的 1 MiB 块池)
+- 朴素 FreeList(`std::vector<BlockId>` + LIFO)
+- 单层 MetaIndex(直接 `std::unordered_map<std::string, ValueMeta>`,**不引入抽象层**)
+- 单 Put / Get / Delete 完整路径
+- 严格 `value.size() == kValueSize` 校验
+- 单元测试 + 微基准 baseline 归档到 `bench/baselines/p1_single_thread.json`
+
+---
+
+### P2 — 公开 API 契约冻结 + Forward-compat 论证
+
+**目标**:把公开 API 冻结到 v1.0,通过 PoC 验证 API 形态能撑到 P11。
+
+**范围**:
+- **不实现并发安全**;`doc/p2_api_freeze.md` 明确"P2–P6 单线程访问,多线程语义在 P7"
+- **不引入 mutex / shared_mutex**
+- `Options` 形态最终化:
+  ```cpp
+  struct Options {
+      std::vector<DeviceContext> devices;   // N 在此固定
+      // reactors_per_device 不暴露(D9,v1.0 硬编码 R=1)
+      // 其他字段全部预留 reserved
+  };
+  ```
+- `Status` 错误码空间评估,确认可容纳 SPDK / WAL recovery / 多 device 故障
+- `Engine::Open` 幂等语义,Open / Close 状态机
+- Put API:`Status Put(string_view key, DataView value)` + 运行期 `value.size() != kValueSize` 拒绝
+- 零拷贝 API 在此定型(实现层 P8 落地,API 不变)
+- **声明**:P3 将引入 `IoBackend` 与 `MetaIndex` 抽象层
+- **Forward-compat PoC**(`doc/p2_forward_compat_poc.md`):
+  1. sync API + lock-free reactor:4 线程并发到目标 QPS
+  2. 多 device hash 路由:2 个伪 device,验证 per-device MetaIndex 互不共享
+  3. 零拷贝 buffer ownership:`BufferHandle` 在 mmap / io_uring registered / SPDK pool 三种来源下接口一致
+  4. recovery 隔离:一个 device 索引重建失败,其他不受影响
+
+**退出条件**:四 PoC 通过、API 符号清单 review 通过,**直到 P11 完成不允许破坏**。
+
+---
+
+### P3 — IoBackend 与 MetaIndex 抽象层
+
+**目标**:把"I/O 路径"和"索引数据结构"两个可替换组件同时抽象化,为后续多后端 / 多索引实现做准备。
+
+**范围**:
+- **`IoBackend` C++20 concept**:
+  - 绑定到一个 `(device, reactor)` 对(不是绑定 device)
+  - 方法:`submit(Op)` / `wait()` / `poll(timeout)` / buffer ownership 语义
+  - **不包含 `submit_batch`**(批量是后端内部优化)
+  - `SyncIoBackend` 完整实现(O_DIRECT + pread / pwrite)
+  - **伪 SPDK backend** 验证 concept 不需要破坏性改动
+- **`MetaIndex` C++20 concept**:
+  - 方法:`Insert` / `Lookup` / `Delete` / `Size` / `ForEach` / `WriteSnapshot` / `LoadSnapshot`
+  - `HashMetaIndex` 实现(包装 `unordered_map`)
+  - 契约测试套件(任何实现都要通过)
+- `BufferHandle` PIMPL RAII,含 device-affinity 标记
+- CMake:`CABE_IO_BACKEND` 与 `CABE_META_INDEX` 变量
+- Engine 切换到两层抽象,功能等价于 P2
+
+---
+
+### P4 — io_uring 后端
+
+**目标**:io_uring 后端,启用 registered buffers + FIXED ops + register_files。
+
+**范围**:
+- `IoUringIoBackend` 完整实现
+- liburing ≥ 2.9 接入
+- 每 `(device, reactor)` 一个独立 ring
+- registered buffer 注册、IOSQE_FIXED_FILE
+- submit / wait 模型(P7 才真正多线程)
+- TSAN 与 io_uring 双层阻断处理
+- 部署文档:ulimit / RLIMIT_MEMLOCK / sysctl `kernel.io_uring_disabled`
+- bench 标注"基于朴素 FreeList + 单 device + 单线程"
+
+---
+
+### P4.5 — FreeList 改造
+
+**目标**:朴素 FreeList → 三容器轮换 + shard 内升序分配 + 异步 sort + TRIM。
+
+**范围**:
+- 三容器(active / sorting / recycled)数据结构,per-device
+- `pop_back` 严格升序分配(shard 内)
+- 后台 sort worker
+- `Release` 路径同步 TRIM(`BLKDISCARD`)
+- `RebuildFromActive(span<BlockId>)` 接口,为 P5 recovery 服务
+- Stats 观察接口
+
+---
+
+### P5 — WAL + 崩溃恢复 + Snapshot/Truncate + 最小 Metrics
+
+**目标**:持久化与 recovery 上线;WAL 不再无限增长。
+
+**范围**:
+- `WalWriter` per-device 实现
+- WAL 帧格式:
+  - 帧头 8 字节(D13)
+  - 双 CRC:`header_crc` + `payload_crc`(CRC32C,D14)
+  - 4 KiB 对齐
+  - `entry_type`:`PutCommit` / `Delete` 占两值,其余预留
+- WAL entry payload:
+  - PutCommit: `key_len + key + BlockId + crc + timestamp`
+  - Delete: `key_len + key + timestamp`
+- commit 顺序:Data(FUA) → WAL(fsync) → Index(D11)
+- Recovery per-device 并行:扫 WAL → 重建 MetaIndex → `FreeList::RebuildFromActive`
+- **Snapshot + WAL truncate**(D15):
+  - `MetaIndex` 接口包含 `WriteSnapshot` / `LoadSnapshot`
+  - 触发策略:WAL 大小阈值 / 周期性(可调)
+  - snapshot 文件头含 `version + entry_count + footer_crc`
+  - 切换 snapshot 后旧 WAL 区间可截断
+  - Recovery = LoadSnapshot + replay WAL since snapshot 位置
+- 外置 WAL 设备(`DeviceContext.wal_device_path`)
+- Crash injection 测试矩阵
+- **最小 Metrics 接口**:counter + histogram,per-device label,P12 才导出
+
+**版本里程碑**:v0.x 继续。
+
+---
+
+### P6 — Group Commit
+
+**目标**:WAL fsync 合并,提升并发写吞吐。
+
+**范围**:
+- WAL writer 改造为"积攒帧 + 共享 flush"
+- leader / follower 协议或 batching window(设计稿二选一,推荐 leader/follower)
+- in-flight 帧的并发协调(lock-free MPSC queue)
+- tail latency 控制(batch size + 最长等待时间上限)
+- 失败语义:fsync 失败整 batch 同步返回失败
+
+**性能回归红线**:p99 单 Put 延迟相对 P5 劣化 ≤ 20%。
+
+**版本里程碑**:v0.x 继续。
+
+---
+
+### P7 — Reactor 并发模型 + 无锁多线程 + 多 device 端到端(v1.0)
+
+**目标**:per-reactor 状态分区 + 消息传递,**无任何 mutex**;v1.0 公开 API 自此冻结;多 device 端到端跑通。
+
+**范围**:
+- Reactor 抽象与线程模型:每 device R 个 reactor(v1.0 内 R = 1)
+- **两级 hash 路由**:`device = hash(key) % N`,`reactor_within = (hash(key) / N) % R`
+- 每 reactor 独占:`(IoBackend, FreeList partition, MetaIndex partition, WAL queue endpoint)`
+- Reactor 间通信走 lock-free MPSC queue
+- 公开 sync API → 内部异步:调用线程投递 op,挂起在 eventfd / futex
+- io_uring SQPOLL / DEFER_TASKRUN 评估
+
+**Milestone 拆分**:
+- **M1**:单 device 多线程跑通(lock-free 路径)
+- **M2**:2 device 端到端 Put / Get / Delete / Recovery 跑通
+- **M3**:单 device 故障隔离行为(模拟一个 device 写失败,其他不受影响)
+
+**性能回归红线**:
+- 单线程 p50 延迟相对 P6 劣化 ≤ 10%
+- 多线程峰值 QPS 相对 P6 单线程 ≥ 70% × N(70% 线性扩展)
+
+**版本里程碑**:**v1.0** —— 公开 API 冻结,产品级单 device 与小规模(N ≤ 4)多 device 部署可用。
+
+---
+
+### P8 — 零拷贝写入路径(主路径化)
+
+**目标**:零拷贝成为默认 Put 路径;不对齐 buffer 隐性 fallback。
+
+**范围**:
+- 用户 buffer 通过 cabe 提供的 allocator 分配(从 per-device registered buffer pool 取)
+- 对齐要求:1 MiB strict
+- 不满足对齐自动走 copy 路径,API 不分裂、不报错
+- io_uring registered buffer 协议升级
+- 性能对比 bench:对齐 vs 非对齐 buffer
+- 文档:使用约束 + cabe allocator 用法
+
+**版本里程碑**:v1.1。
+
+---
+
+### P9 — B+ 树索引学习路径
+
+**目标**:在 `MetaIndex` 抽象层下实现 `BPlusTreeMetaIndex`,作为学习驱动的可选实现。
+
+**学习驱动**:此阶段的主要目的是**掌握 B+ 树这一基础数据结构**,而非工程必要性。生产路径仍可保留 `HashMetaIndex`。
+
+**范围**:4 个 milestone:
+
+- **M1:基础结构**(4–6 周)
+  - `IndexNode`(4 KiB 页,binary search,entry 数组)
+  - `BPlusTree<Key, Value>` 模板
+  - Insert / Lookup / Iterate
+  - 不做 Delete、合并、并发、持久化
+  - 测试:10⁷ entry 插入 + 全量查找,与 `std::map` 对照功能等价
+
+- **M2:Delete + 合并 / 借用**(2–3 周)
+  - Delete 操作 + 兄弟节点借用 / 合并
+  - 测试:10⁸ 次随机 Insert/Delete,树高保持 O(log n)
+
+- **M3:Snapshot / Restore**(2–3 周)
+  - `WriteSnapshot(file)` / `LoadSnapshot(file)`
+  - **Snapshot 格式 v2**(D15 的 version 字段自动选择)
+  - 测试:crash injection during snapshot
+
+- **M4:接入 Engine + 对照 bench**(2 周)
+  - CMake `CABE_META_INDEX=bplustree` 切换
+  - 对照 bench:Put / Get / Delete / Recovery
+  - `doc/p9_index_comparison.md`:实测数据 + 结论
+  - **决策**:基于 bench 决定 v1.2 默认实现
+
+**性能可接受范围**(不影响 v1.2 默认决策的前提):
+- 点查询 p50 相对 hashmap 劣化 ≤ 3 倍
+- 内存占用相对 hashmap 不劣化(预期更优)
+
+**版本里程碑**:v1.2。
+
+---
+
+### P10 — SPDK 后端
+
+**目标**:加 `SpdkIoBackend`,绕过内核态。
+
+**范围**:
+- 每 `(device, reactor)` 一个 SPDK 后端实例
+- `BufferHandle` 内存来源切换到 SPDK pool(hugepage)
+- SPDK reactor 与 cabe reactor 整合(同线程上 poller + 业务)
+- 容器化 / hugepage 部署文档(N × R × pool_size 计算公式)
+- 与 io_uring 后端 bench 对照
+
+**版本里程碑**:v1.3。
+
+---
+
+### P11 — 多 NVMe 规模化与隔离验证
+
+**目标**:验证多 device 大规模部署可用(N ≥ 8);架构改造在 P7 已完成,本阶段只做规模化与运维验证。
+
+**范围**:
+1. `N ∈ {2, 4, 8}` 配置矩阵端到端测试
+2. key 分布均衡性测量(xxh3 在真实 key 分布下的负载偏斜)
+3. 多 device 聚合带宽 bench(单盘极限 → N 盘聚合的线性度)
+4. 单 device 故障隔离深度测试(写失败、读失败、整盘掉线)
+5. 运维文档:设备列表配置、故障处置、N 不可变的明确告知
+
+**显式不做**:
+- 跨 device 事务 / 原子 Put
+- 热添加 / 热移除 device
+- key 在 device 间的迁移 / rebalance
+
+**版本里程碑**:v1.4。
+
+---
+
+### P12 — 可观测性导出与运维工具
+
+**目标**:把 P5 已经接入的 Metrics 接口导出为生产格式;运维工具链补齐。
+
+**范围**:
+- Metrics 导出(Prometheus / OpenMetrics),per-device label + 全局聚合
+- 慢操作日志(可配置阈值)
+- 健康检查 API(`Engine::HealthCheck()`,per-device 状态)
+- 命令行工具:
+  - `cabe-info`:查看 device 配置、容量使用、reactor 数量
+  - `cabe-fsck`:离线一致性检查(WAL ↔ MetaIndex ↔ FreeList)
+  - `cabe-dump`:dump key 列表或某 key 的 `ValueMeta`
+- 运维手册 + 压测方法论文档
+
+**版本里程碑**:v1.5。
+
+---
+
+## 六、阶段间衔接约定
+
+每阶段完成需提交:
+
+1. 代码合入主分支,**四档 sanitizer CI 全绿**(P4+ TSAN 与 io_uring 组合除外)
+2. 阶段设计稿 `doc/pN_xxx_design.md` 更新为"已实施",含取舍记录
+3. bench 归档到 `bench/baselines/pN_xxx.json`
+4. **性能回归红线检查**(阶段内明文列出)
+5. README Roadmap 表对应阶段标记完成
+6. 下一阶段设计稿启动(空文件 + 范围草稿)
+
+---
+
+## 七、关键约束(贯穿全期)
+
+- Linux only,Fedora 43+ / 内核 6.16+
+- C++20,GCC 15+ 或 Clang 20+
+- TSAN 支持(P4+ io_uring 组合除外)
+- 裸设备语义,不创建 / 不 truncate / 不 unlink 设备节点
+- 健壮运行环境假设,不为内核 bug / 设备掉线做应用层兜底
+- **任何阶段不得触发 v1.0 公开 API 破坏**;评估为必须则升级为 v2.0 候选,独立立项
+- **N(设备数)在 Open 时固定**,运行期不可变;变更等同 v2.0
+
+---
+
+## 八、术语表
+
+| 术语 | 层 | 定义 |
+|---|---|---|
+| **value** | 数据层 | 用户传入 / 取出的字节负载,大小恒为 `kValueSize`(1 MiB) |
+| **`kValueSize`** | 常量 | 1 MiB = 1048576 字节 |
+| **`BlockId`** | 设备层 | 物理寻址:`device_id:8 \| block_idx:56`,字节偏移 = `block_idx << 20` |
+| **device** | 设备层 | 一个 NVMe 块设备(`/dev/nvmeXnY`),Engine 内 `vector<DeviceContext>` 一员 |
+| **block** | 设备层 | device 上一个 1 MiB 物理区域;**1 block 存 1 value** |
+| **`ValueMeta`** | 数据层 | 内存索引中关于一个已存 value 的元数据 `{BlockId, crc, timestamp, state}` |
+| **`MetaIndex`** | 数据层 | `key → ValueMeta` 的索引,abstraction(D21) |
+| **WAL** | 持久化层 | 写前日志,per-device,所有元数据变更的真相源 |
+| **snapshot** | 持久化层 | MetaIndex 的周期性磁盘镜像,用于 WAL truncate 与加速 recovery |
+| **N** | 配置 | 设备数,Open 时固定 |
+| **R** | 配置 | 每 device 的 reactor 数,Open 时固定,v1.0 内 = 1 |
+| **reactor** | 并发层 | 独占 `(IoBackend, FreeList partition, MetaIndex partition)` 的执行单元 |
+
+---
+
+## 九、决策汇总表(附录)
+
+完整内容见第三节(D1–D26)。此处列出每个决策的阶段绑定:
+
+| 决策 | 简述 | 锁定阶段 |
+|---|---|---|
+| D1 | value 严格 1 MiB | P0 |
+| D2 | 数据设备无 header | P0 |
+| D3 | 元数据仅 RAM + WAL | P0 |
+| D4 | 命名分层(BlockId / ValueMeta) | P0 |
+| D5 | BlockId 8/56 编码 | P0 |
+| D6 | xxh3 路由 | P0 |
+| D7 | hash(key) % N 路由 | P2 |
+| D8 | N 不可变 | P2 |
+| D9 | R 不可变,v1.0 R=1 | P2 |
+| D10 | FUA value durability | P5 |
+| D11 | commit 顺序 Data→WAL→Index | P5 |
+| D12 | WAL per-device | P5 |
+| D13 | WAL 帧头 8 字节 | P5 |
+| D14 | CRC32C 数据完整性 | P5 |
+| D15 | Snapshot + WAL truncate | P5 |
+| D16 | 无锁多线程 | P7 |
+| D17 | sync API + 内部异步 | P2 |
+| D18 | per-reactor 状态分区 | P7 |
+| D19 | 跨 device 无通信 | P7 |
+| D20 | IoBackend concept | P3 |
+| D21 | MetaIndex concept | P3 |
+| D22 | 默认实现 hashmap | P3 |
+| D23 | 编译期切换 | P3 |
+| D24 | 零拷贝主路径 | P8 |
+| D25 | API 冻结于 P2 | P2 |
+| D26 | 性能回归红线 | 各阶段 |
