@@ -3,7 +3,7 @@
 add_library(cabe_util STATIC
     crc32.cpp
     cpu_features.cpp
-    # hash.cpp        # ← M4 在此加入 xxh3 路由 hash
+    hash.cpp          # M4：xxh3 路由 hash（XXH_INLINE_ALL 内嵌 third_party/xxhash）
 )
 target_link_libraries(cabe_util PUBLIC cabe_common)   # 含 cabe_flags 传递
 add_library(cabe::util ALIAS cabe_util)

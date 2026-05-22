@@ -10,7 +10,7 @@
 | M1 | 项目骨架与构建系统 | [P0M1_skeleton_design.md](P0M1_skeleton_design.md) | 完成稿，待 owner 终审 |
 | M2 | `common/structs.h` schema 定型 | [P0M2_schema_design.md](P0M2_schema_design.md) | 完成稿，待 owner 终审 |
 | M3 | 错误码段位规划 + Logger stderr 实装 | [P0M3_errorcode_logger_design.md](P0M3_errorcode_logger_design.md) | 完成稿，待 owner 终审 |
-| M4 | `util/hash.{h,cpp}` xxh3 接入 | `P0M4_hash_design.md` | 待撰写 |
+| M4 | `util/hash.{h,cpp}` xxh3 接入 | [P0M4_hash_design.md](P0M4_hash_design.md) | 完成稿，待 owner 终审 |
 | M5 | 测试与 bench 框架接入 + util/common 覆盖 | `P0M5_test_bench_design.md` | 待撰写 |
 | M6 | Sanitizer 矩阵 + `run-tests.sh` + CI 工作流 | `P0M6_sanitizer_ci_design.md` | 待撰写 |
 | M7 | P0 设计稿固化与状态同步 | `P0_infra_design.md`（阶段收敛文档） | 待撰写 |
