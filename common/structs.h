@@ -12,35 +12,79 @@
 #  error "Cabe currently only supports Linux (target: Fedora 43). See README.md."
 #endif
 
+#include <cassert>
+#include <compare>
 #include <cstddef>
 #include <cstdint>
 #include <span>
+#include <type_traits>
 
-// Cabe 的固定 chunk 大小：1 MiB。
-// 定义为 inline constexpr size_t 而非 #define，带来两个收益：
-//   1) 类型安全（size_t 而非宏展开时的 int）
-//   2) 参与命名空间 / 有调试信息 / 可用于 static_assert
-// 保持原名不变，所有调用点（40+ 处）无需改动。
-inline constexpr size_t CABE_VALUE_DATA_SIZE = 1024 * 1024;
+namespace cabe {
+    // ---- 固定 value 大小（D1）----
+    inline constexpr std::size_t kValueSize = 1024 * 1024; // 1 MiB
 
+    // ---- 设备标识（D5：占 BlockId 高 8 位）----
+    using DeviceId = std::uint8_t;
 
-using BlockId = uint64_t;   // 物理位置
+    // ---- 数据视图（D2/D4：设备上只有裸字节）----
+    using DataView = std::span<const std::byte>;
+    using DataBuffer = std::span<std::byte>;
 
-using DataView = std::span<const char>;
-using DataBuffer = std::span<char>;
+    // ---- 物理寻址（D5：device_id:8 | block_idx:56）----
+    struct BlockId {
+        std::uint64_t raw;
 
-// 数据状态
-enum class DataState : uint8_t {
-    Active = 0,
-    Deleted = 1
-};
+        static constexpr std::uint64_t kIdxBits = 56;
+        static constexpr std::uint64_t kIdxMask = (std::uint64_t{1} << kIdxBits) - 1;
 
-// value元数据
-struct ChunkMeta {
-    BlockId blockId;        // 物理块位置
-    uint32_t crc;           // CRC 校验
-    uint64_t timestamp;     // 写入时间
-    DataState state;        // 状态
-};
+        static constexpr BlockId Make(DeviceId dev, std::uint64_t block_idx) noexcept {
+            assert(block_idx <= kIdxMask && "block_idx exceeds 56 bits"); // Debug 防线；NDEBUG 下消除
+            return BlockId{(static_cast<std::uint64_t>(dev) << kIdxBits) | (block_idx & kIdxMask)};
+        }
+
+        constexpr DeviceId dev() const noexcept { return static_cast<DeviceId>(raw >> kIdxBits); }
+        constexpr std::uint64_t block_idx() const noexcept { return raw & kIdxMask; }
+        constexpr std::uint64_t byte_offset() const noexcept { return block_idx() * kValueSize; } // 块号 × 块大小
+
+        // C++20：defaulted <=> 自动合成 == 与全部关系运算（FreeList 排序 / 一致性比较用）
+        constexpr auto operator<=>(const BlockId &) const noexcept = default;
+    };
+
+    static_assert(sizeof(BlockId) == 8);
+    static_assert(std::is_trivially_copyable_v<BlockId>);
+
+    // ---- value 状态（取代旧的数据状态枚举）----
+    enum class ValueState : std::uint8_t {
+        Active = 0,
+        Deleted = 1,
+    };
+
+    // ---- value 元数据（D3：仅存在于 RAM / WAL）----
+    // 字段顺序为达成 sizeof==24 而重排（block/timestamp/crc/state = 8/8/4/1）；末尾 reserved[3]
+    // 把隐式 padding 显式化并清零，保证整体可确定地 memcpy 序列化（P5 WAL/snapshot）。
+    struct ValueMeta {
+        BlockId block{}; // 物理位置                       @0  (8)
+        std::uint64_t timestamp{}; // 写入时间，util::GetWallTimeNs   @8  (8)
+        std::uint32_t crc{}; // value 的 CRC32C（D14）          @16 (4)
+        ValueState state = ValueState::Active; // Active / Deleted                @20 (1)
+        std::uint8_t reserved[3] = {}; // 显式占位 + 预留小扩展位          @21 (3)
+    };
+
+    static_assert(sizeof(ValueMeta) == 24);
+    static_assert(alignof(ValueMeta) == 8);
+    static_assert(std::is_trivially_copyable_v<ValueMeta>);
+    static_assert(std::is_standard_layout_v<ValueMeta>);
+
+    // ---- WAL 帧头占位（D13；真实编解码在 P5，届时这些常量可迁入 wal 模块）----
+    // 布局：magic:4 | version:1 | flags:1 | entry_type:1 | reserved:1 = 8 字节
+    inline constexpr std::size_t kWalFrameHeaderSize = 8;
+    inline constexpr std::uint32_t kWalMagic = 0x45424143u; // "CABE"（字节序在 P5 最终确定）
+    inline constexpr std::uint8_t kWalVersion = 1;
+    inline constexpr std::size_t kWalOffMagic = 0;
+    inline constexpr std::size_t kWalOffVersion = 4;
+    inline constexpr std::size_t kWalOffFlags = 5;
+    inline constexpr std::size_t kWalOffEntryType = 6;
+    inline constexpr std::size_t kWalOffReserved = 7;
+} // namespace cabe
 
 #endif // CABE_STRUCTS_H

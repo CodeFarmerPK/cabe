@@ -22,6 +22,7 @@
 #include "cpu_features.h"
 
 #include <array>
+#include <cstddef>
 #include <cstring>
 
 #if defined(__x86_64__) || defined(__i386__)
@@ -46,8 +47,8 @@ namespace cabe::util {
 
         uint32_t SoftwareCRC32C(DataView data) noexcept {
             uint32_t crc = 0xFFFFFFFFu;
-            for (const char c : data) {
-                crc = (crc >> 8) ^ kCRC32CTable[(crc ^ static_cast<uint8_t>(c)) & 0xFFu];
+            for (const std::byte b : data) {
+                crc = (crc >> 8) ^ kCRC32CTable[(crc ^ std::to_integer<std::uint8_t>(b)) & 0xFFu];
             }
             return ~crc;
         }
@@ -57,7 +58,7 @@ namespace cabe::util {
         [[gnu::target("sse4.2")]]
         uint32_t HardwareCRC32C_x86(DataView data) noexcept {
             uint64_t crc = 0xFFFFFFFFu;
-            const char* p = data.data();
+            const std::byte* p = data.data();
             size_t len   = data.size();
             while (len >= 8) {
                 uint64_t chunk;
@@ -66,7 +67,7 @@ namespace cabe::util {
                 p += 8; len -= 8;
             }
             auto crc32 = static_cast<uint32_t>(crc);
-            while (len-- > 0) crc32 = _mm_crc32_u8(crc32, static_cast<uint8_t>(*p++));
+            while (len-- > 0) crc32 = _mm_crc32_u8(crc32, std::to_integer<std::uint8_t>(*p++));
             return ~crc32;
         }
 #endif

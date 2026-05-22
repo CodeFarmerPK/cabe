@@ -15,7 +15,7 @@
 
 namespace cabe::util {
     // 墙钟时间戳，单位纳秒。
-    // 用途：KeyMeta.createdAt / modifiedAt 等"用户可见的时间"。
+    // 用途：ValueMeta.timestamp 等"用户可见的时间"。
     // 特性：跨进程可比、NTP 同步后有意义；可能被 NTP 回调，不保证单调。
     inline uint64_t GetWallTimeNs() {
         return std::chrono::duration_cast<std::chrono::nanoseconds>(
