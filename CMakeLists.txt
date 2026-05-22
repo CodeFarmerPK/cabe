@@ -54,6 +54,7 @@ set_property(CACHE CABE_META_INDEX PROPERTY STRINGS hashmap bplustree)
 option(CABE_BUILD_TESTS "Build unit tests"        OFF)
 option(CABE_BUILD_BENCH "Build benchmarks"        OFF)
 option(CABE_WERROR      "Treat warnings as errors" OFF)
+option(CABE_COVERAGE    "Instrument util/common for line coverage (gcov / llvm-cov)" OFF)
 
 # ---------- 选项合法值校验（非法值 fail-fast）----------
 function(cabe_validate_choice var)
@@ -98,6 +99,18 @@ if(NOT CABE_SANITIZER STREQUAL "none")
     target_compile_options(cabe_flags INTERFACE -fsanitize=${CABE_SANITIZER} -fno-omit-frame-pointer -g)
     target_link_options(cabe_flags INTERFACE -fsanitize=${CABE_SANITIZER})
     message(STATUS "Sanitizer enabled: ${CABE_SANITIZER} (use Debug/RelWithDebInfo for best stack traces)")
+endif()
+
+# ---------- 覆盖率插桩（M5；仅 CABE_COVERAGE=ON 时启用，避免污染常规/Release 构建）----------
+if(CABE_COVERAGE)
+    if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
+        target_compile_options(cabe_flags INTERFACE --coverage -O0 -g)
+        target_link_options(cabe_flags INTERFACE --coverage)
+    else() # Clang
+        target_compile_options(cabe_flags INTERFACE -fprofile-instr-generate -fcoverage-mapping -O0 -g)
+        target_link_options(cabe_flags INTERFACE -fprofile-instr-generate)
+    endif()
+    message(STATUS "Coverage instrumentation: ON (${CMAKE_CXX_COMPILER_ID}); 报告用 gcovr/llvm-cov，见 doc/P0/P0M5 §8")
 endif()
 
 # ---------- 子目录 ----------

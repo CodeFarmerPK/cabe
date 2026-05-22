@@ -98,4 +98,12 @@ namespace cabe::util {
         return kCRC32Impl(data);
     }
 
+    // ---- detail：仅供测试，转发到上面的内部实现，供 M5 验证软/硬一致性（doc/P0/P0M5 §7.1）----
+    namespace detail {
+        uint32_t SoftwareCRC32C(DataView data) noexcept { return ::cabe::util::SoftwareCRC32C(data); }
+#if defined(__x86_64__) || defined(__i386__)
+        uint32_t HardwareCRC32C_x86(DataView data) noexcept { return ::cabe::util::HardwareCRC32C_x86(data); }
+#endif
+    } // namespace detail
+
 } // namespace cabe::util
