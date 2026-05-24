@@ -12,6 +12,7 @@
 #include "hash.h"
 
 #include <cassert>
+#include <cstdlib>   // std::abort
 
 namespace cabe::util {
 
@@ -25,6 +26,9 @@ namespace cabe::util {
 
     DeviceId RouteToDevice(std::string_view key, std::size_t n_devices) noexcept {
         assert(n_devices >= 1 && n_devices <= 256 && "n_devices must be in [1,256]"); // Debug 防线
+        // Release 兜底：Debug assert 在 NDEBUG 下被消除；n_devices==0 会让下行 Hash%0 触发
+        // 整数除零（x86 上 SIGFPE），属 UB 路径。无条件 abort 守护，不让 UB 进生产。
+        if (n_devices == 0) std::abort();
         return static_cast<DeviceId>(Hash(key) % n_devices);                           // D7
     }
 

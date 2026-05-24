@@ -14,7 +14,7 @@
 | 阶段 / 里程碑 | P0 / M5 |
 | 状态 | **完成稿（待 owner 终审）** —— §3 决策待裁决（核心：测试钩子是否放宽 M2/M3 封装） |
 | 上游依赖 | M1（`enable_testing`/`CABE_BUILD_TESTS|BENCH`/`EXISTS` 守卫）、M2/M3/M4（被测对象） |
-| 下游依赖本里程碑 | M6（sanitizer 矩阵复用这些测试）、M7（bench 基线归档）、P1+（测试基建复用） |
+| 下游依赖本里程碑 | M6（本地 ASAN / TSAN / UBSAN / Release 组合矩阵复用这些测试）、M7（bench 基线归档）、P1+（测试基建复用） |
 | 关联约束 | ROADMAP P0/M5：GTest+benchmark 接入、`test/util` `test/common` `bench/util`、覆盖率 ≥ 80%、`ctest` 全绿 |
 | 退出判定 | `ctest` 全绿；`util`+`common` 行覆盖率 ≥ 80%；双工具链下测试与 bench 均可构建运行 |
 
@@ -37,7 +37,7 @@
 ### 1.3 推迟范围
 | 推迟项 | 落点 | 原因 |
 |---|---|---|
-| sanitizer 矩阵（ASAN/TSAN/UBSAN）跑测试 + CI | **M6** | M5 只保证测试存在且本地全绿；矩阵与 CI 在 M6 |
+| 本地 ASAN / TSAN / UBSAN / Release 组合矩阵（双工具链）+ 覆盖率脚本 | **M6** | M5 只保证测试存在且本地全绿；矩阵与脚本在 M6；CI 在 M6 推迟、待仓库托管确定 |
 | bench 基线数值归档（`bench/baselines/p0_utilities.json`） | **M7** | M5 建 bench 骨架，基线在 M7 定稿归档 |
 | `engine`/`io`/`index` 等业务模块测试 | 各自阶段（P1+） | M5 只覆盖 P0 的 util/common |
 | `CMakePresets.json` | M6（可选） | 与 `run-tests.sh` 一并 |
@@ -269,6 +269,6 @@ bench/
 
 | 里程碑 | M5 提供的接入点 |
 |---|---|
-| M6 | 现成的 `ctest` 测试集，供 ASAN/TSAN/UBSAN 矩阵与 CI 直接复用；`run-tests.sh` 包装 |
+| M6 | 现成的 `ctest` 测试集，供本地八格组合矩阵直接复用；`run-tests.sh` / `run-coverage.sh` 包装（CI 推迟） |
 | M7 | `bench/util` 骨架就绪，基线数值归档 `bench/baselines/p0_utilities.json` |
 | P1+ | `test/<module>/` 目录约定 + `cabe_add_test` 模式 + 覆盖率 target，业务模块照搬 |

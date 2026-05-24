@@ -23,8 +23,14 @@ TEST(Hash, DataViewAndStringViewAgree) {
 }
 
 TEST(Hash, RouteInRange) {
+    // 双检：① cast 为 size_t 再 EXPECT_LT，避免 uint8_t 在 n=256 档值域 [0,255] 恒真；
+    //       ② 直接拿 Hash%n 作为 oracle 验值，捕 % (n+1) / off-by-one 之类的实现回归
+    //          —— 仅 EXPECT_LT 在 n=256 + 错误实现下会因 uint8_t 截断静默通过。
+    const auto h = cabe::util::Hash(std::string_view{"some-key"});
     for (std::size_t n : {std::size_t{1}, std::size_t{2}, std::size_t{4}, std::size_t{8}, std::size_t{256}}) {
-        EXPECT_LT(cabe::util::RouteToDevice("some-key", n), n);
+        const auto d = static_cast<std::size_t>(cabe::util::RouteToDevice("some-key", n));
+        EXPECT_LT(d, n) << "n=" << n;
+        EXPECT_EQ(d, h % n) << "n=" << n << " (公式回归)";
     }
 }
 

@@ -62,6 +62,7 @@ Cabe 是一个面向单机部署的 KV 存储引擎:
   - `liburing` ≥ 2.9(P4+)
   - `gtest` / `gmock`(测试)
   - `google-benchmark`(微基准)
+  - `gcovr`(覆盖率报告，M6+ `scripts/run-coverage.sh` 依赖)
   - SPDK(P10+,可选)
   - xxhash 库(P0+,路由 hash)
 

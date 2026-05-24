@@ -50,9 +50,9 @@
 | GTest / google-benchmark 接入，`test/` `bench/` 子目录内容 | **M5** | 框架接入属 M5；M1 仅留接入缝（见 §3 偏差-2、§6.8） |
 | 第三方依赖 xxhash | **M4** | hash 模块在 M4 引入 |
 | 第三方依赖 liburing | **P4** | io_uring 后端阶段 |
-| `CABE_SANITIZER` 的脚本（`run-tests.sh`）与 CI 矩阵 | **M6** | M1 仅声明并应用编译开关（见 §3 偏差-1） |
+| `CABE_SANITIZER` 的脚本（`run-tests.sh` / `run-coverage.sh`）与本地组合矩阵；CI 推迟 | **M6** | M1 仅声明并应用编译开关（见 §3 偏差-1） |
 | `CABE_IO_BACKEND` / `CABE_META_INDEX` 的真实编译期分派 | **P3** | 此时尚无后端 / 索引源码（见 §8 M1-D3） |
-| `CMakePresets.json` | M6（可选） | 与 `run-tests.sh` 一并设计 |
+| `CMakePresets.json` | 不做（M6 决策） | M6 用脚本即可达成"一行命令跑完矩阵"，与 `run-tests.sh` 重复 |
 | `engine/` `io/` `index/` `wal/` `reactor/` 子目录 | 各自起始阶段（P1/P3/P5/P7） | 当前无源码 |
 | 源码 schema 改造（`structs.h` 等） | **M2** | M1 一行源码不改 |
 | CMake 必需 POSIX 头探测（`sys/mman.h` / `fcntl.h` / `unistd.h`） | **P1** | M1 的 util/common 不用 O_DIRECT/mmap/pread，引擎 I/O 起于 P1 |
@@ -105,9 +105,9 @@ M1 在 CMake 层再加一道（配置期 fail-fast），与源码级兜底互补
 
 | 维度 | 内容 |
 |---|---|
-| 路线图字面 | P0 范围把 "Sanitizer 矩阵 + CI 工作流" 归在 **M6** |
-| 本设计裁决 | **采纳**：M1 即声明选项、校验合法值、并应用编译/链接开关；M6 只剩脚本与 CI 矩阵 |
-| 理由 | 开关应用仅约 8 行，提前到位可让 M2–M5 本地即用 ASAN / TSAN 调试；与路线图不冲突 —— M6 的"实装"指 `run-tests.sh` 脚本 + CI 矩阵 + 可选 presets，而非编译开关本身 |
+| 路线图字面 | P0 范围把 "Sanitizer 矩阵 + CI 工作流" 归在 **M6**（CI 已在 M6 决策中推迟，详见 P0M6） |
+| 本设计裁决 | **采纳**：M1 即声明选项、校验合法值、并应用编译/链接开关；M6 只剩脚本 + 本地组合矩阵（CI 推迟） |
+| 理由 | 开关应用仅约 8 行，提前到位可让 M2–M5 本地即用 ASAN / TSAN 调试；与路线图不冲突 —— M6 的"实装"指 `run-tests.sh` / `run-coverage.sh` 脚本 + 本地组合矩阵，而非编译开关本身 |
 | 回退代价 | 极低：若终审要求 M1 仅声明不应用，从 `cabe_flags` 删去约 8 行开关即可 |
 
 ### 偏差-2（对应 M1-D2）：`test/` `bench/` 子目录推迟到 M5
@@ -440,7 +440,7 @@ compile_commands.json
 | 退出条件 configure+build 双工具链通过 | §11 | ✅ |
 | README 默认 Release + Ninja | §6.5 | ✅ |
 | README 默认 sync 后端 + hashmap 索引 | §6.6 默认值 | ✅ |
-| Sanitizer 矩阵归在 M6 | M1 提前应用编译开关，脚本/CI 仍在 M6（§3 偏差-1） | ⚠️ **偏差，待终审** |
+| Sanitizer 矩阵归在 M6 | M1 提前应用编译开关，脚本与本地矩阵仍在 M6；CI 在 M6 推迟（§3 偏差-1） | ✅（M6 已落地） |
 
 ---
 
@@ -480,7 +480,7 @@ cmake --build build-clang
 7. 编译产物中无全局 SSE4.2 指令污染（`crc32.cpp` 外的编译单元不含 crc32 指令）——
    验证 M1-D7；可选，通过 `objdump` 抽查。
 
-**不含**：单元测试（M5）、CI 矩阵（M6）。M1 验证为人工本地双工具链跑通。
+**不含**：单元测试（M5）、本地组合矩阵（M6）。M1 验证为人工本地双工具链跑通。
 
 > 可选：M1 期间可临时加一个不安装的 `cabe_smoke` 可执行（调用 `cabe::util::CRC32`
 > 与 `cpu::HasSSE42()`）以证明链接闭环，验证后即移除，**不计入交付物**。
@@ -495,7 +495,7 @@ cmake --build build-clang
 | M3 | `error_code.h` / `logger.h` 仍为头；M3 若新增 `logger.cpp`，复用 `util/CMakeLists` 的库写法，或并入 `cabe_common` → 可编译库 |
 | M4 | `util/CMakeLists.txt` 已留 `hash.cpp` 加入点注释（§6.9） |
 | M5 | `enable_testing()` 已就绪；`CABE_BUILD_TESTS/BENCH` 选项与 `EXISTS` 守卫已在位，M5 只需放入 `test/` `bench/` 的 CMake 与源码 |
-| M6 | sanitizer 编译开关已就位（M1-D1），M6 只加 `run-tests.sh` + CI 矩阵 + 可选 presets |
+| M6 | sanitizer 编译开关已就位（M1-D1），M6 只加 `run-tests.sh` + `run-coverage.sh` + 本地组合矩阵（CI 推迟） |
 
 ---
 

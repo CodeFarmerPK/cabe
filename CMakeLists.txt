@@ -80,16 +80,20 @@ endif()
 add_library(cabe_flags INTERFACE)
 target_compile_features(cabe_flags INTERFACE cxx_std_20)
 target_compile_options(cabe_flags INTERFACE -Wall -Wextra -Wpedantic)
-# 把"一旦触发基本等于未定义行为"的三条告警默认升级为硬错误（无论 CABE_WERROR 如何）：
+# 把"一旦触发基本等于未定义行为"的告警默认升级为硬错误（无论 CABE_WERROR 如何）：
 #   return-type          非 void 函数漏 return  -> 调用处读到未定义值
 #   uninitialized        读未初始化变量          -> 未定义值
 #   implicit-fallthrough switch 漏 break 未标注  -> 逻辑 bug
-# 仅这三条 default-on；全量 -Werror 仍经 CABE_WERROR（默认 OFF），避免编译器
+#   format               printf/scanf 格式串与参数不匹配 -> 读栈/越界写（CABE_LOG 宏拼 fmt 入 fprintf，必须卡死）
+#   format-security      格式串含外部数据无 args -> 任意写漏洞
+# 这几条 default-on；全量 -Werror 仍经 CABE_WERROR（默认 OFF），避免编译器
 # 升级带来的新增风格告警直接卡死本地/CI。用 INTERFACE target 施加，不污染第三方。
 target_compile_options(cabe_flags INTERFACE
     -Werror=return-type
     -Werror=uninitialized
-    -Werror=implicit-fallthrough)
+    -Werror=implicit-fallthrough
+    -Werror=format
+    -Werror=format-security)
 if(CABE_WERROR)
     target_compile_options(cabe_flags INTERFACE -Werror)
 endif()

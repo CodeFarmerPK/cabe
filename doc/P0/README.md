@@ -1,7 +1,8 @@
 # P0 — 基础设施 · 设计文档索引
 
-> P0 阶段目标：让项目能 build、能跑 CI 矩阵，工具库齐备，数据 schema 与公共约定全部定型；
-> 无业务逻辑。阶段总览见根目录 [ROADMAP.md](../../ROADMAP.md) 第五节 "P0 — 基础设施"。
+> P0 阶段目标：让项目能 build、跑通本地组合矩阵（持续集成在 M6 推迟，待仓库托管确定后单独立项），
+> 工具库齐备，数据 schema 与公共约定全部定型；无业务逻辑。
+> 阶段总览见根目录 [ROADMAP.md](../../ROADMAP.md) 第五节 "P0 — 基础设施"。
 
 ## 里程碑文档清单
 
@@ -12,7 +13,7 @@
 | M3 | 错误码段位规划 + Logger stderr 实装 | [P0M3_errorcode_logger_design.md](P0M3_errorcode_logger_design.md) | 完成稿，待 owner 终审 |
 | M4 | `util/hash.{h,cpp}` xxh3 接入 | [P0M4_hash_design.md](P0M4_hash_design.md) | 完成稿，待 owner 终审 |
 | M5 | 测试与 bench 框架接入 + util/common 覆盖 | [P0M5_test_bench_design.md](P0M5_test_bench_design.md) | 完成稿，待 owner 终审 |
-| M6 | Sanitizer 矩阵 + `run-tests.sh` + CI 工作流 | `P0M6_sanitizer_ci_design.md` | 待撰写 |
+| M6 | 本地内存检测器组合矩阵 + 测试 / 覆盖率脚本（CI 推迟） | [P0M6_test_scripts_design.md](P0M6_test_scripts_design.md) | 完成稿，待 owner 终审 |
 | M7 | P0 设计稿固化与状态同步 | `P0_infra_design.md`（阶段收敛文档） | 待撰写 |
 
 ## 里程碑依赖
