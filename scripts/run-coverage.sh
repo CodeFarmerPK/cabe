@@ -71,11 +71,17 @@ case "$COMPILER" in
     clang++)
         need_tool llvm-cov      "sudo dnf install llvm"
         need_tool llvm-profdata "sudo dnf install llvm"
+        need_tool jq            "sudo dnf install jq"   # P0M7 评审 #10：解析 llvm-cov export JSON
         ;;
 esac
 
 # ---------- build dir（D4：源码树内、跑前清空、跑完不清） ----------
-[[ "$COMPILER" == "g++" ]] && compiler_short=gcc || compiler_short=clang
+# P0M7 评审 #11：三元 `&& X || Y` 在未来若开 set -e 时会反咬，改 if-then-else 显式分支
+if [[ "$COMPILER" == "g++" ]]; then
+    compiler_short=gcc
+else
+    compiler_short=clang
+fi
 BUILD_DIR="$ROOT/build-tests/${compiler_short}-coverage"
 
 echo ">>> 覆盖率：compiler=$COMPILER  build_dir=$BUILD_DIR"
@@ -160,9 +166,9 @@ case "$COMPILER" in
             "$ROOT/util/" "$ROOT/common/" \
             -ignore-filename-regex='_test\.cpp$' > "$json" \
             || { echo "Error: llvm-cov export 失败" >&2; exit 4; }
-        # JSON 顶层 data[0].totals.lines.percent —— 用 grep 提取，避免 jq 依赖
-        total_pct=$(grep -oE '"lines":\{[^}]*"percent":[0-9.]+' "$json" \
-                    | tail -n1 | grep -oE '[0-9.]+$')
+        # P0M7 评审 #10：JSON 顶层 data[0].totals.lines.percent；用 jq 解析（jq 依赖已在自检确认）
+        # 改前用 grep -oE 拼正则，遇到 llvm-cov 版本字段重排会误匹配；jq 走结构化访问稳健
+        total_pct=$(jq -r '.data[0].totals.lines.percent // empty' "$json")
         ;;
 esac
 

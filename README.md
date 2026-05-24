@@ -30,7 +30,7 @@ Cabe 是一个面向单机部署的 KV 存储引擎:
 
 | 阶段 | 内容 | 版本目标 | 状态 |
 |---|---|---|---|
-| P0 | 基础设施 | — | 🚧 进行中 |
+| P0 | 基础设施 | — | ✅ 完成 |
 | P1 | 单线程核心 | v0.x | ⏳ 待启动 |
 | P2 | API 冻结 + Forward-compat PoC | v0.x | ⏳ |
 | P3 | IoBackend + MetaIndex 抽象 | v0.x | ⏳ |
@@ -118,7 +118,7 @@ cabe/
 ├── index/                # MetaIndex 实现(P3 起)
 ├── wal/                  # WAL writer 与 recovery(P5 起)
 ├── reactor/              # Reactor 与无锁队列(P7 起)
-├── doc/                  # 阶段设计稿 pN_xxx_design.md
+├── doc/                  # 阶段设计稿（doc/PN/PNMn_<主题>_design.md 风格）
 ├── bench/
 │   └── baselines/        # 各阶段 bench 归档
 ├── scripts/              # 装机与运维脚本
@@ -128,10 +128,10 @@ cabe/
 ## 文档导航
 
 - [ROADMAP.md](ROADMAP.md) — 完整路线图与架构决策(D1–D26)
-- `doc/p0_infra_design.md` — P0 schema 与基础设施详细设计
-- `doc/p1_core_design.md` — P1 单线程引擎设计
-- `doc/p2_api_freeze.md` — 公开 API 契约
-- `doc/p2_forward_compat_poc.md` — Forward-compat PoC 报告
+- [doc/P0/README.md](doc/P0/README.md) — P0 阶段索引（M1–M7 各里程碑设计稿）
+- [doc/P0/P0M7_convergence_design.md](doc/P0/P0M7_convergence_design.md) — P0 阶段收敛稿（薄索引）
+- [doc/P1/README.md](doc/P1/README.md) — P1 阶段占位索引（待启动）
+- [doc/P2/README.md](doc/P2/README.md) — P2 阶段占位索引（待启动）
 
 ## 许可
 

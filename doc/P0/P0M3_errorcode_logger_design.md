@@ -12,7 +12,7 @@
 | 项 | 值 |
 |---|---|
 | 阶段 / 里程碑 | P0 / M3 |
-| 状态 | **完成稿（待 owner 终审）** —— §3 决策待裁决（含延续 M2 的命名空间约定） |
+| 状态 | **✅ 已锁定（P0M7 收敛）** |
 | 上游依赖 | M1（构建骨架）、M2（`namespace cabe` 约定，若终审采纳则 M3 跟进） |
 | 下游依赖本里程碑 | P1+（`Engine` 用错误码返回 / `Status`）、全阶段（日志宏） |
 | 关联约束 | ROADMAP P0「错误码段位规划」「Logger 禁止全 no-op」；错误码六段 memory/io/index/wal/engine/wal_recovery |

@@ -17,7 +17,7 @@
 | 项 | 值 |
 |---|---|
 | 阶段 / 里程碑 | P0 / M6 |
-| 状态 | **完成稿（待 owner 终审）** —— 七项决策经 grill 流程拍板（见 §3） |
+| 状态 | **✅ 已锁定（P0M7 收敛）** |
 | 上游依赖 | M1（`CABE_SANITIZER` 选项就位）、M5（`ctest` 用例集 + `CABE_COVERAGE` 插桩选项就位） |
 | 下游依赖本里程碑 | M7（设计稿收敛 + ROADMAP/README 状态同步）、P1+（业务模块复用同一套脚本） |
 | 关联约束 | ROADMAP P0/M6 字面范围；ROADMAP D 决策（P4 范围）：TSAN 与 `io_uring` 不兼容 |

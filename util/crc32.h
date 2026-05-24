@@ -17,6 +17,9 @@ namespace cabe::util {
     namespace detail {
         uint32_t SoftwareCRC32C(DataView data) noexcept;
 #if defined(__x86_64__) || defined(__i386__)
+        // [[gnu::target("sse4.2")]]：与内层实现一致；LTO/inline 把 intrinsic 暴露到 caller TU
+        // 时仍能保有 sse4.2 codegen 上下文（P0M7 评审 #9 闭环）。
+        [[gnu::target("sse4.2")]]
         uint32_t HardwareCRC32C_x86(DataView data) noexcept; // 仅当 cpu::HasSSE42() 为真时可安全调用
 #endif
     } // namespace detail

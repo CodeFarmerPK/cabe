@@ -12,7 +12,7 @@
 | 项 | 值 |
 |---|---|
 | 阶段 / 里程碑 | P0 / M5 |
-| 状态 | **完成稿（待 owner 终审）** —— §3 决策待裁决（核心：测试钩子是否放宽 M2/M3 封装） |
+| 状态 | **✅ 已锁定（P0M7 收敛）** |
 | 上游依赖 | M1（`enable_testing`/`CABE_BUILD_TESTS|BENCH`/`EXISTS` 守卫）、M2/M3/M4（被测对象） |
 | 下游依赖本里程碑 | M6（本地 ASAN / TSAN / UBSAN / Release 组合矩阵复用这些测试）、M7（bench 基线归档）、P1+（测试基建复用） |
 | 关联约束 | ROADMAP P0/M5：GTest+benchmark 接入、`test/util` `test/common` `bench/util`、覆盖率 ≥ 80%、`ctest` 全绿 |

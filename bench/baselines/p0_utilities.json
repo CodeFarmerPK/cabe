@@ -1,0 +1,96 @@
+{
+  "schema_version": "1.0",
+  "milestone": "P0M7",
+  "captured_at": "2026-05-25",
+  "git_commit": "unknown",
+  "env": {
+    "kernel": "6.17.8-300.fc43.x86_64",
+    "cpu_model": "AMD Ryzen 9 9950X 16-Core Processor",
+    "cpu_features_relevant": [
+      "sse4.2"
+    ]
+  },
+  "build": {
+    "type": "Release",
+    "cmake_flags": [
+      "-DCABE_BUILD_BENCH=ON"
+    ],
+    "compiler_specific": {
+      "g++": "g++ (GCC) 15.2.1 20251111 (Red Hat 15.2.1-4)",
+      "clang++": "clang version 21.1.8 (Fedora 21.1.8-4.fc43)"
+    }
+  },
+  "method": {
+    "tool": "google-benchmark",
+    "repetitions": 5,
+    "aggregate": "median",
+    "rationale": "5 次重复取中位数：抑制单次波动 + 比均值更稳健于离群"
+  },
+  "results": {
+    "g++": {
+      "bench_crc32/64": {
+        "items_per_second": null,
+        "bytes_per_second": 34242881418.477230,
+        "cpu_time_ns": 1.8690015953349657
+      },
+      "bench_crc32/4096": {
+        "items_per_second": null,
+        "bytes_per_second": 16220512896.875334,
+        "cpu_time_ns": 252.51975853297714
+      },
+      "bench_crc32/1048576": {
+        "items_per_second": null,
+        "bytes_per_second": 14840184983.196699,
+        "cpu_time_ns": 70657.879344986970
+      },
+      "bench_hash/16": {
+        "items_per_second": null,
+        "bytes_per_second": 16572401459.437529,
+        "cpu_time_ns": 0.96546056038779082
+      },
+      "bench_hash/256": {
+        "items_per_second": null,
+        "bytes_per_second": 39104256438.558205,
+        "cpu_time_ns": 6.5466019128182369
+      },
+      "bench_hash/1048576": {
+        "items_per_second": null,
+        "bytes_per_second": 43722735814.531578,
+        "cpu_time_ns": 23982.396811763501
+      }
+    },
+    "clang++": {
+      "bench_crc32/64": {
+        "items_per_second": null,
+        "bytes_per_second": 38526684627.715935,
+        "cpu_time_ns": 1.6611862821427064
+      },
+      "bench_crc32/4096": {
+        "items_per_second": null,
+        "bytes_per_second": 16804547908.692921,
+        "cpu_time_ns": 243.74354027585338
+      },
+      "bench_crc32/1048576": {
+        "items_per_second": null,
+        "bytes_per_second": 14761335176.216017,
+        "cpu_time_ns": 71035.308627738676
+      },
+      "bench_hash/16": {
+        "items_per_second": null,
+        "bytes_per_second": 15474422447.983578,
+        "cpu_time_ns": 1.0339642758095251
+      },
+      "bench_hash/256": {
+        "items_per_second": null,
+        "bytes_per_second": 35908142687.612450,
+        "cpu_time_ns": 7.1293021816000133
+      },
+      "bench_hash/1048576": {
+        "items_per_second": null,
+        "bytes_per_second": 48729918954.678696,
+        "cpu_time_ns": 21518.114999846995
+      }
+    }
+  },
+  "notes": "P0 收敛基线；P1+ 不强制不退步——仅作回归参考。完整方法见 doc/P0/P0M7_convergence_design.md §5。"
+}

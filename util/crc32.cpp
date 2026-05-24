@@ -102,6 +102,8 @@ namespace cabe::util {
     namespace detail {
         uint32_t SoftwareCRC32C(DataView data) noexcept { return ::cabe::util::SoftwareCRC32C(data); }
 #if defined(__x86_64__) || defined(__i386__)
+        // [[gnu::target("sse4.2")]] 与 crc32.h 声明一致；详 P0M7 评审 #9 闭环
+        [[gnu::target("sse4.2")]]
         uint32_t HardwareCRC32C_x86(DataView data) noexcept { return ::cabe::util::HardwareCRC32C_x86(data); }
 #endif
     } // namespace detail

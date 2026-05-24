@@ -11,7 +11,7 @@
 | 项 | 值 |
 |---|---|
 | 阶段 / 里程碑 | P0 / M2 |
-| 状态 | **完成稿（待 owner 终审）** —— 技术决策已定，§3 两处超出 ROADMAP 字面的决策待终审 |
+| 状态 | **✅ 已锁定（P0M7 收敛）** |
 | 上游依赖 | M1（可构建骨架；`structs.h` 在 include 根下可被 `cabe_util` 引用） |
 | 下游依赖本里程碑 | M3（错误码/日志）、M4（hash 用 `DataView`）、M5（schema 单测）、P1+（`Engine` 全程用本 schema） |
 | 关联架构决策 | D1（value 1 MiB）、D2（设备无 header）、D3（元数据仅 RAM/WAL）、D4（命名分层）、D5（BlockId 8/56 编码）、D13（WAL 帧头）、D14（CRC32C） |

@@ -2,7 +2,7 @@
 
 > 本文是 P0 阶段第 1 个里程碑（M1）的详细设计定稿。聚焦"让工程可配置、可构建"，
 > 不含任何业务逻辑、第三方依赖与测试内容。本里程碑的设计结论最终将在 M7 收敛进
-> `doc/P0/P0_infra_design.md` 的"构建系统"一节。
+> [doc/P0/P0M7_convergence_design.md](P0M7_convergence_design.md) 的"工程骨架与 CMake 选项"一节（§4.5）。
 >
 > **本文取代**早期扁平命名的 `doc/p0_m1_skeleton_design.md`（迁入分阶段目录并定稿）。
 > 命名与目录约定见 §13。
@@ -14,7 +14,7 @@
 | 项 | 值 |
 |---|---|
 | 阶段 / 里程碑 | P0 / M1 |
-| 状态 | **完成稿（待 owner 终审）** —— 技术决策已全部裁定，仅余 §3 两处与路线图字面有出入的偏差待终审 |
+| 状态 | **✅ 已锁定（P0M7 收敛）** |
 | 上游依赖 | 无（M1 是 P0 起点） |
 | 下游依赖本里程碑 | M2 / M3 / M4 均依赖 M1 产出的可构建骨架 |
 | 关联架构决策 | D20–D23（CMake 选项预留）、贯穿约束（仅 Linux / C++20 / GCC 15+ / Clang 20+） |
@@ -506,10 +506,14 @@ cmake --build build-clang
 - **按阶段分目录**：`doc/P0/`、`doc/P1/`…，每阶段一个目录。
 - **里程碑级设计稿**：`P<阶段>M<里程碑>_<主题>_design.md`，如本文 `P0M1_skeleton_design.md`、
   后续 `P0M2_schema_design.md`、`P0M3_errorcode_logger_design.md` 等。
-- **阶段收敛文档**：`doc/P<n>/P<n>_infra_design.md` 之类（如 P0 的 `doc/P0/P0_infra_design.md`，
+- **阶段收敛文档**：`doc/P<n>/P<n>M<最后里程碑>_convergence_design.md`（如 P0 的
+  [doc/P0/P0M7_convergence_design.md](P0M7_convergence_design.md)，与里程碑级设计稿命名风格一致；
   即路线图中提到的 `p0_infra_design.md` 在新约定下的落点）。
 - **阶段索引**：每个阶段目录含 `README.md`，列出本阶段里程碑文档清单与状态。
 
 > 此约定是对路线图 §六 中 `doc/pN_xxx_design.md` 扁平命名的细化（改为分阶段子目录），
-> 不改变其语义。落工程时，README / ROADMAP 中对 `doc/p0_infra_design.md` 的引用是否
-> 同步更新路径，由 owner 在 M7 收敛时统一处理，本里程碑不擅改这两份文件。
+> 不改变其语义。
+>
+> **P0M7 收敛已落地**：README / ROADMAP 中对 `doc/p0_infra_design.md` 的引用已统一改为
+> `doc/P0/P0M7_convergence_design.md`，P1 / P2 字面同步改为 `doc/P1/README.md` /
+> `doc/P2/README.md`（详见 [P0M7_convergence_design.md](P0M7_convergence_design.md) §8.5）。

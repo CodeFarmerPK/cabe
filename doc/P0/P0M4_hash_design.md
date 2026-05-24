@@ -12,7 +12,7 @@
 | 项 | 值 |
 |---|---|
 | 阶段 / 里程碑 | P0 / M4 |
-| 状态 | **完成稿（核心决策已终审）** —— xxhash 引入方式已定为**内嵌 single-header**（§3 决策-1） |
+| 状态 | **✅ 已锁定（P0M7 收敛）** |
 | 上游依赖 | M1（构建骨架、`cabe_util`）、M2（`DataView`=`span<const std::byte>`、`DeviceId`） |
 | 下游依赖本里程碑 | M5（hash 单测：已知向量 + 分布）、P2/P7（`device = hash%N` 路由）、P11（多 device 负载均衡测量） |
 | 关联架构决策 | D6（路由 hash = xxh3，v2.0 前**冻结**）、D7（`device_idx = hash(key) % N`）、D14（CRC32C 管完整性，xxh3 仅路由） |

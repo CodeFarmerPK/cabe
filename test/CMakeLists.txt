@@ -1,6 +1,7 @@
 # P0-M5：单元测试。GTest 系统库优先，未命中则 FetchContent 钉死 tag 兜底。
 # 设计依据：doc/P0/P0M5_test_bench_design.md §4
-find_package(GTest QUIET)
+# P0M7 评审 #13：加版本下限 1.14（与 FetchContent 钉死的 v1.15.2 保持下行兼容）。
+find_package(GTest 1.14 QUIET)
 if(NOT GTest_FOUND)
     include(FetchContent)
     FetchContent_Declare(googletest

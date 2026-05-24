@@ -32,7 +32,10 @@ if [[ "${ID:-}" != "fedora" ]]; then
     echo "Error: Cabe only supports Fedora. Detected: ${ID:-unknown} ${VERSION_ID:-?}" >&2
     exit 1
 fi
-if (( ${VERSION_ID:-0} < 43 )); then
+# P0M7 评审 #14：VERSION_ID 含小数点（如 "38.1"）会让 bash 算术展开 syntax error；
+# 用 %%.* 剥到 major 整数再比较。
+_major="${VERSION_ID%%.*}"
+if (( ${_major:-0} < 43 )); then
     echo "Error: Cabe requires Fedora 43+. Detected: Fedora $VERSION_ID" >&2
     exit 1
 fi
@@ -87,42 +90,50 @@ if [[ "$CI_MODE" == "false" ]]; then
 fi
 
 # ---------- P4 io_uring runtime checks ----------
-echo ""
-echo ">>> Verifying io_uring runtime prerequisites (P4)..."
+# P0M7 评审 #15：--ci 模式跳过 io_uring runtime 检查
+#   理由：CI 容器内 sysctl / RLIMIT 可能受限或不可用；io_uring 直到 P4 才真接入；
+#   liburing-devel 已在 REQUIRED_PKGS 内装好，pkg-config 版本检查也仅在本地开发时必要。
+if [[ "$CI_MODE" == "false" ]]; then
+    echo ""
+    echo ">>> Verifying io_uring runtime prerequisites (P4)..."
 
-# 1. liburing version (CMake will require >= 2.9, see doc/p4_io_uring_design.md D12)
-if ! pkg-config --atleast-version=2.9 liburing; then
-    echo "Error: liburing >= 2.9 required for P4 io_uring backend (found: $(pkg-config --modversion liburing 2>/dev/null || echo missing))" >&2
-    exit 1
-fi
-echo "    liburing: $(pkg-config --modversion liburing)"
+    # 1. liburing version (CMake will require >= 2.9, see doc/p4_io_uring_design.md D12)
+    if ! pkg-config --atleast-version=2.9 liburing; then
+        echo "Error: liburing >= 2.9 required for P4 io_uring backend (found: $(pkg-config --modversion liburing 2>/dev/null || echo missing))" >&2
+        exit 1
+    fi
+    echo "    liburing: $(pkg-config --modversion liburing)"
 
-# 2. kernel io_uring not disabled by sysctl (Linux 6.6+)
-if [[ -r /proc/sys/kernel/io_uring_disabled ]]; then
-    case "$(cat /proc/sys/kernel/io_uring_disabled)" in
-        0) echo "    io_uring: enabled" ;;
-        1) echo "    io_uring: restricted (CAP_SYS_ADMIN required); P4 tests must run as root or capability-granted user" ;;
-        2) echo "Error: io_uring disabled by sysctl (kernel.io_uring_disabled=2). Run: sudo sysctl -w kernel.io_uring_disabled=0" >&2; exit 1 ;;
-        *) echo "    io_uring: unknown disabled state, assuming enabled" ;;
-    esac
-else
-    echo "    io_uring: sysctl absent (kernel < 6.6), assumed enabled"
-fi
+    # 2. kernel io_uring not disabled by sysctl (Linux 6.6+)
+    if [[ -r /proc/sys/kernel/io_uring_disabled ]]; then
+        case "$(cat /proc/sys/kernel/io_uring_disabled)" in
+            0) echo "    io_uring: enabled" ;;
+            1) echo "    io_uring: restricted (CAP_SYS_ADMIN required); P4 tests must run as root or capability-granted user" ;;
+            2) echo "Error: io_uring disabled by sysctl (kernel.io_uring_disabled=2). Run: sudo sysctl -w kernel.io_uring_disabled=0" >&2; exit 1 ;;
+            *) echo "    io_uring: unknown disabled state, assuming enabled" ;;
+        esac
+    else
+        echo "    io_uring: sysctl absent (kernel < 6.6), assumed enabled"
+    fi
 
-# 3. RLIMIT_MEMLOCK advisory (P4 register_buffers pins pool memory; D15)
-MEMLOCK=$(ulimit -l)
-if [[ "$MEMLOCK" == "unlimited" ]]; then
-    echo "    RLIMIT_MEMLOCK: unlimited"
-elif (( MEMLOCK < 16384 )); then
-    cat >&2 <<EOF
+    # 3. RLIMIT_MEMLOCK advisory (P4 register_buffers pins pool memory; D15)
+    MEMLOCK=$(ulimit -l)
+    if [[ "$MEMLOCK" == "unlimited" ]]; then
+        echo "    RLIMIT_MEMLOCK: unlimited"
+    elif (( MEMLOCK < 16384 )); then
+        cat >&2 <<EOF
 Warning: ulimit -l = ${MEMLOCK} KB is below P4 io_uring needs.
   register_buffers pins ~16 MiB for default buffer_pool_count=16.
   Recommended:
     ulimit -l unlimited                   # current shell
     LimitMEMLOCK=infinity                 # systemd unit
 EOF
+    else
+        echo "    RLIMIT_MEMLOCK: ${MEMLOCK} KB (sufficient for default pool of 16)"
+    fi
 else
-    echo "    RLIMIT_MEMLOCK: ${MEMLOCK} KB (sufficient for default pool of 16)"
+    echo ""
+    echo ">>> CI mode: skipping io_uring runtime checks (P0M7 评审 #15)"
 fi
 
 echo ""
