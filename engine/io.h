@@ -1,7 +1,7 @@
 #ifndef CABE_IO_H
 #define CABE_IO_H
 
-#include "engine/status.h"
+#include "common/error_code.h"
 #include "common/structs.h"
 
 #include <cstddef>
@@ -9,8 +9,10 @@
 
 namespace cabe {
 
-    Status WriteBlock(int fd, std::uint64_t block_idx, const std::byte* buf);
-    Status ReadBlock(int fd, std::uint64_t block_idx, std::byte* buf);
+    // 内部函数——返回 int32_t 错误码（不是 Status）。
+    // 调用方（Engine）在公开方法体内转 Status::Error(rc)。
+    int32_t WriteBlock(int fd, std::uint64_t block_idx, const std::byte* buf);
+    int32_t ReadBlock(int fd, std::uint64_t block_idx, std::byte* buf);
 
 } // namespace cabe
 

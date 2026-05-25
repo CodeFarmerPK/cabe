@@ -46,3 +46,12 @@ gtest_discover_tests(test_buffer_pool DISCOVERY_TIMEOUT 60)
 add_executable(test_io engine/io_test.cpp)
 target_link_libraries(test_io PRIVATE cabe::engine GTest::gtest_main)
 gtest_discover_tests(test_io DISCOVERY_TIMEOUT 60)
+
+# P1M3：FreeList + MetaIndex 测试
+add_executable(test_free_list engine/free_list_test.cpp)
+target_link_libraries(test_free_list PRIVATE cabe::engine GTest::gtest_main)
+gtest_discover_tests(test_free_list DISCOVERY_TIMEOUT 60)
+
+add_executable(test_meta_index engine/meta_index_test.cpp)
+target_link_libraries(test_meta_index PRIVATE cabe::engine GTest::gtest_main)
+gtest_discover_tests(test_meta_index DISCOVERY_TIMEOUT 60)

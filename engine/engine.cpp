@@ -2,6 +2,8 @@
 #include "common/logger.h"
 
 #include <fcntl.h>
+#include <linux/fs.h>    // BLKGETSIZE64
+#include <sys/ioctl.h>
 #include <unistd.h>
 
 namespace cabe {
@@ -28,9 +30,33 @@ namespace cabe {
                 devices_.clear();
                 return Status::Error(err::kIoBase);
             }
+            // 查询设备大小 → 计算可用块数（尾部不足 kValueSize 丢弃）
+            std::uint64_t dev_bytes = 0;
+            if (::ioctl(fd, BLKGETSIZE64, &dev_bytes) < 0) {
+                CABE_LOG_ERROR("ioctl BLKGETSIZE64 失败: fd=%d", fd);
+                ::close(fd);
+                for (auto& d : devices_) {
+                    if (d.fd >= 0) ::close(d.fd);
+                }
+                devices_.clear();
+                return Status::Error(err::kIoBase);
+            }
+            std::uint64_t block_count = dev_bytes / kValueSize;
+            if (block_count == 0) {
+                CABE_LOG_ERROR("设备太小: %llu 字节 < 1 MiB",
+                               static_cast<unsigned long long>(dev_bytes));
+                ::close(fd);
+                for (auto& d : devices_) {
+                    if (d.fd >= 0) ::close(d.fd);
+                }
+                devices_.clear();
+                return Status::Error(err::kEngineInvalidOpts);
+            }
+
             DeviceContext dc;
             dc.fd = fd;
             dc.pool = BufferPool(kDefaultPoolBlocks);
+            dc.free_list.Init(0, block_count);  // device_id = 0（P1 单设备）
             devices_.push_back(std::move(dc));
         }
 
@@ -75,5 +101,10 @@ namespace cabe {
     }
 
     bool Engine::is_open() const noexcept { return opened_; }
+
+    std::size_t Engine::RouteKey(std::string_view key) const noexcept {
+        (void)key;
+        return 0;
+    }
 
 } // namespace cabe

@@ -31,6 +31,8 @@ namespace cabe {
         bool is_open() const noexcept;
 
     private:
+        std::size_t RouteKey(std::string_view key) const noexcept;
+
         bool opened_ = false;
         std::vector<DeviceContext> devices_;
     };

@@ -4,6 +4,8 @@ add_library(cabe_engine STATIC
     engine.cpp
     buffer_pool.cpp
     io.cpp
+    free_list.cpp
+    meta_index.cpp
 )
 target_link_libraries(cabe_engine PUBLIC cabe_util)
 add_library(cabe::engine ALIAS cabe_engine)

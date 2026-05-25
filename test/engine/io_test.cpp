@@ -44,16 +44,16 @@ TEST_F(IoTest, WriteReadRoundTrip) {
     ASSERT_NE(wbuf, nullptr);
     std::memset(wbuf, 0xAB, cabe::kValueSize);
 
-    auto ws = cabe::WriteBlock(fd_, 0, wbuf);
-    EXPECT_TRUE(ws.ok()) << "WriteBlock 失败: code=" << ws.code;
+    int32_t rc = cabe::WriteBlock(fd_, 0, wbuf);
+    EXPECT_EQ(rc, cabe::err::kSuccess) << "WriteBlock 失败: rc=" << rc;
     pool_.Free(wbuf);
 
     auto* rbuf = pool_.Allocate();
     ASSERT_NE(rbuf, nullptr);
     std::memset(rbuf, 0, cabe::kValueSize);
 
-    auto rs = cabe::ReadBlock(fd_, 0, rbuf);
-    EXPECT_TRUE(rs.ok()) << "ReadBlock 失败: code=" << rs.code;
+    rc = cabe::ReadBlock(fd_, 0, rbuf);
+    EXPECT_EQ(rc, cabe::err::kSuccess) << "ReadBlock 失败: rc=" << rc;
 
     EXPECT_EQ(std::memcmp(wbuf, rbuf, cabe::kValueSize), 0)
         << "写入和读回的数据不一致";
@@ -65,14 +65,14 @@ TEST_F(IoTest, WriteReadMultipleBlocks) {
         auto* wbuf = pool_.Allocate();
         ASSERT_NE(wbuf, nullptr);
         std::memset(wbuf, static_cast<int>(0x10 + i), cabe::kValueSize);
-        EXPECT_TRUE(cabe::WriteBlock(fd_, i, wbuf).ok());
+        EXPECT_EQ(cabe::WriteBlock(fd_, i, wbuf), cabe::err::kSuccess);
         pool_.Free(wbuf);
     }
 
     for (std::uint64_t i = 0; i < 4; ++i) {
         auto* rbuf = pool_.Allocate();
         ASSERT_NE(rbuf, nullptr);
-        EXPECT_TRUE(cabe::ReadBlock(fd_, i, rbuf).ok());
+        EXPECT_EQ(cabe::ReadBlock(fd_, i, rbuf), cabe::err::kSuccess);
         EXPECT_EQ(static_cast<unsigned char>(rbuf[0]), 0x10 + i)
             << "block " << i << " 数据不一致";
         pool_.Free(rbuf);
@@ -84,8 +84,9 @@ TEST_F(IoTest, ReadUnwrittenBlock) {
     ASSERT_NE(rbuf, nullptr);
     std::memset(rbuf, 0xFF, cabe::kValueSize);
 
-    auto rs = cabe::ReadBlock(fd_, 9999, rbuf);
-    EXPECT_TRUE(rs.ok());
+    // 读一个在设备范围内但从未写过的块（WriteReadMultipleBlocks 只写了 0-3）
+    int32_t rc = cabe::ReadBlock(fd_, 50, rbuf);
+    EXPECT_EQ(rc, cabe::err::kSuccess);
 
     bool all_zero = true;
     for (std::size_t j = 0; j < cabe::kValueSize; ++j) {

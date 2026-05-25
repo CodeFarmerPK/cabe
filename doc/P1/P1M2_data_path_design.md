@@ -232,20 +232,18 @@ BufferPool::BufferPool(BufferPool&& other) noexcept
 #ifndef CABE_IO_H
 #define CABE_IO_H
 
-#include "engine/status.h"
+#include "common/error_code.h"
 #include "common/structs.h"
 
 #include <cstddef>
+#include <cstdint>
 
 namespace cabe {
 
-    // 写一整块 kValueSize 数据到 fd 的 block_idx 位置。
-    // buf 必须按 kPageSize 对齐（由 BufferPool 保证）。
-    Status WriteBlock(int fd, std::uint64_t block_idx, const std::byte* buf);
-
-    // 从 fd 的 block_idx 位置读一整块 kValueSize 数据到 buf。
-    // buf 必须按 kPageSize 对齐（由 BufferPool 保证）。
-    Status ReadBlock(int fd, std::uint64_t block_idx, std::byte* buf);
+    // 内部函数——返回 int32_t 错误码（不是 Status）。
+    // 调用方（Engine）在公开方法体内转 Status::Error(rc)。
+    int32_t WriteBlock(int fd, std::uint64_t block_idx, const std::byte* buf);
+    int32_t ReadBlock(int fd, std::uint64_t block_idx, std::byte* buf);
 
 } // namespace cabe
 
@@ -263,32 +261,33 @@ namespace cabe {
 
 namespace cabe {
 
-    Status WriteBlock(int fd, std::uint64_t block_idx, const std::byte* buf) {
-        const off_t offset = static_cast<off_t>(block_idx * kValueSize);
+    int32_t WriteBlock(int fd, std::uint64_t block_idx, const std::byte* buf) {
+        const auto offset = static_cast<off_t>(block_idx * kValueSize);
         ssize_t written = ::pwrite(fd, buf, kValueSize, offset);
         if (written != static_cast<ssize_t>(kValueSize)) {
             CABE_LOG_ERROR("pwrite 失败: fd=%d block_idx=%llu written=%zd",
                            fd, static_cast<unsigned long long>(block_idx), written);
-            return Status::Error(err::kIoBase);
+            return err::kIoBase;
         }
-        return Status::Ok();
+        return err::kSuccess;
     }
 
-    Status ReadBlock(int fd, std::uint64_t block_idx, std::byte* buf) {
-        const off_t offset = static_cast<off_t>(block_idx * kValueSize);
+    int32_t ReadBlock(int fd, std::uint64_t block_idx, std::byte* buf) {
+        const auto offset = static_cast<off_t>(block_idx * kValueSize);
         ssize_t nread = ::pread(fd, buf, kValueSize, offset);
         if (nread != static_cast<ssize_t>(kValueSize)) {
             CABE_LOG_ERROR("pread 失败: fd=%d block_idx=%llu nread=%zd",
                            fd, static_cast<unsigned long long>(block_idx), nread);
-            return Status::Error(err::kIoBase);
+            return err::kIoBase;
         }
-        return Status::Ok();
+        return err::kSuccess;
     }
 
 } // namespace cabe
 ```
 
 **设计要点**：
+- **返回 `int32_t` 错误码**（按返回值分层约定：内部组件不用 `Status`；调用方 Engine 在公开方法里转 `Status::Error(rc)`）。
 - 每次读写恰好 `kValueSize`（1 MiB）——不做 short read / short write 重试（O_DIRECT 对块设备
   / loop 设备不会 short write；如果真的 short → 硬件或文件系统级故障，返回错误码）。
 - `offset = block_idx × kValueSize`——与 `BlockId::byte_offset()` 一致。
