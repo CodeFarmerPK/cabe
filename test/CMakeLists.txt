@@ -28,3 +28,12 @@ cabe_add_test(test_util         util/util_test.cpp)
 cabe_add_test(test_cpu_features util/cpu_features_test.cpp)
 cabe_add_test(test_structs      common/structs_test.cpp)
 cabe_add_test(test_error_code   common/error_code_test.cpp)
+
+# P1M1：Engine 测试（链接 cabe::engine，不走 cabe_add_test 的默认链接列表）
+add_executable(test_engine engine/engine_test.cpp)
+target_link_libraries(test_engine PRIVATE cabe::engine GTest::gtest_main)
+gtest_discover_tests(test_engine DISCOVERY_TIMEOUT 60)
+
+add_executable(test_status engine/status_test.cpp)
+target_link_libraries(test_status PRIVATE cabe::engine GTest::gtest_main)
+gtest_discover_tests(test_status DISCOVERY_TIMEOUT 60)

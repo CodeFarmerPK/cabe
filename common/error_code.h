@@ -39,6 +39,15 @@ namespace cabe::err {
     // 每个码不得越段（编译期）
     static_assert(kMemInsertFail > kMemoryBase - kSegmentSize);
 
-    // io / index / wal / engine / wal_recovery 段的具体码随各模块产生时补入。
+    // ---- engine 段（P1M1 新增）----
+    inline constexpr int kEngineAlreadyOpen    = InSeg(kEngineBase, 0);  // -104000
+    inline constexpr int kEngineNotOpen        = InSeg(kEngineBase, 1);  // -104001
+    inline constexpr int kEngineInvalidOpts    = InSeg(kEngineBase, 2);  // -104002
+    inline constexpr int kEngineInvalidValue   = InSeg(kEngineBase, 3);  // -104003
+    inline constexpr int kEngineNotImplemented = InSeg(kEngineBase, 4);  // -104004
+
+    static_assert(kEngineNotImplemented > kEngineBase - kSegmentSize);
+
+    // io / index / wal / wal_recovery 段的具体码随各模块产生时补入。
 } // namespace cabe::err
 #endif // CABE_ERROR_CODE_H

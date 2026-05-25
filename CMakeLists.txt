@@ -121,6 +121,7 @@ endif()
 enable_testing()                     # 便宜，提前就绪；具体 test 目标 M5 再加
 add_subdirectory(common)
 add_subdirectory(util)
+add_subdirectory(engine)             # P1M1：引擎骨架
 # test/ bench/ 推迟到 M5（设计 §3 偏差-2）；EXISTS 守卫使 M1/M5 无需回改本文件。
 if(CABE_BUILD_TESTS AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/test/CMakeLists.txt")
     add_subdirectory(test)
