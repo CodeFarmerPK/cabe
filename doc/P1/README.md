@@ -5,7 +5,7 @@
 
 ## 状态
 
-🚧 **已启动**（P0M7 收敛通过；里程碑划分 P1-D1 已锁定）
+✅ **已实施**（P1M5 收敛通过）
 
 ## 范围摘要（出自 ROADMAP）
 
@@ -26,11 +26,11 @@
 
 | 里程碑 | 主题 | 设计稿 | 状态 | 承接的技术决策 |
 |---|---|---|---|---|
-| M1 | 引擎骨架 + 公开类型 | `P1M1_engine_skeleton_design.md` | 待设计 | #1 公开 API 暴露面 / #2 Engine 移动拷贝语义 / #3 错误传播 + Status 类型 / #4 DeviceContext 形态 |
-| M2 | 数据通路基础设施 | `P1M2_data_path_design.md` | 待设计 | #5 对齐策略 / #6 O_DIRECT 协作边界 / + 测试环境 |
-| M3 | 索引与空间管理 | `P1M3_index_freelist_design.md` | 待设计 | #7 key 拥有权 / #8 RouteKey 占位 |
-| M4 | Put / Get / Delete 端到端 | `P1M4_e2e_design.md` | 待设计 | — |
-| M5 | 微基准基线 + P1 收敛 | `P1M5_convergence_design.md` | 待设计 | — |
+| M1 | 引擎骨架 + 公开类型 | `P1M1_engine_skeleton_design.md` | ✅ 已锁定（P1M5 收敛） | #1 公开 API 暴露面 / #2 Engine 移动拷贝语义 / #3 错误传播 + Status 类型 / #4 DeviceContext 形态 |
+| M2 | 数据通路基础设施 | `P1M2_data_path_design.md` | ✅ 已锁定（P1M5 收敛） | #5 对齐策略 / #6 O_DIRECT 协作边界 / + 测试环境 |
+| M3 | 索引与空间管理 | `P1M3_index_freelist_design.md` | ✅ 已锁定（P1M5 收敛） | #7 key 拥有权 / #8 RouteKey 占位 |
+| M4 | Put / Get / Delete 端到端 | `P1M4_e2e_design.md` | ✅ 已锁定（P1M5 收敛） | — |
+| M5 | 微基准基线 + P1 收敛 | `P1M5_convergence_design.md` | ✅ 已锁定（P1M5 收敛） | — |
 
 > 里程碑划分由 P1-D1 决策梳理锁定（方案 A，5 个里程碑、严格串行）。
 

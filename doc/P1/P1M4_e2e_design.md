@@ -14,7 +14,7 @@
 | 项 | 值 |
 |---|---|
 | 阶段 / 里程碑 | P1 / M4 |
-| 状态 | **完成稿（待 owner 终审）** |
+| 状态 | **✅ 已锁定（P1M5 收敛）**
 | 上游依赖 | P1M1（Engine 骨架）、P1M2（BufferPool + I/O）、P1M3（FreeList + MetaIndex + RouteKey） |
 | 下游依赖本里程碑 | P1M5（微基准基线 + P1 收敛） |
 | 关联约束 | 返回值分层约定（公开 API 用 Status，内部用 int32_t）；Delete 标记删除 + 立即回收（不含 TRIM） |

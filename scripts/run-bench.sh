@@ -120,13 +120,20 @@ run_one() {
         if ! cmake --build "$build_dir" >&2; then
             RESULTS+=("${compiler}|FAIL(build)|${build_dir}"); return
         fi
-        for b in bench_crc32 bench_hash; do
-            if ! "$build_dir/bench/$b" \
+        # 自动发现所有 bench_* 可执行（P1M5：新增 bench 不用改脚本）
+        shopt -s nullglob
+        local -a bins=("$build_dir"/bench/bench_*)
+        shopt -u nullglob
+        for bin in "${bins[@]}"; do
+            [[ -x "$bin" ]] || continue
+            local bname
+            bname=$(basename "$bin")
+            if ! "$bin" \
                     --benchmark_repetitions=5 \
                     --benchmark_report_aggregates_only=true \
                     --benchmark_format=json \
-                    --benchmark_out="$build_dir/$b.json" >&2; then
-                RESULTS+=("${compiler}|FAIL($b)|${build_dir}"); return
+                    --benchmark_out="$build_dir/$bname.json" >&2; then
+                RESULTS+=("${compiler}|FAIL($bname)|${build_dir}"); return
             fi
         done
         RESULTS+=("${compiler}|OK|${build_dir}")
@@ -147,14 +154,21 @@ run_one() {
         printf '%sFAIL (build)%s\n' "$C_RED" "$C_RST" >&2; _dump_log
         RESULTS+=("${compiler}|FAIL(build)|${build_dir}"); return
     fi
-    for b in bench_crc32 bench_hash; do
-        if ! "$build_dir/bench/$b" \
+    # 自动发现所有 bench_* 可执行
+    shopt -s nullglob
+    local -a bins=("$build_dir"/bench/bench_*)
+    shopt -u nullglob
+    for bin in "${bins[@]}"; do
+        [[ -x "$bin" ]] || continue
+        local bname
+        bname=$(basename "$bin")
+        if ! "$bin" \
                 --benchmark_repetitions=5 \
                 --benchmark_report_aggregates_only=true \
                 --benchmark_format=json \
-                --benchmark_out="$build_dir/$b.json" >>"$log" 2>&1; then
-            printf '%sFAIL (%s)%s\n' "$C_RED" "$b" "$C_RST" >&2; _dump_log
-            RESULTS+=("${compiler}|FAIL($b)|${build_dir}"); return
+                --benchmark_out="$build_dir/$bname.json" >>"$log" 2>&1; then
+            printf '%sFAIL (%s)%s\n' "$C_RED" "$bname" "$C_RST" >&2; _dump_log
+            RESULTS+=("${compiler}|FAIL($bname)|${build_dir}"); return
         fi
     done
     printf '%sOK%s\n' "$C_GREEN" "$C_RST" >&2
@@ -214,7 +228,7 @@ if [[ -n "$BASELINE_FILE" ]]; then
     grep -q sse4_2 /proc/cpuinfo && has_sse42="true"
     cpu_features=$(jq -n --argjson sse "$has_sse42" '[if $sse then "sse4.2" else empty end]')
 
-    # 收集各工具链的 results
+    # 收集各工具链的 results（自动发现所有 bench_*.json）
     results_json='{}'
     for c in "${RUN_COMPILERS[@]}"; do
         case "$c" in
@@ -222,18 +236,21 @@ if [[ -n "$BASELINE_FILE" ]]; then
             clang++) compiler_short=clang ;;
         esac
         build_dir="$ROOT/build-bench/${compiler_short}-release"
-        crc32_json="$build_dir/bench_crc32.json"
-        hash_json="$build_dir/bench_hash.json"
-        if [[ ! -s "$crc32_json" || ! -s "$hash_json" ]]; then
-            echo "Warning: $c 的 bench JSON 不存在，跳过" >&2
+
+        shopt -s nullglob
+        local -a json_files=("$build_dir"/bench_*.json)
+        shopt -u nullglob
+        if (( ${#json_files[@]} == 0 )); then
+            echo "Warning: $c 无 bench JSON 文件，跳过" >&2
             continue
         fi
-        # 取 aggregate_name == "median" 的项，name 规范化为 "bench_<lower>/<arg>"
+
+        # 合并所有 bench_*.json 的 benchmarks 数组，取 median 聚合
         compiler_results=$(jq -s '
-            (.[0].benchmarks + .[1].benchmarks)
+            [.[].benchmarks[]]
             | map(select(.run_type == "aggregate" and .aggregate_name == "median"))
             | map({
-                key: ("bench_" + (.name | sub("_median$"; "") | sub("^BM_"; "") | ascii_downcase)),
+                key: ("bench_" + (.name | sub("_median$"; "") | sub("^BM_"; "") | sub("^EngineBench/BM_"; "engine/BM_") | ascii_downcase)),
                 value: {
                     items_per_second: (.items_per_second // null),
                     bytes_per_second: (.bytes_per_second // null),
@@ -241,7 +258,7 @@ if [[ -n "$BASELINE_FILE" ]]; then
                 }
             })
             | from_entries
-        ' "$crc32_json" "$hash_json") || { echo "Error: jq 解析 $c 失败" >&2; exit 1; }
+        ' "${json_files[@]}") || { echo "Error: jq 解析 $c 失败" >&2; exit 1; }
         results_json=$(echo "$results_json" | jq --arg c "$c" --argjson r "$compiler_results" '. + {($c): $r}')
     done
 

@@ -13,7 +13,7 @@
 | 项 | 值 |
 |---|---|
 | 阶段 / 里程碑 | P1 / M3 |
-| 状态 | **完成稿（待 owner 终审）** —— 四项决策经决策梳理拍板（见 §3） |
+| 状态 | **✅ 已锁定（P1M5 收敛）**
 | 上游依赖 | P1M1（Engine 骨架 + Status / Options）、P1M2（BufferPool + I/O + O_DIRECT） |
 | 下游依赖本里程碑 | P1M4（Put / Get / Delete 端到端打通——串联 FreeList + MetaIndex + BufferPool + I/O） |
 | 关联约束 | ROADMAP P1 范围；返回值分层约定（公开 API 用 Status，内部用 int32_t） |

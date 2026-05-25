@@ -31,7 +31,7 @@ Cabe 是一个面向单机部署的 KV 存储引擎:
 | 阶段 | 内容 | 版本目标 | 状态 |
 |---|---|---|---|
 | P0 | 基础设施 | — | ✅ 完成 |
-| P1 | 单线程核心 | v0.x | ⏳ 待启动 |
+| P1 | 单线程核心 | v0.x | ✅ 完成 |
 | P2 | API 冻结 + Forward-compat PoC | v0.x | ⏳ |
 | P3 | IoBackend + MetaIndex 抽象 | v0.x | ⏳ |
 | P4 | io_uring 后端 | v0.x | ⏳ |

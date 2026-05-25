@@ -13,7 +13,7 @@
 | 项 | 值 |
 |---|---|
 | 阶段 / 里程碑 | P1 / M1 |
-| 状态 | **完成稿（待 owner 终审）** —— 五项决策经决策梳理拍板（见 §3） |
+| 状态 | **✅ 已锁定（P1M5 收敛）**
 | 上游依赖 | P0 全部完成（`common/structs.h` / `error_code.h` / `logger.h` / `util/*`） |
 | 下游依赖本里程碑 | P1M2（BufferPool + 朴素 I/O）、P1M3（FreeList + MetaIndex）、P1M4（端到端路径） |
 | 关联约束 | ROADMAP P1 范围；ROADMAP P2 段（Options / Status / Engine 在 P2 冻结） |

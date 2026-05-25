@@ -13,7 +13,7 @@
 | 项 | 值 |
 |---|---|
 | 阶段 / 里程碑 | P1 / M2 |
-| 状态 | **完成稿（待 owner 终审）** —— 五项决策经决策梳理拍板（见 §3） |
+| 状态 | **✅ 已锁定（P1M5 收敛）**
 | 上游依赖 | P1M1（Engine 骨架 + Options / Status / DeviceContext 就位） |
 | 下游依赖本里程碑 | P1M3（FreeList + MetaIndex）、P1M4（Put / Get / Delete 端到端） |
 | 关联约束 | ROADMAP P1 范围"朴素 I/O + 朴素 BufferPool"；D24（零拷贝 P8 起） |

@@ -19,3 +19,7 @@ target_link_libraries(bench_crc32 PRIVATE cabe::util cabe::common benchmark::ben
 
 add_executable(bench_hash util/hash_bench.cpp)
 target_link_libraries(bench_hash  PRIVATE cabe::util cabe::common benchmark::benchmark_main)
+
+# P1M5：Engine 微基准（Put / Get / Delete 吞吐）
+add_executable(bench_engine engine/engine_bench.cpp)
+target_link_libraries(bench_engine PRIVATE cabe::engine benchmark::benchmark_main)
