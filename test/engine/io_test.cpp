@@ -79,19 +79,5 @@ TEST_F(IoTest, WriteReadMultipleBlocks) {
     }
 }
 
-TEST_F(IoTest, ReadUnwrittenBlock) {
-    auto* rbuf = pool_.Allocate();
-    ASSERT_NE(rbuf, nullptr);
-    std::memset(rbuf, 0xFF, cabe::kValueSize);
-
-    // 读一个在设备范围内但从未写过的块（WriteReadMultipleBlocks 只写了 0-3）
-    int32_t rc = cabe::ReadBlock(fd_, 50, rbuf);
-    EXPECT_EQ(rc, cabe::err::kSuccess);
-
-    bool all_zero = true;
-    for (std::size_t j = 0; j < cabe::kValueSize; ++j) {
-        if (rbuf[j] != std::byte{0}) { all_zero = false; break; }
-    }
-    EXPECT_TRUE(all_zero) << "未写过的块应全零（块设备特性）";
-    pool_.Free(rbuf);
-}
+// ReadUnwrittenBlock 已移除——该用例验证的是操作系统 / 块设备特性（稀疏文件未写区域全零），
+// 不是 cabe 逻辑；且与 PutUntilFull 等端到端测试共享设备导致干扰（ctest 不保证执行顺序）。

@@ -46,9 +46,11 @@ namespace cabe::err {
     inline constexpr int kEngineInvalidValue   = InSeg(kEngineBase, 3);  // -104003
     inline constexpr int kEngineNotImplemented = InSeg(kEngineBase, 4);  // -104004
 
-    inline constexpr int kEngineNoSpace        = InSeg(kEngineBase, 5);  // -104005
+    inline constexpr int kEngineNoSpace         = InSeg(kEngineBase, 5);  // -104005
+    inline constexpr int kEnginePoolExhausted   = InSeg(kEngineBase, 6);  // -104006
+    inline constexpr int kEngineDataCorrupted   = InSeg(kEngineBase, 7);  // -104007
 
-    static_assert(kEngineNoSpace > kEngineBase - kSegmentSize);
+    static_assert(kEngineDataCorrupted > kEngineBase - kSegmentSize);
 
     // ---- index 段（P1M3 新增）----
     inline constexpr int kIndexKeyNotFound     = InSeg(kIndexBase, 0);  // -102000
