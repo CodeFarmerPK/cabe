@@ -1,12 +1,12 @@
-# Cabe P0-M6 设计：本地测试脚本与内存检测器组合矩阵
+# Cabe P0-M6 设计：本地测试脚本与内存检测器
 
-> 本里程碑交付 cabe 的**本地测试基础设施**：`scripts/run-tests.sh`（八格内存检测器
-> 与 Release 组合矩阵，2 工具链 × 4 档）、`scripts/run-coverage.sh`（覆盖率报告，需 `gcovr`），
+> 本里程碑交付 cabe 的**本地测试基础设施**：`scripts/run-tests.sh`（单次调用跑一个检测器
+> 配置，四档：ASAN / TSAN / UBSAN / Release）、`scripts/run-coverage.sh`（覆盖率报告，需 `gcovr`），
 > 并把缺失的 `gcovr` 顺手补到 `setup-dev.sh`。
 >
 > **重要范围调整**：本里程碑**不接持续集成（CI）工作流**——cabe 目前是实验性 demo、仓库
 > 托管尚未确定（owner 拍板）。ROADMAP M6 字面包含的 "CI 工作流"被推迟，对应的退出条件
-> "CI 矩阵全绿"改写为"本地四档 × 双工具链全绿"。
+> "CI 矩阵全绿"改写为"本地四档全绿"（单次调用逐档验证）。
 >
 > **本文为详细设计**；其中脚本片段为设计示意。
 
@@ -21,7 +21,7 @@
 | 上游依赖 | M1（`CABE_SANITIZER` 选项就位）、M5（`ctest` 用例集 + `CABE_COVERAGE` 插桩选项就位） |
 | 下游依赖本里程碑 | M7（设计稿收敛 + ROADMAP/README 状态同步）、P1+（业务模块复用同一套脚本） |
 | 关联约束 | ROADMAP P0/M6 字面范围；ROADMAP D 决策（P4 范围）：TSAN 与 `io_uring` 不兼容 |
-| 退出判定 | 本地四档 × 双工具链 = 8 格 `ctest` 全绿；`run-coverage.sh` 跑出 `util/*.cpp` 行覆盖率 ≥ 80% |
+| 退出判定 | 本地四档 `ctest` 全绿（单次调用逐档验证）；`run-coverage.sh` 跑出 `util/*.cpp` 行覆盖率 ≥ 80% |
 
 ---
 
@@ -29,13 +29,13 @@
 
 ### 1.1 目标
 
-1. 把 `CABE_SANITIZER`（M1 已实装）与 `CABE_BUILD_TESTS`/`CABE_COVERAGE`（M5 已实装）通过本地脚本串起来，让开发者一行命令跑完 `{GCC, Clang} × {ASAN, TSAN, UBSAN, Release}` 八格组合矩阵。
+1. 把 `CABE_SANITIZER`（M1 已实装）与 `CABE_BUILD_TESTS`/`CABE_COVERAGE`（M5 已实装）通过本地脚本串起来，让开发者单次调用跑一个检测器配置（`--asan` / `--tsan` / `--ubsan` / `--release`），多格验证通过多次调用组合完成。
 2. 提供独立的覆盖率脚本，跑出 `util/*.cpp` 与 `common/*.h` 的行覆盖率报告。
 3. 把覆盖率工具 `gcovr` 加入 `setup-dev.sh` 的必装清单（M5 review 识别的遗留）。
 
 ### 1.2 交付范围（本里程碑产出）
 
-1. **`scripts/run-tests.sh`**：测试组合矩阵脚本（八格，详见 §4）
+1. **`scripts/run-tests.sh`**：单次调用测试脚本（四档检测器配置，详见 §4）
 2. **`scripts/run-coverage.sh`**：覆盖率报告脚本（独立，详见 §5）
 3. **`scripts/setup-dev.sh`**：在 `REQUIRED_PKGS` 加 `gcovr`（§6）
 
@@ -45,20 +45,20 @@
 |---|---|---|
 | **持续集成（CI）工作流** | **不接，待仓库托管确定后单独立项**（不在 P0 路线图剩余里程碑内） | cabe 是实验性 demo，仓库托管未定；owner 拍板砍 CI（见 §3 D-1） |
 | `scripts/run-bench.sh`（微基准脚本） | **不在 M6 讨论**，未来独立交付（与 M7 微基准基线归档配套） | owner 明确"分脚本风格"，bench 用独立脚本；M6 聚焦测试与覆盖率 |
-| `run-tests.sh` 的 `--backend=` 参数 + "TSAN + `io_uring`"组合阻断 | **P4** | M6 阶段 `io_uring` 后端尚未接入；阻断逻辑无实际作用对象，仅文档预告（见 §7） |
-| `CMakePresets.json` | **不做（未来可选）** | 本里程碑用脚本即可达成"一行命令跑完矩阵" |
+| `io_uring` / `spdk` 后端实际接入 | **P3+（后端接入）/ P4（io_uring 实装）** | `--backend=` 参数与 TSAN + io_uring 前置拒绝已在脚本层预留；后端实际接入在 P3+（见 §7） |
+| `CMakePresets.json` | **不做（未来可选）** | 本里程碑用脚本即可达成单次调用测试 |
 | `make coverage` CMake custom target | **不做** | 用独立脚本（`run-coverage.sh`）替代；保持"脚本风格"统一 |
 
 ---
 
 ## 2. 现状盘点（读码结论）
 
-- **`CABE_SANITIZER` 编译开关已就位**（M1，与 ROADMAP 字面 "M6 才实装"的偏差已通过 M1-D1 锁定）。当前可用 `-DCABE_SANITIZER={none|address|thread|undefined}` 直接构建带检测器的库；M6 只剩"用脚本串起多组合"。
+- **`CABE_SANITIZER` 编译开关已就位**（M1，与 ROADMAP 字面 "M6 才实装"的偏差已通过 M1-D1 锁定）。当前可用 `-DCABE_SANITIZER={none|address|thread|undefined}` 直接构建带检测器的库；M6 只剩"用脚本封装单次调用"。
 - **`CABE_BUILD_TESTS=ON` + `ctest` 用例就位**（M5）。20 个测试，双工具链全绿。
 - **`CABE_COVERAGE=ON` 插桩就位**（M5）。GCC 加 `--coverage`、Clang 加 `-fprofile-instr-generate -fcoverage-mapping`；M5 已验 `util/*.cpp` 行覆盖率 ≈ 98%（`crc32.cpp 95.83%` / `cpu_features.cpp 100%` / `hash.cpp 100%`），用裸 `gcov` 算出。
 - **`scripts/setup-dev.sh` 已装**：GCC 15 / Clang 21 / `libasan` / `libtsan` / `libubsan` / `cmake` / `ninja-build` / `gtest-devel` / `gmock-devel` / `google-benchmark-devel` / `liburing-devel`。
 - **未装**：`gcovr`（M5 review 识别的遗留，G1 决策本里程碑补）。
-- **工作区无 `build-tests/`**（脚本第一次跑会创建）；`.gitignore` 由 owner 自管。
+- **工作区无 `build*/` 构建目录**（脚本第一次跑会创建）；`.gitignore` 由 owner 自管。
 
 ---
 
@@ -68,13 +68,13 @@
 
 | # | 决策 | 备选 | 理由 | 状态 |
 |---|---|---|---|---|
-| **M6-D1** | **不接持续集成（CI）工作流**；M6 只交付本地脚本 + 矩阵 | GitHub Actions / GitLab CI / 自托管 | cabe 是实验性 demo，仓库托管未定；接 CI 是浪费 | 锁定（owner 决定） |
-| **M6-D2** | 本地矩阵 **2 工具链 × 4 档 = 8 格全跑**（`--all` 默认） | 单工具链 4 档 / 精简档 / 可选切换 | 贴近 ROADMAP 矩阵原意；本地构建+`ctest` 快（M5 实测 0.05s），8 格也才几十秒 | 锁定 |
-| **M6-D3** | `run-tests.sh` 接口：`--asan/--tsan/--ubsan/--release/--all` + `--compiler=` + 失败汇总表 + 退出码、默认精简 / `-v` 全量 | 单档参数 / 不带 `--compiler=` / 别的汇总形式 | ROADMAP 字面 + 调试时按工具链单跑的实际需要 | 锁定 |
-| **M6-D4** | `build-tests/` 放**源码树内**；`<工具链>-<档>` 子目录；**跑什么清什么**（不动其他格）；跑完**不清理** | 放 `/tmp`、根目录全清、跑完清理 | 跨调用残留逻辑连续（"脚本只对自己跑的格子负责"）；owner 偏好 | 锁定 |
+| **M6-D1** | **不接持续集成（CI）工作流**；M6 只交付本地测试脚本 | GitHub Actions / GitLab CI / 自托管 | cabe 是实验性 demo，仓库托管未定；接 CI 是浪费 | 锁定（owner 决定） |
+| **M6-D2** | 本地四档检测器配置，**单次调用跑一个配置**；多格验证通过多次调用组合（如 `run-tests.sh --asan && run-tests.sh --tsan && ...`） | 一次全跑 / 矩阵脚本 | 日常开发只需单格调用 + 增量构建；全跑需求用多次调用组合即可 | 锁定 |
+| **M6-D3** | `run-tests.sh` 接口：`--release/--debug`（默认 Debug）、`--asan/--tsan/--ubsan`（检测器互斥）、`--backend=NAME`（P3+ 生效）、`--clean`、`--filter REGEX`、`--jobs N`、`-h/--help`；退出码 0/1/2 | 矩阵全跑 + 汇总表 / 带 `--compiler=` / `-v` 冗余模式 | 单次调用更贴合日常开发：用例过滤、增量构建、单格快速反馈 | 锁定 |
+| **M6-D4** | `build<后缀>/` 放**源码树内**（如 `build/`、`build-asan/`、`build-io_uring-asan/`）；默认增量构建，`--clean` 清理重建 | 放 `/tmp`、根目录全清、每次全清重建 | 增量构建日常更快；`--clean` 保证干净重建的退路；owner 偏好 | 锁定 |
 | **M6-D5** | `run-tests.sh` 与 `run-coverage.sh` **分脚本**；`run-bench.sh` 独立（不在 M6 讨论） | 单脚本带 `--coverage` / `--bench` 档 | 一脚本干一件事；覆盖率插桩与检测器同开会污染报告，分脚本更干净 | 锁定 |
 | **M6-D6** | `run-coverage.sh` **默认仅打印** 覆盖率数值 + 着色提示；`--strict` 才以 <80% 退出码 1 硬卡 | 永远硬卡 / 永远只打印 | 本地开发者每天跑、被硬卡到烦；保留 `--strict` 让正式场合（如未来若接 CI）可用 | 锁定 |
-| **M6-D7** | TSAN + `io_uring` 组合的阻断逻辑：**M6 仅文档预告，代码不动**；P4 接 `io_uring` 时由 `run-tests.sh` 增强 + CMake 加 `FATAL_ERROR` | 现在全留 / 完全不预告 | M6 阶段 `io_uring` 尚未接入，引入 `--backend=` 等参数无意义 | 锁定 |
+| **M6-D7** | TSAN + `io_uring` 组合的阻断逻辑：`--backend=` 参数已预留，脚本层前置拒绝已实现；P4 接 `io_uring` 时由 CMake 层同步加 `FATAL_ERROR` | 完全不预留 / 完全不阻断 | 提前预留减少 P4 接入时的改动量 | 锁定 |
 | **M6-D8** | M6 顺手把 `gcovr` 加入 `setup-dev.sh` 的 `REQUIRED_PKGS` | 仅在 `run-coverage.sh` 自检报错、等 M7 收敛 | `run-coverage.sh` 必须依赖 `gcovr`；不补则脚本一启动就停 | 锁定（**M6 破"不动 setup-dev"边界一次** — 因这事直接关系 M6 自己脚本能不能跑） |
 
 ---
@@ -86,78 +86,74 @@
 ```
 用法: scripts/run-tests.sh [选项]
 
-档选项（互斥）:
-  --asan            只跑 ASAN 档
-  --tsan            只跑 TSAN 档
-  --ubsan           只跑 UBSAN 档
-  --release         只跑 Release 档
-  --all             跑全部四档（默认）
+构建类型:
+  --release         Release 构建
+  --debug           Debug 构建（默认）
 
-工具链选项:
-  --compiler=NAME   只在指定工具链上跑（g++ / clang++ / all，默认 all）
+检测器（互斥，最多选一个）:
+  --asan            开启 AddressSanitizer
+  --tsan            开启 ThreadSanitizer
+  --ubsan           开启 UndefinedBehaviorSanitizer
 
-冗余度:
-  -v, --verbose     输出每格完整日志（CMake configure + 构建 + ctest）
-                    默认精简：每格一行 PASS/FAIL，失败时自动 dump
-                    `ctest --output-on-failure` 到 stderr
+后端:
+  --backend=NAME    指定 I/O 后端（sync / io_uring / spdk，P3+ 生效）
+
+构建控制:
+  --clean           清理对应构建目录后重建（默认增量构建）
+  --jobs N          并行构建线程数（传给 cmake --build -j）
+
+用例过滤:
+  --filter REGEX    只跑匹配 REGEX 的用例（传给 ctest --tests-regex）
 
 其他:
   -h, --help        输出本用法
 
 退出码:
-  0  全格 PASS
-  1  任一格 FAIL
+  0  全 PASS
+  1  FAIL（任一步骤失败，set -e 直接退出）
+  2  参数错误
 ```
 
 ### 4.2 行为细节
 
-**每格的构建命令**（伪代码）：
+**单次调用模型**：每次调用只跑一个配置（一个构建类型 + 至多一个检测器）。开启 `set -e`，任一步骤（configure / build / ctest）失败立即退出，退出码 1。
+
+**构建命令**（伪代码）：
 ```bash
-cmake -S "$ROOT" -B "build-tests/${compiler_short}-${flavor}" -G Ninja \
-      -DCMAKE_CXX_COMPILER="$compiler" \
+cmake -S "$ROOT" -B "build${suffix}" -G Ninja \
+      -DCMAKE_BUILD_TYPE="${build_type}" \
       -DCABE_BUILD_TESTS=ON \
-      ${sanitizer_flag}   # 例如 -DCABE_SANITIZER=address；release 档不加
+      ${sanitizer_flag}   # 例如 -DCABE_SANITIZER=address；无检测器时不加
+cmake --build "build${suffix}" -j "${jobs}"
+ctest --test-dir "build${suffix}" ${filter_flag}
 ```
-- `compiler_short`：从 `g++` / `clang++` 推导为 `gcc` / `clang`
-- `flavor`：`asan` / `tsan` / `ubsan` / `release`
+- `suffix` 由检测器和后端组合决定：
+  - 无检测器、无后端 → 空（构建目录 `build/`）
+  - `--asan` → `-asan`（构建目录 `build-asan/`）
+  - `--backend=io_uring --asan` → `-io_uring-asan`（构建目录 `build-io_uring-asan/`）
 - `sanitizer_flag` 映射：
-  - `asan` → `-DCABE_SANITIZER=address`
-  - `tsan` → `-DCABE_SANITIZER=thread`
-  - `ubsan` → `-DCABE_SANITIZER=undefined`
-  - `release` → 不传（保持默认 `none`）；并显式 `-DCMAKE_BUILD_TYPE=Release`
+  - `--asan` → `-DCABE_SANITIZER=address`
+  - `--tsan` → `-DCABE_SANITIZER=thread`
+  - `--ubsan` → `-DCABE_SANITIZER=undefined`
+  - 无检测器 → 不传（保持默认 `none`）
+
+**检测器运行时选项自动设置**：脚本根据所选检测器自动 export 对应环境变量（`ASAN_OPTIONS` / `TSAN_OPTIONS` / `UBSAN_OPTIONS`），无需用户手动配置。
 
 **build 目录策略（M6-D4）**：
-- 根目录 `${ROOT}/build-tests/`（**源码树内**）
-- 8 个子目录：`gcc-asan` / `gcc-tsan` / `gcc-ubsan` / `gcc-release` / `clang-asan` / `clang-tsan` / `clang-ubsan` / `clang-release`
-- **每次跑前**：`rm -rf` 本次要跑的子目录，再 `mkdir` 重建（保证 configure 干净）
-- **不清理其他格**：脚本只对自己这次跑的格子负责（不动用户上次跑后留在那里的别的格子）
-- **跑完不清理**：失败的格子留在源码树供调试，成功的格子也留着（下一次跑那一档时再被清空重建）
-- **提醒**：`.gitignore` 由 owner 自管；落地后请加 `/build-tests/`（以及未来 `/build-bench/`）
+- 构建目录直接在源码树根目录下：`build/`、`build-asan/`、`build-tsan/`、`build-ubsan/`、`build-io_uring-asan/` 等
+- **默认增量构建**：不清理已有的构建产物，cmake 增量 configure + build
+- **`--clean`**：先 `rm -rf` 对应构建目录再从头重建（保证干净状态）
+- **提醒**：`.gitignore` 由 owner 自管；落地后请加 `/build*/`
 
-**配置与构建失败的处理**：
-- `cmake configure` 失败 → 该格记 FAIL，跳到下一格（不 `set -e`）
-- `cmake --build` 失败 → 该格记 FAIL，跳过 `ctest`
-- `ctest` 失败 → 该格记 FAIL，dump `--output-on-failure` 到 stderr
+**前置拒绝**：TSAN + io_uring 组合前置拒绝（P4 D19 预留），脚本检测到 `--tsan` 与 `--backend=io_uring` 同时传入时直接报错退出（退出码 2）。
 
-### 4.3 失败汇总输出
-
-脚本末尾打印汇总（无论全过还是有失败）：
-
+**多格验证方式**：通过多次调用组合完成，例如：
+```bash
+scripts/run-tests.sh --asan && \
+scripts/run-tests.sh --tsan && \
+scripts/run-tests.sh --ubsan && \
+scripts/run-tests.sh --release
 ```
-==== 汇总 ====
-g++     ASAN     : PASS
-g++     TSAN     : PASS
-g++     UBSAN    : PASS
-g++     Release  : PASS
-clang++ ASAN     : FAIL   build 目录: /home/cabe/build-tests/clang-asan
-clang++ TSAN     : PASS
-clang++ UBSAN    : PASS
-clang++ Release  : PASS
---------------
-1 / 8 失败
-```
-
-退出码：`0` 全 PASS / `1` 任一 FAIL。
 
 ---
 
@@ -182,15 +178,15 @@ clang++ Release  : PASS
    - `--compiler=clang++`：自检 `llvm-cov` + `llvm-profdata`，缺失则 `exit 3` + 提示 `sudo dnf install llvm`。**`llvm` 刻意未加入 `setup-dev.sh` 的 `REQUIRED_PKGS`**：M6 默认覆盖率工具链是 g++（已覆盖 §10 DoD），clang 路径属于可选；用户主动选 clang 时按自检提示装即可（保持 §6 "破 setup-dev 边界仅 `gcovr` 一次"精神）。
 2. **配置 + 构建 + 跑测试**（单格）：
    ```bash
-   cmake -S "$ROOT" -B "build-tests/${compiler_short}-coverage" -G Ninja \
+   cmake -S "$ROOT" -B "build-coverage" -G Ninja \
          -DCMAKE_CXX_COMPILER="$compiler" \
          -DCABE_BUILD_TESTS=ON \
          -DCABE_COVERAGE=ON
-   cmake --build "build-tests/${compiler_short}-coverage"
-   ctest --test-dir "build-tests/${compiler_short}-coverage"
+   cmake --build "build-coverage"
+   ctest --test-dir "build-coverage"
    ```
-   - build 目录复用 `build-tests/` 根，独立子目录 `gcc-coverage` / `clang-coverage`，不与 `run-tests.sh` 的 8 格冲突
-   - 与 `run-tests.sh` 的 D4 策略一致：每次跑前清空对应子目录、跑完不清理
+   - 构建目录 `build-coverage/`，与 `run-tests.sh` 的 `build*/` 目录不冲突
+   - 与 `run-tests.sh` 的 D4 策略一致：默认增量构建、`--clean` 可选清理重建
 3. **解析报告**：
    - GCC：`gcovr -r "$ROOT" --filter '<root>/util/' --filter '<root>/common/' --exclude '.*_test\.cpp' "$build_dir"`
    - Clang：`llvm-cov report` + 过滤 `util/` `common/`
@@ -258,15 +254,11 @@ REQUIRED_PKGS=(
 
 **M6 阶段**：`io_uring` 后端尚未接入（P4 才接），`run-tests.sh --tsan` 实际跑的是 sync 后端（`CABE_IO_BACKEND` 默认 `sync`），**不会真触发不兼容**。
 
-**本里程碑处理**：仅做**文档预告**，代码不动——
+**本里程碑处理**：`--backend=NAME` 参数已预留（P3+ 生效），TSAN + io_uring 前置拒绝逻辑已在脚本层实现（P4 D19 预留）——
 
-- 本设计稿（即本节）记录"P4 接入 `io_uring` 时需要的脚本/CMake 改造"。
-- `run-tests.sh` 头部注释加一行：
-  ```bash
-  # 注：当前 M6 阶段 io_uring 后端尚未接入（P4 才接）；
-  # P4 起本脚本需补 --backend= 参数，并阻断 TSAN + io_uring 组合（与 CMake 层 FATAL_ERROR 配合）。
-  ```
-- **不**预先引入 `--backend=` 参数（当前无实际后端可切，徒增混淆）。
+- `run-tests.sh` 接受 `--backend=sync/io_uring/spdk`，当前阶段 io_uring / spdk 后端尚未接入，参数仅做预留。
+- 脚本检测到 `--tsan` 与 `--backend=io_uring` 同时传入时直接报错退出（退出码 2）。
+- P4 接入 io_uring 时由 CMake 层同步加 `FATAL_ERROR` 阻断。
 
 ---
 
@@ -275,10 +267,10 @@ REQUIRED_PKGS=(
 | ROADMAP M6 / D 决策 | 本设计 | 状态 |
 |---|---|---|
 | CMake `CABE_SANITIZER` 选项实装 | M1 已完成（M1-D1） | ✅ |
-| `scripts/run-tests.sh`：`--asan/--tsan/--ubsan/--release/--all`，带失败汇总 | §4 | ✅ |
-| 本地四档矩阵跑通 | §4 + 双工具链（M6-D2） | ✅ |
+| `scripts/run-tests.sh`：单次调用 `--asan/--tsan/--ubsan/--release`，`set -e` 失败即退出 | §4 | ✅ |
+| 本地四档检测器配置跑通 | §4（单次调用，多格通过多次调用组合验证） | ✅ |
 | **持续集成（CI）工作流（GitHub Actions 或同等）** | **推迟、不接** | ⚠️ **与 ROADMAP 字面有出入**（M6-D1，owner 锁定；M7 收敛时同步更新 ROADMAP P0 状态） |
-| ROADMAP 退出："本地四档全绿 + CI 矩阵全绿" | 改写为"本地四档 × 双工具链全绿"（§10） | ⚠️ 同上 |
+| ROADMAP 退出："本地四档全绿 + CI 矩阵全绿" | 改写为"本地四档全绿"（§10） | ⚠️ 同上 |
 | ROADMAP D（P4 范围）：TSAN 与 `io_uring` 不兼容 | §7 文档预告（M6-D7） | ✅ |
 | M5 未做：`gcovr` 加入 `setup-dev.sh` | §6（M6-D8） | ✅ |
 
@@ -288,23 +280,25 @@ REQUIRED_PKGS=(
 
 | 风险 | 说明 | 缓解 |
 |---|---|---|
-| `build-tests/` 在源码树内污染 `git status` | 8 个子目录跑完留在那里，`git status` 显示一片 `??` | `.gitignore` 加 `/build-tests/`（owner 自管；§4.2 提醒） |
-| 跨调用残留累积（M6-D4 选 Y 的代价） | 先跑 `--asan` 再 `--tsan`，残留 4 格在源码树内 | 跑 `--all` 会重建全 8 格，相当于"重置"；或手动 `rm -rf build-tests/` |
+| `build*/` 在源码树内污染 `git status` | 多次调用不同配置后会留下多个 `build-asan/`、`build-tsan/` 等目录 | `.gitignore` 加 `/build*/`（owner 自管；§4.2 提醒） |
+| 增量构建残留（M6-D4 默认增量的代价） | CMake cache 与实际选项不匹配时可能产生混乱 | `--clean` 清理重建；日常正常使用不会出现 |
 | `gcovr` 与 `setup-dev` 包管理 | Fedora 包名假设 `gcovr` 存在 | Fedora 43 仓库标配；若包名变动（极少见）M7 时再调 |
-| 不接 CI 的中长期风险 | 本地 8 格全绿不等于"任何环境全绿" | 仓库托管确定后单独立项接 CI（不属 P0 范围）；本地脚本作为 CI 基础未来可直接复用 |
-| 双工具链 8 格本地耗时 | M5 实测 `ctest` 0.05s + 构建几秒；8 格总耗时几十秒，可接受 | 未来 cabe 代码规模上升后可加 `--jobs=N` 并行；M6 不预实装 |
+| 不接 CI 的中长期风险 | 本地四档全绿不等于"任何环境全绿" | 仓库托管确定后单独立项接 CI（不属 P0 范围）；本地脚本作为 CI 基础未来可直接复用 |
+| 四档逐一调用的用户体验 | 不再一键全跑，需多次调用组合 | 可编写简单 wrapper 或在 Makefile 里加 `test-all` 目标；`--jobs N` 已支持加速单次构建 |
 | `--strict` 默认关 → 覆盖率漂移可能被忽略 | 开发者不主动 `--strict` 跑就不会被卡 | 文档强调"M7 收敛时手动跑一次 `--strict` 确认 ≥80%" |
 
 ---
 
 ## 10. 退出条件（DoD）与验证步骤
 
-1. **`scripts/run-tests.sh --all`** 在工作区双工具链下 **8 / 8 PASS**，退出码 0。
-2. **`scripts/run-tests.sh --asan --compiler=g++`** 只跑 `gcc-asan` 一格，PASS，退出码 0；`build-tests/gcc-asan/` 保留。
-3. **`scripts/run-coverage.sh`** 跑出 `util` + `common` 行覆盖率报告，**≥ 80%**（M5 已验 util ≈98%，common 待此脚本汇总验证）；`--strict` 在当前条件下退出码 0。
-4. **`scripts/setup-dev.sh`**（本地干净环境）能装上 `gcovr`；`command -v gcovr` 找到。
-5. **失败汇总与 build 目录路径**：人为破坏某文件（例如改 `crc32_test.cpp` 让一个测试失败），`run-tests.sh --asan` 输出含 `FAIL ... build 目录: /home/cabe/build-tests/gcc-asan`；恢复后 PASS。
-6. **`-v` / `-h`** 行为符合 §4.1。
+1. **四档逐一调用全绿**：`scripts/run-tests.sh --asan && scripts/run-tests.sh --tsan && scripts/run-tests.sh --ubsan && scripts/run-tests.sh --release`，四次调用均退出码 0。
+2. **单次调用 + 用例过滤**：`scripts/run-tests.sh --asan --filter CRC32` 只跑匹配用例，PASS，退出码 0；`build-asan/` 保留。
+3. **`--clean` 清理重建**：`scripts/run-tests.sh --asan --clean` 先清理 `build-asan/` 再从头构建，PASS。
+4. **`scripts/run-coverage.sh`** 跑出 `util` + `common` 行覆盖率报告，**≥ 80%**（M5 已验 util ≈98%，common 待此脚本汇总验证）；`--strict` 在当前条件下退出码 0。
+5. **`scripts/setup-dev.sh`**（本地干净环境）能装上 `gcovr`；`command -v gcovr` 找到。
+6. **失败即退出（`set -e`）**：人为破坏某文件（例如改 `crc32_test.cpp` 让一个测试失败），`run-tests.sh --asan` 立即退出，退出码 1。
+7. **参数错误**：传入无效参数（如同时 `--asan --tsan`），退出码 2。
+8. **`-h`** 行为符合 §4.1。
 
 > 本里程碑**不含**持续集成验证（M6-D1 不接 CI）。
 
@@ -314,7 +308,8 @@ REQUIRED_PKGS=(
 
 | 里程碑 / 阶段 | M6 提供的接入点 |
 |---|---|
-| **M7** | 设计稿收敛时同步更新：① ROADMAP P0/M6 的"CI 工作流"字面改为"推迟、待仓库托管确定"；② P0 退出条件中"CI 矩阵全绿"改为"本地 8 格全绿 + `run-coverage.sh --strict` 通过"；③ README 依赖列表（若有 `gcovr` 相关条目）同步。`bench/baselines/p0_utilities.json` 归档时复用 `build-tests/` 的同名风格（`build-bench/` 已被 owner 预留） |
-| **P1+ 业务模块** | 复用 `scripts/run-tests.sh`：新模块加测试到 `test/<module>/` 即被 `--all` 矩阵自动覆盖（前提是按 P0M5 的 `cabe_add_test` 模式注册） |
-| **P4（`io_uring` 接入）** | 按 §7 文档预告改造 `run-tests.sh`：加 `--backend={sync,io_uring,spdk}` 参数；脚本层阻断 `--tsan` 与 `--backend=io_uring` 组合；CMake 层同步加 `FATAL_ERROR` 阻断 |
-| **未来接 CI**（不在 P0 路线图） | `run-tests.sh` 与 `run-coverage.sh --strict` 可直接在 CI 容器（Fedora 43 + `setup-dev.sh --ci`）中调用，无需重写 |
+| **M7** | 设计稿收敛时同步更新：① ROADMAP P0/M6 的"CI 工作流"字面改为"推迟、待仓库托管确定"；② P0 退出条件中"CI 矩阵全绿"改为"本地四档全绿 + `run-coverage.sh --strict` 通过"；③ README 依赖列表（若有 `gcovr` 相关条目）同步。`bench/baselines/p0_utilities.json` 归档时复用 `build*/` 的同名风格（`build-bench/` 已被 owner 预留） |
+| **P1+ 业务模块** | 复用 `scripts/run-tests.sh`：新模块加测试到 `test/<module>/` 即被单次调用自动覆盖（前提是按 P0M5 的 `cabe_add_test` 模式注册）；`--filter REGEX` 可精确选跑新模块用例 |
+| **P4（`io_uring` 接入）** | `--backend=` 参数已预留（P3+ 生效）；脚本层已预留 TSAN + io_uring 前置拒绝（P4 D19）；P4 接入时由 CMake 层同步加 `FATAL_ERROR` 阻断 |
+| **未来接 CI**（不在 P0 路线图） | `run-tests.sh` 与 `run-coverage.sh --strict` 可直接在 CI 容器（Fedora 43 + `setup-dev.sh --ci`）中调用，无需重写；多格验证用多次调用组合即可 |
+

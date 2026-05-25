@@ -19,16 +19,19 @@ namespace cabe {
         if (opts.devices.size() > 1) return Status::Error(err::kEngineInvalidOpts);
 
         for (const auto& cfg : opts.devices) {
-            int fd = ::open(cfg.path.c_str(), O_RDWR | O_CREAT, 0600);
+            int fd = ::open(cfg.path.c_str(), O_RDWR | O_DIRECT, 0);
             if (fd < 0) {
-                CABE_LOG_ERROR("open(\"%s\") 失败: fd=%d", cfg.path.c_str(), fd);
+                CABE_LOG_ERROR("open(\"%s\") O_DIRECT 失败: fd=%d", cfg.path.c_str(), fd);
                 for (auto& dc : devices_) {
                     if (dc.fd >= 0) ::close(dc.fd);
                 }
                 devices_.clear();
                 return Status::Error(err::kIoBase);
             }
-            devices_.push_back(DeviceContext{fd});
+            DeviceContext dc;
+            dc.fd = fd;
+            dc.pool = BufferPool(kDefaultPoolBlocks);
+            devices_.push_back(std::move(dc));
         }
 
         opened_ = true;

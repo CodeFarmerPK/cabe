@@ -37,3 +37,12 @@ gtest_discover_tests(test_engine DISCOVERY_TIMEOUT 60)
 add_executable(test_status engine/status_test.cpp)
 target_link_libraries(test_status PRIVATE cabe::engine GTest::gtest_main)
 gtest_discover_tests(test_status DISCOVERY_TIMEOUT 60)
+
+# P1M2：BufferPool + I/O 测试
+add_executable(test_buffer_pool engine/buffer_pool_test.cpp)
+target_link_libraries(test_buffer_pool PRIVATE cabe::engine GTest::gtest_main)
+gtest_discover_tests(test_buffer_pool DISCOVERY_TIMEOUT 60)
+
+add_executable(test_io engine/io_test.cpp)
+target_link_libraries(test_io PRIVATE cabe::engine GTest::gtest_main)
+gtest_discover_tests(test_io DISCOVERY_TIMEOUT 60)

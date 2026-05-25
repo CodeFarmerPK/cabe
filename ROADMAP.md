@@ -216,7 +216,7 @@ v0.x ─────────────────────────
 
 - **M6:本地组合矩阵 + 测试 / 覆盖率脚本**(详见 [doc/P0/P0M6_test_scripts_design.md](doc/P0/P0M6_test_scripts_design.md))
   - CMake `CABE_SANITIZER` 选项实装(`address` / `thread` / `undefined` / `none`) —— **已在 M1 提前完成(M1-D1 偏差)**
-  - `scripts/run-tests.sh`:`--asan` / `--tsan` / `--ubsan` / `--release` / `--all` / `--compiler=`,带失败汇总;本地 `{GCC, Clang} × {ASAN, TSAN, UBSAN, Release}` 八格矩阵
+  - `scripts/run-tests.sh`:单次调用 `--asan` / `--tsan` / `--ubsan` / `--release` + `--filter` / `--clean` / `--jobs` / `--backend=`(P4 预留);本地四档独立跑通
   - `scripts/run-coverage.sh`:`util` / `common` 行覆盖率报告(`gcovr` / `llvm-cov`),`--strict` 硬卡 ≥ 80%
   - `scripts/setup-dev.sh`:`REQUIRED_PKGS` 补 `gcovr`
   - **持续集成(CI)工作流推迟**:cabe 当前为实验性 demo、仓库托管未定;待托管确定后单独立项(不属 P0 路线图剩余里程碑)

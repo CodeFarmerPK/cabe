@@ -64,15 +64,15 @@
 | **P0 阶段厚整合稿（重写形态）** | **未来 v1.0 发布前** 单独立项 | M7-D2 锁定：薄索引形态足够 P0 出口；厚整合稿在 v1.0 发布前作为对外宣讲材料更合适 |
 | P1 / P2 各自里程碑划分与决策梳理 | **各阶段启动时** | M7 只放占位索引，不越界进 P1/P2 设计活；待 owner 触发 `/grill-with-docs P1` 时正式启动 |
 | 持续集成（CI）工作流 | **P0 之外单独立项**，待仓库托管确定 | M6-D1 已锁定，M7 仅做 ROADMAP / README 字面同步 |
-| `.gitignore` 维护（含 `/build-tests/` / `/build-bench/` 落入约定） | **owner 自管** | 临时区现行 `.gitignore` 的 `/build*/` 通配已覆盖；M7 不擅改 |
+| `.gitignore` 维护（含 `/build<后缀>/` / `/build-bench/` 落入约定） | **owner 自管** | 临时区现行 `.gitignore` 的 `/build*/` 通配已覆盖；M7 不擅改 |
 
 ---
 
 ## 2. 现状盘点（读码 + 读文档结论）
 
 - **M1–M6 全部完成并已工作区落盘**：骨架 / schema / 错误码 + 日志 / 路由 hash /
-  测试·微基准框架 / 本地组合矩阵与覆盖率脚本均已实装；最近一轮跑分 `run-tests.sh --all`
-  全 8 格通过，`run-coverage.sh --strict` 行覆盖率 98.4%（21 个测试用例，含评审修复后新增的
+  测试·微基准框架 / 本地组合矩阵与覆盖率脚本均已实装；最近一轮跑分 `run-tests.sh --asan && run-tests.sh --tsan && run-tests.sh --ubsan && run-tests.sh --release`
+  四档全过，`run-coverage.sh --strict` 行覆盖率 98.4%（21 个测试用例，含评审修复后新增的
   `ValueMeta.MemcpyRoundTrip` 与 `Hash.RouteInRange` 公式回归断言）。
 - **P0M6 评审残留 7 项 LOW**（#9–#15）：评审已核实，未在 M6 范围内修复，由本里程碑收口
   （M7-D4 已锁定）。
@@ -197,9 +197,9 @@
 
 ### 4.7 本地组合矩阵脚本（详 [P0M6_test_scripts_design.md](P0M6_test_scripts_design.md)）
 
-- **`scripts/run-tests.sh`**：2 工具链 × 4 档（asan / tsan / ubsan / release）= **8 格全跑**，
-  默认精简模式、`-v` 全量；失败时 dump 该格 log；构建目录 `build-tests/<工具链>-<档>/`，跑前清空、
-  跑完不清。
+- **`scripts/run-tests.sh`**：单次调用跑一个配置（`--asan` / `--tsan` / `--ubsan` / `--release` / `--debug`）；
+  支持 `--filter` / `--clean` / `--jobs` / `--backend=`；失败时 dump 该档 log；构建目录 `build<后缀>/`
+  （如 `build-asan/`）。**四档验证**：`run-tests.sh --asan && run-tests.sh --tsan && run-tests.sh --ubsan && run-tests.sh --release`。
 - **`scripts/run-coverage.sh`**：默认 GCC + gcovr 路径；`--compiler=clang++` 走 llvm-cov 路径
   （`llvm` 未列入 setup 必装清单，按需自装）；`--strict` 行覆盖率 <80% 时退出码 1。
 - **`scripts/setup-dev.sh`**：Fedora 43 包管理，REQUIRED_PKGS 含 `gcovr`（M6-D8）。
@@ -219,7 +219,7 @@
 | **CRC32C** | Castagnoli 多项式 CRC32，硬件路径 SSE4.2，软件 fallback 256 表 |
 | **XXH3** | 路由 hash 算法（64-bit），固定 seed 0 |
 | **路由 hash / 路由函数** | 按 key 选 device 的函数 `RouteToDevice` |
-| **本地组合矩阵 / 八格** | 2 工具链 × 4 档（asan / tsan / ubsan / release）= 8 个构建配置全跑 |
+| **本地组合矩阵 / 四档** | 单次调用跑一个配置（asan / tsan / ubsan / release），四档逐一验证 |
 | **检测器** | sanitizer 中译；具体三种以缩写形式出现（ASAN / TSAN / UBSAN）|
 | **微基准** | google-benchmark 框架跑出的单函数性能数 |
 | **行覆盖率** | gcov / llvm-cov 算出的"被执行行数 / 总可执行行数" |
@@ -382,7 +382,7 @@ clang++ RELEASE  : OK
 
 | 编号 | 文件 | 修改 | 验证 |
 |---|---|---|---|
-| **#9** | `util/crc32.cpp` line 105 | `detail::HardwareCRC32C_x86` 包装函数加 `[[gnu::target("sse4.2")]]` 属性，与内层一致 | 双工具链 `run-tests.sh --all` 8/8 PASS（不退步） |
+| **#9** | `util/crc32.cpp` line 105 | `detail::HardwareCRC32C_x86` 包装函数加 `[[gnu::target("sse4.2")]]` 属性，与内层一致 | `run-tests.sh --asan && ... --tsan && ... --ubsan && ... --release` 四档 PASS（不退步） |
 | **#10** | `scripts/run-coverage.sh` line 163 | `llvm-cov export` 的 JSON 解析改用 `jq -r '.data[0].totals.lines.percent'`；`run-coverage.sh` 自检段加 `jq` 依赖（缺失则提示 `sudo dnf install jq`） | `--compiler=clang++ --strict` 实际跑通（前提是手装 `llvm` + `jq`） |
 | **#11** | `scripts/run-coverage.sh` line 78 | `[[ ... ]] && ... \|\| ...` 三元改 if-then-else 显式分支 | `--compiler=g++ --strict` 仍 98.4% 通过；`bash -n` 通过 |
 | **#12** | `bench/CMakeLists.txt` | `bench_crc32` / `bench_hash` 各 `target_link_libraries` 显式加 `cabe::common` | `cmake -B build-bench -DCABE_BUILD_BENCH=ON && cmake --build build-bench` 通过 |
@@ -391,7 +391,7 @@ clang++ RELEASE  : OK
 | **#15** | `scripts/setup-dev.sh` line 89-126 | io_uring 段（pkg-config 版本检查 + sysctl 检查 + RLIMIT 检查）外层包 `if [[ "$CI_MODE" == "false" ]]`；`--ci` 模式跳过整段 | `bash -n` 通过；`--ci` 模式在无 `liburing-devel` 容器中不再 exit 1 |
 
 **回归验证**：修复全部落入后再跑一次：
-- `./scripts/run-tests.sh --all` — 期望 **8/8 PASS**（21 个测试用例不退步）
+- `./scripts/run-tests.sh --asan && ./scripts/run-tests.sh --tsan && ./scripts/run-tests.sh --ubsan && ./scripts/run-tests.sh --release` — 期望 **四档 PASS**（21 个测试用例不退步）
 - `./scripts/run-coverage.sh --strict` — 期望 **≥80%**（修复后用例数与覆盖率不变）
 - `./scripts/run-bench.sh` — 期望 **2/2 OK** + baseline 写入
 
@@ -553,7 +553,7 @@ grep 残留 `P0_infra_design.md` / `p0_infra_design.md` —— 全部改为 `P0M
    按 §5.1）+ `bench/baselines/p0_utilities.json` 按 §5.2 schema 落入（双工具链 × 6 用例 × 5 次中位数）。
 3. **评审残留全清**：#9–#15 共 7 项 LOW 修复全部落入。
 4. **回归实证**：
-   - `./scripts/run-tests.sh --all` —— **8/8 PASS**（评审修复不退步，21 个测试用例全过）
+   - `./scripts/run-tests.sh --asan && ./scripts/run-tests.sh --tsan && ./scripts/run-tests.sh --ubsan && ./scripts/run-tests.sh --release` —— **四档 PASS**（评审修复不退步，21 个测试用例全过）
    - `./scripts/run-coverage.sh --strict` —— 行覆盖率 **≥ 80%**（实测 98.4% 不退步）
    - `./scripts/run-bench.sh --baseline=bench/baselines/p0_utilities.json` —— **2/2 OK** +
      JSON 落地、`jq -e .` 校验通过
@@ -568,7 +568,7 @@ grep 残留 `P0_infra_design.md` / `p0_infra_design.md` —— 全部改为 `P0M
 
 ### 10.2 验证步骤（建议顺序）
 
-1. 临时区先全部落入 → 跑 `run-tests.sh --all` + `run-coverage.sh --strict` + `run-bench.sh --baseline=...`
+1. 临时区先全部落入 → 跑 `run-tests.sh --asan && run-tests.sh --tsan && run-tests.sh --ubsan && run-tests.sh --release` + `run-coverage.sh --strict` + `run-bench.sh --baseline=...`
 2. `jq -e . bench/baselines/p0_utilities.json` 校验 JSON 合法 + 字段齐全。
 3. `grep -rn "P0_infra_design\|p0_infra_design" /home/cabe-workspace --include='*.md'` 验残留为空
    （本设计稿历史背景段除外）。

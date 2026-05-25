@@ -85,7 +85,7 @@ P1M1 ──► P1M2 ──► P1M3 ──► P1M4 ──► P1M5
 > 详细退出条件在 P1M5 收敛稿（`P1M5_convergence_design.md`）中定稿。下列为阶段概要。
 
 1. GCC 15+ 与 Clang 20+ 双工具链 build 通过
-2. 八格本地 ctest 全绿（含 P1 新增的 engine 用例）
+2. ASAN / TSAN / UBSAN / Release 四档本地 ctest 全绿（含 P1 新增的 engine 用例；各档独立调用 `run-tests.sh --asan` / `--tsan` / `--ubsan` / `--release`）
 3. Put / Get / Delete 端到端路径完整跑通（单线程 / 文件或回环块设备 / 1 个 device）
 4. `value.size() != kValueSize` 拒绝路径有正式用例覆盖
 5. `bench/baselines/p1_single_thread.json` 归档（Put / Get / Delete 吞吐）

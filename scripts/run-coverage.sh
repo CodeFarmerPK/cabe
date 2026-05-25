@@ -118,10 +118,14 @@ case "$COMPILER" in
         echo "==== 覆盖率（g++ + gcovr）===="
         # --filter 限定 util/+common/；--exclude 把可能误入的 *_test.cpp 兜底排除
         # --print-summary 末尾追加 "lines: X% (a out of b)" 一行，便于解析
+        # --exclude logger.h：owner 已决策不测 logger（纯头宏最简实现）；P1+ engine.cpp
+        # include logger.h 后其 inline 函数的未覆盖分支会拉低整体覆盖率（Threshold 内
+        # 5 路 ieq 分支仅默认路径被走到）。排除它使覆盖率反映"有意义的被测代码"。
         report=$(gcovr -r "$ROOT" \
             --filter "${ROOT}/util/" \
             --filter "${ROOT}/common/" \
             --exclude '.*_test\.cpp' \
+            --exclude '.*logger\.h' \
             --print-summary \
             "$BUILD_DIR" 2>&1) || { echo "Error: gcovr 失败" >&2; echo "$report" >&2; exit 4; }
         echo "$report"
