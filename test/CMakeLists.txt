@@ -55,3 +55,8 @@ gtest_discover_tests(test_free_list DISCOVERY_TIMEOUT 60)
 add_executable(test_meta_index engine/meta_index_test.cpp)
 target_link_libraries(test_meta_index PRIVATE cabe::engine GTest::gtest_main)
 gtest_discover_tests(test_meta_index DISCOVERY_TIMEOUT 60)
+
+# P3M1：SyncIoBackend 测试
+add_executable(test_sync_io_backend io/sync_io_backend_test.cpp)
+target_link_libraries(test_sync_io_backend PRIVATE cabe::io cabe::engine GTest::gtest_main)
+gtest_discover_tests(test_sync_io_backend DISCOVERY_TIMEOUT 60)
