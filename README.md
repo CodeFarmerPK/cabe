@@ -28,22 +28,22 @@ Cabe 是一个面向单机部署的 KV 存储引擎:
 
 当前处于 **P0(基础设施)阶段**。完整路线见 [ROADMAP.md](ROADMAP.md)。
 
-| 阶段 | 内容 | 版本目标 | 状态 |
-|---|---|---|---|
-| P0 | 基础设施 | — | ✅ 完成 |
-| P1 | 单线程核心 | v0.x | ✅ 完成 |
-| P2 | API 冻结 + Forward-compat PoC | v0.x | ⏳ |
-| P3 | IoBackend + MetaIndex 抽象 | v0.x | ⏳ |
-| P4 | io_uring 后端 | v0.x | ⏳ |
-| P4.5 | FreeList 改造 | v0.x | ⏳ |
-| P5 | WAL + Recovery + Snapshot | v0.x | ⏳ |
-| P6 | Group Commit | v0.x | ⏳ |
-| **P7** | **Reactor + 无锁 MT + 多 device 端到端** | **v1.0** | ⏳ |
-| P8 | 零拷贝主路径 | v1.1 | ⏳ |
-| P9 | B+ 树索引(学习路径) | v1.2 | ⏳ |
-| P10 | SPDK 后端 | v1.3 | ⏳ |
-| P11 | 多 NVMe 规模化 | v1.4 | ⏳ |
-| P12 | 可观测性 + 运维工具 | v1.5 | ⏳ |
+| 阶段 | 内容 | 状态 |
+|---|---|---|
+| P0 | 基础设施 | ✅ 完成 |
+| P1 | 单线程核心 | ✅ 完成 |
+| P2 | API 冻结 + Forward-compat PoC | ⏳ |
+| P3 | IoBackend + MetaIndex 抽象 | ⏳ |
+| P4 | io_uring 后端 | ⏳ |
+| P4.5 | FreeList 改造 | ⏳ |
+| P5 | WAL + Recovery + Snapshot | ⏳ |
+| P6 | Group Commit | ⏳ |
+| P7 | Reactor + 无锁 MT + 多 device 端到端 | ⏳ |
+| P8 | 零拷贝主路径 | ⏳ |
+| P9 | B+ 树索引(学习路径) | ⏳ |
+| P10 | SPDK 后端 | ⏳ |
+| P11 | 多 NVMe 规模化 | ⏳ |
+| P12 | 可观测性 + 运维工具 | ⏳ |
 
 ## 设计原则
 

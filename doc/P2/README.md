@@ -1,63 +1,68 @@
-# P2 — 公开 API 契约冻结 + Forward-compat 论证 · 设计文档索引
+# P2 — 公开 API 冻结声明 · 设计文档索引
 
-> P2 阶段目标：把公开 API 冻结到 v1.0，通过 PoC 验证 API 形态能撑到 P11。
-> 阶段总览见根目录 [ROADMAP.md](../../ROADMAP.md) 第七节 "P2 — 公开 API 契约冻结 + Forward-compat 论证"。
+> P2 阶段目标：审查 P1 已实装的公开接口（Engine / Options / Status），确认能撑到项目完工，
+> 然后声明冻结意图（后续尽量不改；如果被迫要改，改了同步更新文档）。
+> 阶段总览见根目录 [ROADMAP.md](../../ROADMAP.md) "P2 — 公开 API 契约冻结"。
 
 ## 状态
 
-🚧 **未启动**（待 P1 阶段所有里程碑完成 + owner 确认）
+🚧 **已启动**（P1 全部完成；P2-D1 里程碑划分已锁定）
 
-## 范围摘要（出自 ROADMAP）
+## 范围摘要
 
-- **不实现并发安全**；明确"P2–P6 单线程访问，多线程语义在 P7"
-- **不引入 mutex / shared_mutex**
-- `Options` 形态最终化（含 `std::vector<DeviceContext> devices`、`reactors_per_device` 不暴露
-  按 D9 v1.0 硬编码 R=1、其他字段全部预留 reserved）
-- `Status` 错误码空间评估，确认可容纳 SPDK / WAL recovery / 多 device 故障
-- `Engine::Open` 幂等语义，Open / Close 状态机
-- Put API：`Status Put(string_view key, DataView value)` + 运行期 `value.size() != kValueSize` 拒绝
-- 零拷贝 API 在此定型（实现层 P8 落地，API 不变）
-- **声明**：P3 将引入 `IoBackend` 与 `MetaIndex` 抽象层
-- **Forward-compat PoC**（归档到 `doc/P2/`，具体稿名 P2 启动时按 P0 模式划分）：
-  1. sync API + lock-free reactor：4 线程并发到目标 QPS
-  2. 多 device hash 路由：2 个伪 device，验证 per-device MetaIndex 互不共享
-  3. 零拷贝 buffer ownership：`BufferHandle` 在 mmap / `io_uring` registered / SPDK pool
-     三种来源下接口一致
-  4. recovery 隔离：一个 device 索引重建失败，其他不受影响
-
-**ROADMAP 退出条件**：四 PoC 通过、API 符号清单审阅通过，**直到 P11 完成不允许破坏**。
+- 审查 P1 已实装的公开 API：`Engine::Open / Put / Get / Delete / Close` 签名、`Options` / `Status` 类型
+- 错误码空间评估：六段 × 1000 是否够后续阶段（WAL / io_uring / SPDK / 多 device）
+- 公开类型 ABI 承诺范围：结构体布局 / 枚举值 / 函数签名分别承诺到什么程度
+- API 承诺语义：Put 部分写 / Engine 析构 / Open 幂等等的行为承诺
+- 输出一份**公开 API 符号清单 + 冻结声明**文档
+- **不做 PoC**：reactor / 多 device / 零拷贝 / recovery 的验证推迟到各自功能实装后
 
 ## 里程碑文档清单
 
 | 里程碑 | 主题 | 设计稿 | 状态 |
 |---|---|---|---|
-| 待决策梳理划分 P2M1–Mn | — | — | — |
+| M1 | API 审查 + 冻结声明 | `P2M1_api_freeze_design.md` | 待设计 |
+| M2 | P2 收敛 | `P2M2_convergence_design.md` | 待设计 |
 
-里程碑划分待 P2 启动时由决策梳理过程确定。
+## 里程碑依赖
+
+```
+P2M1 ──► P2M2
+```
+
+串行：审查冻结 → 收敛。
 
 ## 启动条件
 
-1. P1 阶段所有里程碑完成 + 单元测试 / 微基准基线归档到 `bench/baselines/p1_single_thread.json`
-2. owner 确认 P2 启动
-3. 用 `/grill-with-docs P2` 开第一个里程碑的设计
+1. ✅ P1 全部完成（P1M5 收敛通过）
+2. ✅ P2-D1 里程碑划分锁定（2 个里程碑，无 PoC）
+3. ⏳ 用 `/grill-with-docs P2M1` 开第一个里程碑的文档设计
 
-## 已知决策点候选（为决策梳理过程提速）
+## 已知决策点（按里程碑分配）
 
-> 候选清单**仅作梳理参考**，不预判答案；P2 启动时仍要重新逐条识别 + 拷问。
+### P2M1 承接（API 审查 + 冻结声明）
 
-1. **API 版本号方案**：语义化（major.minor.patch）还是单调整数？版本号是否进 `Options` /
-   `Status` 字段还是仅文档承诺？
-2. **Forward-compat PoC 形态**：4 个 PoC 各自独立可执行，还是合并到一个 PoC 进程内多场景跑？
-   PoC 代码归档在 `bench/forward_compat/` 还是单独 `forward_compat/` 顶层目录？
-3. **错误码 ABI 冻结范围**：仅冻结已分配的码值 + 段位划分，还是连段内编号策略一起冻结？
-4. **公开类型的 ABI 兼容承诺**：结构体布局 / 枚举值 / 函数签名分别承诺到什么程度？
-   `Options` 的 reserved 字段如何在不破坏 ABI 的前提下未来扩展？
-5. **`Engine` 析构语义**：未调 `Close` 直接析构是 UB / 自动 Close / 抛异常？P1 决策反向波及到 P2 冻结。
-6. **`Put` 失败的部分写语义**：value 已开始写、刚好写一半 power loss 时的承诺（关系到 P5 WAL 设计）。
-   P2 仅冻结 API，但 API 的"承诺语义"已经隐含约束 P5 实现。
-7. **零拷贝 `BufferHandle` 接口形态**：值类型 vs 引用计数智能指针？所有权转移语义？
-8. **`Status` 是 `int` 错误码 + 文本，还是带类型层级的 struct**？P0 错误码仅是 `int`，
-   `Status` 类型在 P2 才出现。
+1. **API 版本号方案**：语义化（major.minor.patch）还是单调整数？版本号是否进 Options / Status 字段还是仅文档承诺？
+2. **错误码冻结范围**：仅冻结已分配的码值 + 段位划分，还是连段内编号策略一起冻结？
+3. **公开类型 ABI 承诺范围**：结构体布局 / 枚举值 / 函数签名分别承诺到什么程度？Options 的 reserved 字段如何扩展？
+4. **Engine 析构语义确认**：P1 已实装"未 Close 直接析构 → 自动 Close + 日志警告"——冻结确认还是调整？
+5. **Put 部分写语义**：value 写一半 power loss 时的承诺（关系到 P5 WAL 设计）。P2 冻结 API 承诺语义。
+6. **Status 类型确认**：P1 已实装薄包装 struct（`int code` + `ok()`）——冻结确认还是加字段？
+
+### 推迟到各自阶段
+
+| 决策 | 推迟到 | 原因 |
+|---|---|---|
+| Forward-compat PoC 形态 | 各自阶段 | reactor / 多 device / 零拷贝 / recovery 尚未实装 |
+| 零拷贝 BufferHandle 接口 | P8 | P8 实装时再定 |
+| 多 device PoC | P3+ | 多 device 路由在 P3 IoBackend 抽象后更合适 |
+
+## P2 退出条件概要
+
+1. 公开 API 符号清单文档输出（列清楚哪些类 / 方法 / 错误码是公开的）
+2. 冻结声明文档输出（承诺语义 + ABI 范围 + "尽量不改"的意图声明）
+3. 错误码空间评估通过（六段 × 1000 够用）
+4. P2M2 收敛稿审阅通过 + ROADMAP / README 状态同步
 
 ## 命名与目录约定
 
