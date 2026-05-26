@@ -68,14 +68,6 @@ cabe_validate_choice(CABE_SANITIZER  none address thread undefined)
 cabe_validate_choice(CABE_IO_BACKEND sync io_uring spdk)
 cabe_validate_choice(CABE_META_INDEX hashmap bplustree)
 
-# ---------- 非默认值提示（避免误以为已生效）----------
-if(NOT CABE_IO_BACKEND STREQUAL "sync")
-    message(STATUS "CABE_IO_BACKEND='${CABE_IO_BACKEND}' recorded; real dispatch lands in P3.")
-endif()
-if(NOT CABE_META_INDEX STREQUAL "hashmap")
-    message(STATUS "CABE_META_INDEX='${CABE_META_INDEX}' recorded; real dispatch lands in P3/P9.")
-endif()
-
 # ---------- cabe_flags：统一编译契约（接口库）----------
 add_library(cabe_flags INTERFACE)
 target_compile_features(cabe_flags INTERFACE cxx_std_20)

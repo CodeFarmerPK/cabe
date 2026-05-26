@@ -38,23 +38,15 @@ add_executable(test_status engine/status_test.cpp)
 target_link_libraries(test_status PRIVATE cabe::engine GTest::gtest_main)
 gtest_discover_tests(test_status DISCOVERY_TIMEOUT 60)
 
-# P1M2：BufferPool + I/O 测试
+# P1M2：BufferPool 测试
 add_executable(test_buffer_pool engine/buffer_pool_test.cpp)
 target_link_libraries(test_buffer_pool PRIVATE cabe::engine GTest::gtest_main)
 gtest_discover_tests(test_buffer_pool DISCOVERY_TIMEOUT 60)
 
-add_executable(test_io engine/io_test.cpp)
-target_link_libraries(test_io PRIVATE cabe::engine GTest::gtest_main)
-gtest_discover_tests(test_io DISCOVERY_TIMEOUT 60)
-
-# P1M3：FreeList + MetaIndex 测试
+# P1M3：FreeList 测试
 add_executable(test_free_list engine/free_list_test.cpp)
 target_link_libraries(test_free_list PRIVATE cabe::engine GTest::gtest_main)
 gtest_discover_tests(test_free_list DISCOVERY_TIMEOUT 60)
-
-add_executable(test_meta_index engine/meta_index_test.cpp)
-target_link_libraries(test_meta_index PRIVATE cabe::engine GTest::gtest_main)
-gtest_discover_tests(test_meta_index DISCOVERY_TIMEOUT 60)
 
 # P3M1：SyncIoBackend 测试
 add_executable(test_sync_io_backend io/sync_io_backend_test.cpp)
