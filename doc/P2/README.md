@@ -6,7 +6,7 @@
 
 ## 状态
 
-🚧 **已启动**（P1 全部完成；P2-D1 里程碑划分已锁定）
+✅ **已实施**（P2M2 收敛通过）
 
 ## 范围摘要
 
@@ -21,8 +21,8 @@
 
 | 里程碑 | 主题 | 设计稿 | 状态 |
 |---|---|---|---|
-| M1 | API 审查 + 冻结声明 | `P2M1_api_freeze_design.md` | 待设计 |
-| M2 | P2 收敛 | `P2M2_convergence_design.md` | 待设计 |
+| M1 | API 审查 + 冻结声明 | `P2M1_api_freeze_design.md` | ✅ 已锁定（P2M2 收敛） |
+| M2 | P2 收敛 | `P2M2_convergence_design.md` | ✅ 已锁定（P2M2 收敛） |
 
 ## 里程碑依赖
 
