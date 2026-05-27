@@ -65,6 +65,8 @@ REQUIRED_PKGS=(
     gmock-devel
     google-benchmark-devel   # P1+: 微基准
     gcovr                    # M6: scripts/run-coverage.sh 的依赖
+    llvm                     # P4: clang++ 覆盖率路径（llvm-cov / llvm-profdata）
+    jq                       # P4: llvm-cov export JSON 解析
     liburing                 # P4: io_uring runtime
     liburing-devel           # P4: io_uring headers + pkg-config metadata (>= 2.9 校验在下方)
 )

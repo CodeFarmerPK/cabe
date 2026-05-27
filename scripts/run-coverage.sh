@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ============================================================
-# Cabe —— util/ + common/ 覆盖率脚本（P0-M6）
+# Cabe —— 覆盖率脚本（P0-M6；P4-M1 扩展 --backend / --index）
 # 与 run-tests.sh 分离：覆盖率插桩开关 (-DCABE_COVERAGE=ON) 与
 # sanitizer 同开会污染报告，故独立 build dir、独立流程。
 # 设计依据：doc/P0/P0M6_test_scripts_design.md §5
@@ -16,9 +16,16 @@ usage() {
 选项:
   --compiler=NAME   工具链（g++ / clang++，默认 g++）
                     覆盖率工具自动对应：g++ → gcovr；clang++ → llvm-cov
-  --strict          util+common 总行覆盖率 <80% 时退出码 1
+  --backend=NAME    IoBackend 选择: sync（默认）| io_uring | spdk
+  --index=NAME      MetaIndex 选择: hashmap（默认）| bplustree
+  --strict          总行覆盖率 <80% 时退出码 1
                     （默认仅打印 + 着色提示，不阻塞）
   -h, --help        输出本用法
+
+示例:
+  ./scripts/run-coverage.sh --strict                         (sync + hashmap)
+  ./scripts/run-coverage.sh --backend=io_uring --strict      (io_uring + hashmap)
+  ./scripts/run-coverage.sh --backend=io_uring --index=hashmap --compiler=clang++
 
 退出码:
   0  覆盖率脚本跑完（无 --strict 时；或 --strict 且 ≥80%）
@@ -31,6 +38,8 @@ EOF
 
 # ---------- 默认 ----------
 COMPILER=g++
+BACKEND=sync
+INDEX=hashmap
 STRICT=false
 
 # ---------- 参数解析 ----------
@@ -41,6 +50,20 @@ while [[ $# -gt 0 ]]; do
             case "$v" in
                 g++|clang++) COMPILER="$v" ;;
                 *) echo "Error: --compiler= 仅接受 g++ / clang++（got: $v）" >&2; exit 2 ;;
+            esac
+            ;;
+        --backend=*)
+            v="${1#*=}"
+            case "$v" in
+                sync|io_uring|spdk) BACKEND="$v" ;;
+                *) echo "Error: --backend= 仅接受 sync / io_uring / spdk（got: $v）" >&2; exit 2 ;;
+            esac
+            ;;
+        --index=*)
+            v="${1#*=}"
+            case "$v" in
+                hashmap|bplustree) INDEX="$v" ;;
+                *) echo "Error: --index= 仅接受 hashmap / bplustree（got: $v）" >&2; exit 2 ;;
             esac
             ;;
         --strict)  STRICT=true ;;
@@ -71,20 +94,26 @@ case "$COMPILER" in
     clang++)
         need_tool llvm-cov      "sudo dnf install llvm"
         need_tool llvm-profdata "sudo dnf install llvm"
-        need_tool jq            "sudo dnf install jq"   # P0M7 评审 #10：解析 llvm-cov export JSON
+        need_tool jq            "sudo dnf install jq"
         ;;
 esac
 
 # ---------- build dir（D4：源码树内、跑前清空、跑完不清） ----------
-# P0M7 评审 #11：三元 `&& X || Y` 在未来若开 set -e 时会反咬，改 if-then-else 显式分支
 if [[ "$COMPILER" == "g++" ]]; then
     compiler_short=gcc
 else
     compiler_short=clang
 fi
-BUILD_DIR="$ROOT/build-tests/${compiler_short}-coverage"
+dir_suffix="${compiler_short}-coverage"
+if [[ "$BACKEND" != "sync" ]]; then
+    dir_suffix="${dir_suffix}-${BACKEND}"
+fi
+if [[ "$INDEX" != "hashmap" ]]; then
+    dir_suffix="${dir_suffix}-${INDEX}"
+fi
+BUILD_DIR="$ROOT/build-tests/${dir_suffix}"
 
-echo ">>> 覆盖率：compiler=$COMPILER  build_dir=$BUILD_DIR"
+echo ">>> 覆盖率：compiler=$COMPILER  backend=$BACKEND  index=$INDEX  build_dir=$BUILD_DIR"
 
 # rm/mkdir 失败硬卡：拒绝在脏目录上继续，避免旧 .gcda / .profraw 污染本次覆盖率数值
 rm -rf "$BUILD_DIR"  || { echo "Error: rm -rf $BUILD_DIR 失败（权限或磁盘？）" >&2; exit 4; }
@@ -95,6 +124,8 @@ cmake -S "$ROOT" -B "$BUILD_DIR" -G Ninja \
     -DCMAKE_CXX_COMPILER="$COMPILER" \
     -DCABE_BUILD_TESTS=ON \
     -DCABE_COVERAGE=ON \
+    -DCABE_IO_BACKEND="$BACKEND" \
+    -DCABE_META_INDEX="$INDEX" \
     || { echo "Error: cmake configure 失败" >&2; exit 4; }
 
 cmake --build "$BUILD_DIR" \
@@ -115,13 +146,16 @@ echo
 total_pct=""
 case "$COMPILER" in
     g++)
-        echo "==== 覆盖率（g++ + gcovr）===="
-        # --filter 限定 util/ + common/ + engine/；--exclude 把 *_test.cpp 兜底排除
-        # --exclude logger.h：纯头宏最简实现，Threshold 内 5 路 ieq 分支仅默认路径被走到
+        echo "==== 覆盖率（g++ + gcovr | backend=$BACKEND index=$INDEX）===="
+        # --filter 限定 util/ + common/ + engine/ + io/ + index/
+        # --exclude 把 *_test.cpp 兜底排除
+        # --exclude logger.h：纯头宏最简实现
         report=$(gcovr -r "$ROOT" \
             --filter "${ROOT}/util/" \
             --filter "${ROOT}/common/" \
             --filter "${ROOT}/engine/" \
+            --filter "${ROOT}/io/" \
+            --filter "${ROOT}/index/" \
             --exclude '.*_test\.cpp' \
             --exclude '.*logger\.h' \
             --print-summary \
@@ -130,7 +164,7 @@ case "$COMPILER" in
         total_pct=$(awk '/^lines:/ { gsub("%",""); print $2; exit }' <<< "$report")
         ;;
     clang++)
-        echo "==== 覆盖率（clang++ + llvm-cov）===="
+        echo "==== 覆盖率（clang++ + llvm-cov | backend=$BACKEND index=$INDEX）===="
         shopt -s nullglob
         raws=("$BUILD_DIR/cov"/*.profraw)
         shopt -u nullglob
@@ -142,10 +176,14 @@ case "$COMPILER" in
             || { echo "Error: llvm-profdata merge 失败" >&2; exit 4; }
 
         shopt -s nullglob
-        bins=("$BUILD_DIR"/test/test_*)
+        all_test_files=("$BUILD_DIR"/test/test_*)
         shopt -u nullglob
+        bins=()
+        for f in "${all_test_files[@]}"; do
+            [[ -f "$f" && -x "$f" && ! "$f" =~ \. ]] && bins+=("$f")
+        done
         if (( ${#bins[@]} == 0 )); then
-            echo "Error: 未找到 test_* 二进制 于 $BUILD_DIR/test/" >&2
+            echo "Error: 未找到 test_* 可执行二进制 于 $BUILD_DIR/test/" >&2
             exit 4
         fi
         # 多二进制汇总：第一个直接传，其余用 -object=
@@ -156,20 +194,18 @@ case "$COMPILER" in
         llvm-cov report \
             --instr-profile="$BUILD_DIR/cov/merged.profdata" \
             "${bins[0]}" "${obj_args[@]}" \
-            "$ROOT/util/" "$ROOT/common/" \
-            -ignore-filename-regex='_test\.cpp$' \
+            "$ROOT/util/" "$ROOT/common/" "$ROOT/engine/" "$ROOT/io/" "$ROOT/index/" \
+            -ignore-filename-regex='(_test\.cpp|logger\.h)$' \
             || { echo "Error: llvm-cov report 失败" >&2; exit 4; }
 
-        # 用 export(JSON) 解析总行覆盖率（避免依赖 report 表格列位）
+        # 用 export(JSON) 解析总行覆盖率
         json="$BUILD_DIR/cov/coverage.json"
         llvm-cov export \
             --instr-profile="$BUILD_DIR/cov/merged.profdata" \
             "${bins[0]}" "${obj_args[@]}" \
-            "$ROOT/util/" "$ROOT/common/" \
-            -ignore-filename-regex='_test\.cpp$' > "$json" \
+            "$ROOT/util/" "$ROOT/common/" "$ROOT/engine/" "$ROOT/io/" "$ROOT/index/" \
+            -ignore-filename-regex='(_test\.cpp|logger\.h)$' > "$json" \
             || { echo "Error: llvm-cov export 失败" >&2; exit 4; }
-        # P0M7 评审 #10：JSON 顶层 data[0].totals.lines.percent；用 jq 解析（jq 依赖已在自检确认）
-        # 改前用 grep -oE 拼正则，遇到 llvm-cov 版本字段重排会误匹配；jq 走结构化访问稳健
         total_pct=$(jq -r '.data[0].totals.lines.percent // empty' "$json")
         ;;
 esac
@@ -183,11 +219,11 @@ if [[ -z "$total_pct" ]]; then
 fi
 
 if awk -v p="$total_pct" 'BEGIN { exit !(p+0 >= 80.0) }'; then
-    printf 'util + common 总行覆盖率: %s%s%%%s   >= 80%% %s✓%s\n' \
+    printf '总行覆盖率: %s%s%%%s   >= 80%% %s✓%s\n' \
         "$C_GREEN" "$total_pct" "$C_RST" "$C_GREEN" "$C_RST"
     exit 0
 else
-    printf 'util + common 总行覆盖率: %s%s%%%s   <  80%% %s✗%s\n' \
+    printf '总行覆盖率: %s%s%%%s   <  80%% %s✗%s\n' \
         "$C_YELLOW" "$total_pct" "$C_RST" "$C_YELLOW" "$C_RST"
     if $STRICT; then
         printf '%s--strict 硬卡：退出码 1%s\n' "$C_RED" "$C_RST"

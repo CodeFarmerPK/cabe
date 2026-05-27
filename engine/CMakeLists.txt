@@ -11,6 +11,8 @@ add_library(cabe::engine ALIAS cabe_engine)
 # ---- IoBackend 编译期分派 ----
 if(CABE_IO_BACKEND STREQUAL "sync")
     target_compile_definitions(cabe_engine PUBLIC CABE_USE_IO_SYNC=1)
+elseif(CABE_IO_BACKEND STREQUAL "io_uring")
+    target_compile_definitions(cabe_engine PUBLIC CABE_USE_IO_URING=1)
 else()
     message(FATAL_ERROR "CABE_IO_BACKEND='${CABE_IO_BACKEND}' 尚未实现")
 endif()

@@ -10,8 +10,11 @@
 #if defined(CABE_USE_IO_SYNC)
 #include "io/sync/sync_io_backend.h"
 namespace cabe { using IoBackendImpl = SyncIoBackend; }
+#elif defined(CABE_USE_IO_URING)
+#include "io/uring/io_uring_backend.h"
+namespace cabe { using IoBackendImpl = IoUringIoBackend; }
 #else
-#error "未选择 IoBackend：请设置 -DCABE_IO_BACKEND=sync"
+#error "未选择 IoBackend：请设置 -DCABE_IO_BACKEND=sync 或 io_uring"
 #endif
 
 // ---- MetaIndex 分派 ----
