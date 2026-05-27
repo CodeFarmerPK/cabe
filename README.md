@@ -26,14 +26,14 @@ Cabe 是一个面向单机部署的 KV 存储引擎:
 
 ## 项目状态
 
-当前处于 **P0(基础设施)阶段**。完整路线见 [ROADMAP.md](ROADMAP.md)。
+当前处于 **P4(io_uring 后端)阶段**。完整路线见 [ROADMAP.md](ROADMAP.md)。
 
 | 阶段 | 内容 | 状态 |
 |---|---|---|
 | P0 | 基础设施 | ✅ 完成 |
 | P1 | 单线程核心 | ✅ 完成 |
 | P2 | API 冻结声明 | ✅ 完成 |
-| P3 | IoBackend + MetaIndex 抽象 | ⏳ |
+| P3 | IoBackend + MetaIndex 抽象 | ✅ 完成 |
 | P4 | io_uring 后端 | ⏳ |
 | P4.5 | FreeList 改造 | ⏳ |
 | P5 | WAL + Recovery + Snapshot | ⏳ |

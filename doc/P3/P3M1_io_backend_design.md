@@ -13,7 +13,7 @@
 | 项 | 值 |
 |---|---|
 | 阶段 / 里程碑 | P3 / M1 |
-| 状态 | **完成稿（待 owner 终审）** —— 三项决策经决策梳理拍板（见 §3） |
+| 状态 | **✅ 已锁定（P3M4 收敛）** |
 | 上游依赖 | P1（engine/io.h WriteBlock / ReadBlock）、P2（API 冻结声明） |
 | 下游依赖本里程碑 | P3M2（MetaIndex 抽象层）、P3M3（Engine 切换——用 IoBackend concept 替代直接调 WriteBlock） |
 | 退出判定 | 见 §9 |

@@ -13,7 +13,7 @@
 | 项 | 值 |
 |---|---|
 | 阶段 / 里程碑 | P3 / M3 |
-| 状态 | **设计稿** |
+| 状态 | **✅ 已锁定（P3M4 收敛）** |
 | 上游依赖 | P3M1（IoBackend + SyncIoBackend）、P3M2（MetaIndexBackend + HashMetaIndex） |
 | 下游依赖本里程碑 | P3M4（收敛）、P4（io_uring 后端——加 `elseif` 分支即可接入） |
 | 退出判定 | 见 §10 |

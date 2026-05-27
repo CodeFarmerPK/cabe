@@ -26,10 +26,10 @@
 
 | 里程碑 | 主题 | 设计稿 | 状态 |
 |---|---|---|---|
-| M1 | liburing 接入 + 基础实现 | `P4M1_io_uring_basic_design.md` | 待设计 |
-| M2 | 预注册文件描述符优化 | `P4M2_io_uring_optimize_design.md` | 待设计 |
-| M3 | TSAN 兼容 + 部署文档 + 脚本改进 | `P4M3_tsan_deploy_design.md` | 待设计 |
-| M4 | P4 收敛 | `P4M4_convergence_design.md` | 待设计 |
+| M1 | liburing 接入 + 基础实现 | `P4M1_io_uring_basic_design.md` | ✅ 已锁定（P4M4 收敛） |
+| M2 | 预注册文件描述符优化 | `P4M2_io_uring_optimize_design.md` | ✅ 已锁定（P4M4 收敛） |
+| M3 | TSAN 兼容 + 部署文档 + 脚本改进 | `P4M3_tsan_deploy_design.md` | ✅ 已锁定（P4M4 收敛） |
+| M4 | P4 收敛 | `P4M4_convergence_design.md` | ✅ 已锁定 |
 
 ## 里程碑依赖
 

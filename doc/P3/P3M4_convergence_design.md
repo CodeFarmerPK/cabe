@@ -14,7 +14,7 @@
 | 项 | 值 |
 |---|---|
 | 阶段 / 里程碑 | P3 / M4 |
-| 状态 | **设计稿** |
+| 状态 | **✅ 已锁定（P3M4 收敛）** |
 | 上游依赖 | P3M1（IoBackend + SyncIoBackend）、P3M2（MetaIndexBackend + HashMetaIndex）、P3M3（Engine 切换 + CMake 分派） |
 | 下游依赖本里程碑 | P3 阶段出口；P4 启动闸门 |
 | 退出判定 | 见 §6 |

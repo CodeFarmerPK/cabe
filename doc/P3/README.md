@@ -7,7 +7,7 @@
 
 ## 状态
 
-🚧 **已启动**（P2 全部完成；P3-D1~D5 决策已锁定）
+✅ **已完成**（P3M4 收敛通过）
 
 ## 范围摘要
 
@@ -24,10 +24,10 @@
 
 | 里程碑 | 主题 | 设计稿 | 状态 |
 |---|---|---|---|
-| M1 | IoBackend 抽象层 | `P3M1_io_backend_design.md` | 待设计 |
-| M2 | MetaIndex 抽象层 | `P3M2_meta_index_design.md` | 待设计 |
-| M3 | Engine 切换 + CMake 分派 | `P3M3_engine_switch_design.md` | 待设计 |
-| M4 | P3 收敛 | `P3M4_convergence_design.md` | 待设计 |
+| M1 | IoBackend 抽象层 | `P3M1_io_backend_design.md` | ✅ 已锁定（P3M4 收敛） |
+| M2 | MetaIndex 抽象层 | `P3M2_meta_index_design.md` | ✅ 已锁定（P3M4 收敛） |
+| M3 | Engine 切换 + CMake 分派 | `P3M3_engine_switch_design.md` | ✅ 已锁定（P3M4 收敛） |
+| M4 | P3 收敛 | `P3M4_convergence_design.md` | ✅ 已锁定 |
 
 ## 里程碑依赖
 
