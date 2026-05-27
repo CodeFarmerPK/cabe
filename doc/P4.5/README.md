@@ -7,7 +7,7 @@
 
 ## 状态
 
-🚧 **未启动**（P4 全部完成；待 owner 确认启动）
+✅ **已完成**（P4.5M3 收敛通过）
 
 ## 设计背景与决策依据
 
@@ -57,9 +57,9 @@ ROADMAP 原文规划了"三容器（active / sorting / recycled）轮换 + shard
 
 | 里程碑 | 主题 | 设计稿 | 状态 |
 |---|---|---|---|
-| M1 | 块分配器抽象层 + 环形队列实现 | `P4.5M1_block_allocator_design.md` | 待设计 |
-| M2 | Engine 切换 + 旧代码清理 | `P4.5M2_engine_switch_design.md` | 待设计 |
-| M3 | P4.5 收敛 | `P4.5M3_convergence_design.md` | 待设计 |
+| M1 | 块分配器抽象层 + 环形队列实现 | `P4.5M1_block_allocator_design.md` | ✅ 已锁定（P4.5M3 收敛） |
+| M2 | Engine 切换 + 旧代码清理 | `P4.5M2_engine_switch_design.md` | ✅ 已锁定（P4.5M3 收敛） |
+| M3 | P4.5 收敛 | `P4.5M3_convergence_design.md` | ✅ 已锁定 |
 
 ## 里程碑依赖
 
