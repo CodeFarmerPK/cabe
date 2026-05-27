@@ -58,6 +58,11 @@ add_executable(test_meta_index_contract index/meta_index_contract_test.cpp)
 target_link_libraries(test_meta_index_contract PRIVATE cabe::index GTest::gtest_main)
 gtest_discover_tests(test_meta_index_contract DISCOVERY_TIMEOUT 60)
 
+# P4.5M1：块分配器契约测试
+add_executable(test_block_allocator_contract slots/block_allocator_contract_test.cpp)
+target_link_libraries(test_block_allocator_contract PRIVATE cabe::slots GTest::gtest_main)
+gtest_discover_tests(test_block_allocator_contract DISCOVERY_TIMEOUT 60)
+
 # P4M1：IoUringIoBackend 测试（仅 io_uring 后端时编译）
 if(CABE_IO_BACKEND STREQUAL "io_uring")
     add_executable(test_io_uring_backend io/io_uring_backend_test.cpp)

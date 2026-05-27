@@ -49,6 +49,8 @@ set(CABE_IO_BACKEND "sync" CACHE STRING "I/O backend: sync|io_uring|spdk")
 set_property(CACHE CABE_IO_BACKEND PROPERTY STRINGS sync io_uring spdk)
 set(CABE_META_INDEX "hashmap" CACHE STRING "Meta index: hashmap|bplustree")
 set_property(CACHE CABE_META_INDEX PROPERTY STRINGS hashmap bplustree)
+set(CABE_BLOCK_ALLOCATOR "ring_queue" CACHE STRING "Block allocator: ring_queue")
+set_property(CACHE CABE_BLOCK_ALLOCATOR PROPERTY STRINGS ring_queue)
 
 # 构建开关（默认 OFF，M5 起置 ON）
 option(CABE_BUILD_TESTS "Build unit tests"        OFF)
@@ -67,6 +69,7 @@ endfunction()
 cabe_validate_choice(CABE_SANITIZER  none address thread undefined)
 cabe_validate_choice(CABE_IO_BACKEND sync io_uring spdk)
 cabe_validate_choice(CABE_META_INDEX hashmap bplustree)
+cabe_validate_choice(CABE_BLOCK_ALLOCATOR ring_queue)
 
 # ---------- cabe_flags：统一编译契约（接口库）----------
 add_library(cabe_flags INTERFACE)
@@ -116,6 +119,7 @@ add_subdirectory(util)
 add_subdirectory(engine)             # P1M1：引擎骨架
 add_subdirectory(io)                 # P3M1：IoBackend 抽象层
 add_subdirectory(index)              # P3M2：MetaIndex 抽象层
+add_subdirectory(slots)              # P4.5M1：块分配器抽象层
 # test/ bench/ 推迟到 M5（设计 §3 偏差-2）；EXISTS 守卫使 M1/M5 无需回改本文件。
 if(CABE_BUILD_TESTS AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/test/CMakeLists.txt")
     add_subdirectory(test)
