@@ -3,14 +3,13 @@
 
 #include "engine/backend_config.h"
 #include "engine/buffer_pool.h"
-#include "engine/free_list.h"
 
 namespace cabe {
 
     struct DeviceContext {
         IoBackendImpl io;
         BufferPool pool{0};
-        FreeList free_list;
+        BlockAllocatorImpl block_allocator;
         MetaIndexImpl meta_index;
     };
 

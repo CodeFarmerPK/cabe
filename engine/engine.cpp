@@ -30,7 +30,7 @@ namespace cabe {
             }
 
             dc.pool = BufferPool(kDefaultPoolBlocks);
-            dc.free_list.Init(0, dc.io.BlockCount());
+            dc.block_allocator.Init(0, dc.io.BlockCount());
             devices_.push_back(std::move(dc));
         }
 
@@ -60,16 +60,16 @@ namespace cabe {
 
         ValueMeta old_meta{};
         if (dc.meta_index.Lookup(key, &old_meta) == err::kSuccess) {
-            dc.free_list.Free(old_meta.block);
+            dc.block_allocator.Recycle(old_meta.block);
         }
 
         BlockId block_id{};
-        int32_t rc = dc.free_list.Allocate(&block_id);
+        int32_t rc = dc.block_allocator.Acquire(&block_id);
         if (rc != err::kSuccess) return Status::Error(rc);
 
         std::byte* buf = dc.pool.Allocate();
         if (!buf) {
-            dc.free_list.Free(block_id);
+            dc.block_allocator.Recycle(block_id);
             return Status::Error(err::kEnginePoolExhausted);
         }
         std::memcpy(buf, value.data(), kValueSize);
@@ -77,7 +77,7 @@ namespace cabe {
         rc = dc.io.Write(block_id.block_idx(), buf);
         dc.pool.Free(buf);
         if (rc != err::kSuccess) {
-            dc.free_list.Free(block_id);
+            dc.block_allocator.Recycle(block_id);
             return Status::Error(rc);
         }
 
@@ -133,7 +133,8 @@ namespace cabe {
         int32_t rc = dc.meta_index.Lookup(key, &meta);
         if (rc != err::kSuccess) return Status::Error(rc);
 
-        dc.free_list.Free(meta.block);
+        dc.block_allocator.Recycle(meta.block);
+        TrimDeviceBlock(dc, meta.block);
         dc.meta_index.Delete(key);
 
         return Status::Ok();
@@ -144,6 +145,12 @@ namespace cabe {
     std::size_t Engine::RouteKey(std::string_view key) const noexcept {
         (void)key;
         return 0;
+    }
+
+    void Engine::TrimDeviceBlock(DeviceContext& dc, BlockId id) {
+        // TODO(P7): 通过待 TRIM 队列异步批量发送 BLKDISCARD
+        (void)dc;
+        (void)id;
     }
 
 } // namespace cabe

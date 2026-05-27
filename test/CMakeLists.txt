@@ -43,11 +43,6 @@ add_executable(test_buffer_pool engine/buffer_pool_test.cpp)
 target_link_libraries(test_buffer_pool PRIVATE cabe::engine GTest::gtest_main)
 gtest_discover_tests(test_buffer_pool DISCOVERY_TIMEOUT 60)
 
-# P1M3：FreeList 测试
-add_executable(test_free_list engine/free_list_test.cpp)
-target_link_libraries(test_free_list PRIVATE cabe::engine GTest::gtest_main)
-gtest_discover_tests(test_free_list DISCOVERY_TIMEOUT 60)
-
 # P3M1：SyncIoBackend 测试
 add_executable(test_sync_io_backend io/sync_io_backend_test.cpp)
 target_link_libraries(test_sync_io_backend PRIVATE cabe::io cabe::engine GTest::gtest_main)

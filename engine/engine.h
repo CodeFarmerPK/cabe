@@ -32,6 +32,7 @@ namespace cabe {
 
     private:
         std::size_t RouteKey(std::string_view key) const noexcept;
+        void TrimDeviceBlock(DeviceContext& dc, BlockId id);
 
         bool opened_ = false;
         std::vector<DeviceContext> devices_;
