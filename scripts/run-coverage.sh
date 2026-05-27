@@ -18,14 +18,16 @@ usage() {
                     覆盖率工具自动对应：g++ → gcovr；clang++ → llvm-cov
   --backend=NAME    IoBackend 选择: sync（默认）| io_uring | spdk
   --index=NAME      MetaIndex 选择: hashmap（默认）| bplustree
+  --device=PATH     测试设备路径（如 /dev/loop0）
+                    不传则跳过需要设备的测试
   --strict          总行覆盖率 <80% 时退出码 1
                     （默认仅打印 + 着色提示，不阻塞）
   -h, --help        输出本用法
 
 示例:
-  ./scripts/run-coverage.sh --strict                         (sync + hashmap)
-  ./scripts/run-coverage.sh --backend=io_uring --strict      (io_uring + hashmap)
-  ./scripts/run-coverage.sh --backend=io_uring --index=hashmap --compiler=clang++
+  ./scripts/run-coverage.sh --strict                                        (sync + hashmap)
+  ./scripts/run-coverage.sh --device=/dev/loop0 --strict                    (sync + 设备测试)
+  ./scripts/run-coverage.sh --device=/dev/loop0 --backend=io_uring --strict (io_uring + 设备测试)
 
 退出码:
   0  覆盖率脚本跑完（无 --strict 时；或 --strict 且 ≥80%）
@@ -40,6 +42,7 @@ EOF
 COMPILER=g++
 BACKEND=sync
 INDEX=hashmap
+DEVICE=""
 STRICT=false
 
 # ---------- 参数解析 ----------
@@ -65,6 +68,9 @@ while [[ $# -gt 0 ]]; do
                 hashmap|bplustree) INDEX="$v" ;;
                 *) echo "Error: --index= 仅接受 hashmap / bplustree（got: $v）" >&2; exit 2 ;;
             esac
+            ;;
+        --device=*)
+            DEVICE="${1#*=}"
             ;;
         --strict)  STRICT=true ;;
         -h|--help) usage; exit 0 ;;
@@ -113,7 +119,7 @@ if [[ "$INDEX" != "hashmap" ]]; then
 fi
 BUILD_DIR="$ROOT/build-tests/${dir_suffix}"
 
-echo ">>> 覆盖率：compiler=$COMPILER  backend=$BACKEND  index=$INDEX  build_dir=$BUILD_DIR"
+echo ">>> 覆盖率：compiler=$COMPILER  backend=$BACKEND  index=$INDEX  device=${DEVICE:-（未指定）}  build_dir=$BUILD_DIR"
 
 # rm/mkdir 失败硬卡：拒绝在脏目录上继续，避免旧 .gcda / .profraw 污染本次覆盖率数值
 rm -rf "$BUILD_DIR"  || { echo "Error: rm -rf $BUILD_DIR 失败（权限或磁盘？）" >&2; exit 4; }
@@ -137,6 +143,8 @@ if [[ "$COMPILER" == "clang++" ]]; then
     mkdir -p "$BUILD_DIR/cov"
     export LLVM_PROFILE_FILE="$BUILD_DIR/cov/%p-%m.profraw"
 fi
+
+[[ -n "$DEVICE" ]] && export CABE_TEST_DEVICE="$DEVICE"
 
 ctest --test-dir "$BUILD_DIR" --output-on-failure \
     || { echo "Error: ctest 失败" >&2; exit 4; }

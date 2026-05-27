@@ -41,6 +41,17 @@ if (( ${_major:-0} < 43 )); then
 fi
 echo ">>> Fedora $VERSION_ID detected (CI mode: $CI_MODE)"
 
+# ---------- 内核版本校验（≥ 6.16）----------
+_kernel="$(uname -r)"
+_kmajor="${_kernel%%.*}"
+_krest="${_kernel#*.}"
+_kminor="${_krest%%.*}"
+if (( ${_kmajor:-0} < 6 )) || (( ${_kmajor:-0} == 6 && ${_kminor:-0} < 16 )); then
+    echo "Error: Cabe requires kernel >= 6.16. Detected: $_kernel" >&2
+    exit 1
+fi
+echo ">>> kernel $_kernel detected"
+
 # ---------- privilege ----------
 SUDO=""
 [[ $EUID -ne 0 ]] && SUDO="sudo"

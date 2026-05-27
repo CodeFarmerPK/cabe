@@ -35,6 +35,10 @@ usage() {
   --clean             跑前删除 build 目录重建
   --jobs N            并行构建线程数（默认 $(nproc)）
 
+设备:
+  --device=PATH       测试设备路径（如 /dev/loop0）
+                      不传则跳过需要设备的测试
+
 测试过滤:
   --filter REGEX      只跑匹配 POSIX 正则的测试用例
                       例: --filter 'Engine*'  --filter 'Status.*'
@@ -51,13 +55,13 @@ usage() {
   build-clang-io_uring-asan     (clang++ + io_uring + ASAN)
 
 示例:
-  ./scripts/run-tests.sh                               # g++ Debug 无检测器
-  ./scripts/run-tests.sh --asan                        # g++ Debug + ASAN
-  ./scripts/run-tests.sh --compiler=clang++ --asan     # clang++ Debug + ASAN
-  ./scripts/run-tests.sh --release                     # g++ Release
-  ./scripts/run-tests.sh --filter 'Engine*'            # 只跑 Engine 用例
-  ./scripts/run-tests.sh --tsan --filter 'Hash*'       # TSAN + 只跑 Hash 用例
-  ./scripts/run-tests.sh --clean --asan                # 清理后重建 + ASAN
+  ./scripts/run-tests.sh --device=/dev/loop0                          # g++ Debug + 设备测试
+  ./scripts/run-tests.sh --device=/dev/loop0 --asan                   # ASAN + 设备测试
+  ./scripts/run-tests.sh --device=/dev/loop0 --backend=io_uring       # io_uring + 设备测试
+  ./scripts/run-tests.sh --compiler=clang++ --asan                    # clang++ + ASAN
+  ./scripts/run-tests.sh --release                                    # Release（跳过设备测试）
+  ./scripts/run-tests.sh --filter 'Engine*'                           # 只跑 Engine 用例
+  ./scripts/run-tests.sh --clean --asan                               # 清理后重建 + ASAN
 
 退出码:
   0  全部 PASS
@@ -75,6 +79,7 @@ COMPILER_SUFFIX=""
 BACKEND="sync"
 BACKEND_SUFFIX=""
 CLEAN=false
+DEVICE=""
 FILTER=""
 JOBS="$(nproc)"
 
@@ -90,6 +95,8 @@ while [[ $# -gt 0 ]]; do
         --compiler)   COMPILER="$2"; shift ;;
         --backend=*)  BACKEND="${1#*=}" ;;
         --backend)    BACKEND="$2"; shift ;;
+        --device=*)   DEVICE="${1#*=}" ;;
+        --device)     DEVICE="$2"; shift ;;
         --clean)      CLEAN=true ;;
         --filter=*)   FILTER="${1#*=}" ;;
         --filter)     FILTER="$2"; shift ;;
@@ -128,7 +135,7 @@ fi
 [[ "$BACKEND" != "sync" ]] && BACKEND_SUFFIX="-${BACKEND}"
 BUILD_DIR="$ROOT/build${COMPILER_SUFFIX}${BACKEND_SUFFIX}${SAN_SUFFIX}"
 
-echo "=== compiler=$COMPILER build_type=$BUILD_TYPE sanitizer=${SANITIZER} backend=$BACKEND dir=$BUILD_DIR jobs=$JOBS ==="
+echo "=== compiler=$COMPILER build_type=$BUILD_TYPE sanitizer=${SANITIZER} backend=$BACKEND device=${DEVICE:-（未指定）} dir=$BUILD_DIR jobs=$JOBS ==="
 
 # ---------- 清理（可选） ----------
 if [[ "$CLEAN" == "true" && -d "$BUILD_DIR" ]]; then
@@ -153,6 +160,9 @@ cmake --build "$BUILD_DIR" --parallel "$JOBS"
 export TSAN_OPTIONS="${TSAN_OPTIONS:-halt_on_error=1:abort_on_error=1:second_deadlock_stack=1}"
 export ASAN_OPTIONS="${ASAN_OPTIONS:-halt_on_error=1:abort_on_error=1:detect_leaks=1}"
 export UBSAN_OPTIONS="${UBSAN_OPTIONS:-halt_on_error=1:abort_on_error=1:print_stacktrace=1}"
+
+# ---------- 设备环境变量 ----------
+[[ -n "$DEVICE" ]] && export CABE_TEST_DEVICE="$DEVICE"
 
 # ---------- 跑测试 ----------
 ctest_args=(--test-dir "$BUILD_DIR" --output-on-failure)
