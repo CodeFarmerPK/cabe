@@ -36,6 +36,7 @@ namespace cabe {
         std::uint64_t block_count_ = 0;
         struct io_uring ring_{};
         bool ring_initialized_ = false;
+        bool files_registered_ = false;
     };
 
     static_assert(IoBackend<IoUringIoBackend>);

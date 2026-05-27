@@ -19,14 +19,17 @@ namespace cabe {
         : fd_(other.fd_)
         , block_count_(other.block_count_)
         , ring_(other.ring_)
-        , ring_initialized_(other.ring_initialized_) {
+        , ring_initialized_(other.ring_initialized_)
+        , files_registered_(other.files_registered_) {
         other.fd_ = -1;
         other.block_count_ = 0;
         other.ring_initialized_ = false;
+        other.files_registered_ = false;
     }
 
     IoUringIoBackend& IoUringIoBackend::operator=(IoUringIoBackend&& other) noexcept {
         if (this != &other) {
+            if (files_registered_) io_uring_unregister_files(&ring_);
             if (ring_initialized_) io_uring_queue_exit(&ring_);
             if (fd_ >= 0) ::close(fd_);
 
@@ -34,10 +37,12 @@ namespace cabe {
             block_count_ = other.block_count_;
             ring_ = other.ring_;
             ring_initialized_ = other.ring_initialized_;
+            files_registered_ = other.files_registered_;
 
             other.fd_ = -1;
             other.block_count_ = 0;
             other.ring_initialized_ = false;
+            other.files_registered_ = false;
         }
         return *this;
     }
@@ -76,11 +81,27 @@ namespace cabe {
         }
         ring_initialized_ = true;
 
+        int32_t fds[] = {fd_};
+        ret = io_uring_register_files(&ring_, fds, 1);
+        if (ret < 0) {
+            CABE_LOG_ERROR("io_uring_register_files 失败: ret=%d", ret);
+            io_uring_queue_exit(&ring_);
+            ring_initialized_ = false;
+            ::close(fd_);
+            fd_ = -1;
+            return err::kIoBase;
+        }
+        files_registered_ = true;
+
         return err::kSuccess;
     }
 
     int32_t IoUringIoBackend::Close() {
         if (fd_ < 0) return err::kSuccess;
+        if (files_registered_) {
+            io_uring_unregister_files(&ring_);
+            files_registered_ = false;
+        }
         if (ring_initialized_) {
             io_uring_queue_exit(&ring_);
             ring_initialized_ = false;
@@ -103,7 +124,8 @@ namespace cabe {
         }
 
         const auto offset = static_cast<__u64>(block_idx * kValueSize);
-        io_uring_prep_write(sqe, fd_, buf, kValueSize, offset);
+        io_uring_prep_write(sqe, 0, buf, kValueSize, offset);
+        sqe->flags |= IOSQE_FIXED_FILE;
 
         int ret = io_uring_submit(&ring_);
         if (ret < 0) {
@@ -137,7 +159,8 @@ namespace cabe {
         }
 
         const auto offset = static_cast<__u64>(block_idx * kValueSize);
-        io_uring_prep_read(sqe, fd_, buf, kValueSize, offset);
+        io_uring_prep_read(sqe, 0, buf, kValueSize, offset);
+        sqe->flags |= IOSQE_FIXED_FILE;
 
         int ret = io_uring_submit(&ring_);
         if (ret < 0) {
