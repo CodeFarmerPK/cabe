@@ -159,7 +159,7 @@ Status Engine::Open(const Options& opts) {
     for (const auto& cfg : opts.devices) {
         DeviceContext dc;
 
-        int32_t rc = dc.io.Open(cfg.path);
+        int32_t rc = dc.io.Open(cfg.data_path);
         if (rc != err::kSuccess) {
             for (auto& d : devices_) d.io.Close();
             devices_.clear();
@@ -167,7 +167,7 @@ Status Engine::Open(const Options& opts) {
         }
 
         dc.pool = BufferPool(kDefaultPoolBlocks);
-        dc.free_list.Init(0, dc.io.BlockCount());
+        dc.block_allocator.Init(0, dc.super_block.block_count);  // P4.5 改名 free_list→block_allocator；P5 块数取自超级块
         devices_.push_back(std::move(dc));
     }
 
@@ -178,8 +178,9 @@ Status Engine::Open(const Options& opts) {
 ```
 
 **变更要点**：
-- `::open(path, O_RDWR | O_DIRECT)` + `::ioctl(BLKGETSIZE64)` → `dc.io.Open(cfg.path)`（SyncIoBackend::Open 内部完成两步）。
-- `block_count = dev_bytes / kValueSize` → `dc.io.BlockCount()`（SyncIoBackend::Open 内部已计算）。
+- `::open(path, O_RDWR | O_DIRECT)` + `::ioctl(BLKGETSIZE64)` → `dc.io.Open(cfg.data_path)`（SyncIoBackend::Open 内部完成两步）。
+- `block_count = dev_bytes / kValueSize` → `dc.super_block.block_count`（P5：取自超级块；IoBackend 的 `BlockCount()` = `(dev_bytes - kDataRegionOffset)/kValueSize` 作兜底校验）。
+- （P5 补充）`Engine::Open` 在 `dc.io.Open` 之前先 `Create/RecoverDeviceGroup` 校验三设备超级块；IoBackend 读写物理偏移加 `kDataRegionOffset`（头部 8K 超级块）。
 - `dc.fd = fd` → 不需要——`dc.io` 已持有打开的设备。
 - 错误清理：`::close(fd)` → `d.io.Close()`。
 - 移除设备打开 / 大小查询相关的日志调用——SyncIoBackend::Open 内部已有日志。

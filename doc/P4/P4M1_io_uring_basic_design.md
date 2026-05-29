@@ -151,7 +151,7 @@ int32_t IoUringIoBackend::Open(const std::string& path) {
         fd_ = -1;
         return err::kIoBase;
     }
-    block_count_ = dev_bytes / kValueSize;
+    block_count_ = (dev_bytes - kDataRegionOffset) / kValueSize;  // P5：扣除头部 8K 超级块（另有 dev_bytes<=kDataRegionOffset 守卫）
     if (block_count_ == 0) {
         CABE_LOG_ERROR("设备太小: %llu 字节", static_cast<unsigned long long>(dev_bytes));
         ::close(fd_);
@@ -172,7 +172,7 @@ int32_t IoUringIoBackend::Open(const std::string& path) {
 }
 ```
 
-设备打开逻辑与 SyncIoBackend 完全相同（`O_RDWR | O_DIRECT` + `BLKGETSIZE64`），额外加一步 `io_uring_queue_init`。
+设备打开逻辑与 SyncIoBackend 完全相同（`O_RDWR | O_DIRECT` + `BLKGETSIZE64`），额外加一步 `io_uring_queue_init`。（P5：另加 `io_uring_register_files`；Write/Read 物理偏移加 `kDataRegionOffset`，提交/完成路径加 EINTR 重试 + `user_data` 关联，见 io_uring_backend.cpp。）
 
 **Close**：
 ```cpp
@@ -194,7 +194,7 @@ int32_t IoUringIoBackend::Close() {
 **Write**：
 ```cpp
 int32_t IoUringIoBackend::Write(std::uint64_t block_idx, const std::byte* buf) {
-    const auto offset = static_cast<__u64>(block_idx * kValueSize);
+    const auto offset = static_cast<__u64>(kDataRegionOffset + block_idx * kValueSize);  // P5：数据区在头部 8K 之后
 
     struct io_uring_sqe* sqe = io_uring_get_sqe(&ring_);
     if (!sqe) {

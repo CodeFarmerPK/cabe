@@ -18,16 +18,17 @@ usage() {
                     覆盖率工具自动对应：g++ → gcovr；clang++ → llvm-cov
   --backend=NAME    IoBackend 选择: sync（默认）| io_uring | spdk
   --index=NAME      MetaIndex 选择: hashmap（默认）| bplustree
-  --device=PATH     测试设备路径（如 /dev/loop0）
-                    不传则跳过需要设备的测试
+  --device=PATH           数据设备路径（如 /dev/loop0）
+  --wal-device=PATH       WAL 设备路径（如 /dev/loop1）
+  --snapshot-device=PATH  快照设备路径（如 /dev/loop2）
+                          需设备的测试要三者齐备（./scripts/mkloop.sh create 一键创建）
   --strict          总行覆盖率 <80% 时退出码 1
                     （默认仅打印 + 着色提示，不阻塞）
   -h, --help        输出本用法
 
 示例:
-  ./scripts/run-coverage.sh --strict                                        (sync + hashmap)
-  ./scripts/run-coverage.sh --device=/dev/loop0 --strict                    (sync + 设备测试)
-  ./scripts/run-coverage.sh --device=/dev/loop0 --backend=io_uring --strict (io_uring + 设备测试)
+  ./scripts/run-coverage.sh --strict                                  (sync + hashmap，无设备测试跳过)
+  ./scripts/run-coverage.sh --device=/dev/loop0 --wal-device=/dev/loop1 --snapshot-device=/dev/loop2 --strict
 
 退出码:
   0  覆盖率脚本跑完（无 --strict 时；或 --strict 且 ≥80%）
@@ -43,6 +44,8 @@ COMPILER=g++
 BACKEND=sync
 INDEX=hashmap
 DEVICE=""
+WAL_DEVICE=""
+SNAPSHOT_DEVICE=""
 STRICT=false
 
 # ---------- 参数解析 ----------
@@ -71,6 +74,12 @@ while [[ $# -gt 0 ]]; do
             ;;
         --device=*)
             DEVICE="${1#*=}"
+            ;;
+        --wal-device=*)
+            WAL_DEVICE="${1#*=}"
+            ;;
+        --snapshot-device=*)
+            SNAPSHOT_DEVICE="${1#*=}"
             ;;
         --strict)  STRICT=true ;;
         -h|--help) usage; exit 0 ;;
@@ -119,7 +128,7 @@ if [[ "$INDEX" != "hashmap" ]]; then
 fi
 BUILD_DIR="$ROOT/build-tests/${dir_suffix}"
 
-echo ">>> 覆盖率：compiler=$COMPILER  backend=$BACKEND  index=$INDEX  device=${DEVICE:-（未指定）}  build_dir=$BUILD_DIR"
+echo ">>> 覆盖率：compiler=$COMPILER  backend=$BACKEND  index=$INDEX  device=${DEVICE:-（未指定）}  wal=${WAL_DEVICE:-（未指定）}  snapshot=${SNAPSHOT_DEVICE:-（未指定）}  build_dir=$BUILD_DIR"
 
 # rm/mkdir 失败硬卡：拒绝在脏目录上继续，避免旧 .gcda / .profraw 污染本次覆盖率数值
 rm -rf "$BUILD_DIR"  || { echo "Error: rm -rf $BUILD_DIR 失败（权限或磁盘？）" >&2; exit 4; }
@@ -144,7 +153,9 @@ if [[ "$COMPILER" == "clang++" ]]; then
     export LLVM_PROFILE_FILE="$BUILD_DIR/cov/%p-%m.profraw"
 fi
 
-[[ -n "$DEVICE" ]] && export CABE_TEST_DEVICE="$DEVICE"
+[[ -n "$DEVICE" ]]          && export CABE_TEST_DEVICE="$DEVICE"
+[[ -n "$WAL_DEVICE" ]]      && export CABE_TEST_WAL_DEVICE="$WAL_DEVICE"
+[[ -n "$SNAPSHOT_DEVICE" ]] && export CABE_TEST_SNAPSHOT_DEVICE="$SNAPSHOT_DEVICE"
 
 ctest --test-dir "$BUILD_DIR" --output-on-failure \
     || { echo "Error: ctest 失败" >&2; exit 4; }

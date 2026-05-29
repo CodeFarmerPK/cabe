@@ -57,6 +57,20 @@ namespace cabe::err {
 
     static_assert(kIndexKeyNotFound > kIndexBase - kSegmentSize);
 
-    // io / wal / wal_recovery 段的具体码随各模块产生时补入。
+    // ---- wal_recovery 段（P5M1 新增：设备超级块校验）----
+    inline constexpr int kSuperBlockMagicMismatch      = InSeg(kWalRecoveryBase, 0); // -105000  主备都非本格式/未格式化（魔数或版本不符）
+    inline constexpr int kSuperBlockCrcMismatch        = InSeg(kWalRecoveryBase, 1); // -105001  本格式但主备 CRC 均损坏
+    inline constexpr int kSuperBlockEngineUuidMismatch = InSeg(kWalRecoveryBase, 2); // -105002
+    inline constexpr int kSuperBlockPairMismatch       = InSeg(kWalRecoveryBase, 3); // -105003
+    inline constexpr int kSuperBlockDeviceIdMismatch   = InSeg(kWalRecoveryBase, 4); // -105004
+    inline constexpr int kSuperBlockDeviceTypeMismatch = InSeg(kWalRecoveryBase, 5); // -105005  设备类型不符（如把 WAL 盘当数据盘）
+    inline constexpr int kSuperBlockNoValid            = InSeg(kWalRecoveryBase, 6); // -105006  兜底：主备均无效但无法细分
+    inline constexpr int kSuperBlockReadFailed         = InSeg(kWalRecoveryBase, 7); // -105007  主备超级块均读 I/O 失败（区别于"非本格式/损坏"，勿据此重建）
+    inline constexpr int kSuperBlockEntropyFailure     = InSeg(kWalRecoveryBase, 8); // -105008  系统熵源不可用，无法生成 UUID，create 中止
+    inline constexpr int kSuperBlockSizeMismatch       = InSeg(kWalRecoveryBase, 9); // -105009  持久 block_count 与当前数据设备实际大小不符（设备被缩容）
+
+    static_assert(kSuperBlockSizeMismatch > kWalRecoveryBase - kSegmentSize);
+
+    // io / wal 段的具体码随各模块产生时补入。
 } // namespace cabe::err
 #endif // CABE_ERROR_CODE_H

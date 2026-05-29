@@ -56,7 +56,7 @@ P5M1 ──► P5M2 ──► P5M3 ──► P5M4 ──► P5M5 ──► P5M6
 | P5-D5 | 配置归属 | WAL 级别 / 缓冲区大小 / 快照阈值全局统一；破坏 P2 冻结扩展 Options，回头更新文档 |
 | P5-D6 | 指标接口 | 推迟，P5 不做（未来补成本低） |
 | P5-D7 | WAL/快照 I/O | 同步 I/O（io_uring 推 P7）；抽取通用裸设备 I/O 工具 |
-| P5-D8 | 超级块与 block 编号 | block 0 作超级块，数据从 block 1 开始，`byte_offset = block_idx * kValueSize` 公式不变 |
+| P5-D8 | 超级块与 block 编号 | bcache 风格：头部 8K 双份超级块，数据区从偏移 8K 起，逻辑 block 从 0；物理偏移 = `kDataRegionOffset + block_idx * kValueSize`，由 IoBackend 加，BlockAllocator 不感知超级块 |
 | P5-D9 | 快照协调 | 协调逻辑放 Engine 层；手动接口 `Engine::Snapshot()` |
 | P5-D10 | 测试策略 | 基础恢复测试 + WAL 损坏测试；完整崩溃注入矩阵推迟 |
 | P5-D11 | 启动模式 + 恢复 | 仅 create/recover；恢复时 value CRC 校验默认关可选；WAL 自管缓冲区且运行时可调 |
@@ -77,11 +77,11 @@ P5M1 ──► P5M2 ──► P5M3 ──► P5M4 ──► P5M5 ──► P5M6
 ### P5M1（设备超级块）
 
 - 三块设备（数据 / WAL / 快照）的超级块格式（含引擎全局 UUID、设备编号、配对 UUID、自身 CRC32C）
-- 超级块冗余（设备头部 + 尾部各一份）
+- 超级块冗余（头部双份：主 @0 + 备 @4K，bcache 风格）
 - 启动模式区分：create（写超级块）/ recover（读超级块校验）
 - Open 时校验：引擎 UUID 一致、配对关系正确、数据设备编号与传入顺序匹配
 - 设备配置分组结构（`DeviceConfig` 含 data_path / wal_path / snapshot_path）
-- block 0 作超级块，BlockAllocator Init 从 block 1 开始（修改 P4.5 的代码注释）
+- 三设备头部 8K 双份超级块，数据区从偏移 8K 起；IoBackend 加数据区偏移（kDataRegionOffset），BlockAllocator 保持从 block 0
 - 初始化原子性处理（部分写入的检测与修复）
 - 通用裸设备 I/O 工具雏形（打开 + O_DIRECT + 对齐缓冲 + 对齐读写）
 

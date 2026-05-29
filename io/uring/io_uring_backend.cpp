@@ -1,6 +1,7 @@
 #include "io/uring/io_uring_backend.h"
 #include "common/logger.h"
 
+#include <cerrno>
 #include <fcntl.h>
 #include <linux/fs.h>
 #include <sys/ioctl.h>
@@ -63,7 +64,15 @@ namespace cabe {
             fd_ = -1;
             return err::kIoBase;
         }
-        block_count_ = dev_bytes / kValueSize;
+        // 数据区从 kDataRegionOffset 起（头部 8K 为双份超级块，P5）
+        if (dev_bytes <= kDataRegionOffset) {
+            CABE_LOG_ERROR("设备太小: %llu 字节",
+                           static_cast<unsigned long long>(dev_bytes));
+            ::close(fd_);
+            fd_ = -1;
+            return err::kEngineInvalidOpts;
+        }
+        block_count_ = (dev_bytes - kDataRegionOffset) / kValueSize;
         if (block_count_ == 0) {
             CABE_LOG_ERROR("设备太小: %llu 字节",
                            static_cast<unsigned long long>(dev_bytes));
@@ -116,74 +125,77 @@ namespace cabe {
         return block_count_;
     }
 
+    namespace {
+        // 提交单个 SQE 并等待其完成。健壮处理：submit 在 EINTR/EAGAIN 重试并要求恰好提交 1 个；
+        // wait_cqe 在 EINTR 重试（否则在飞 op 会错位收割后续 CQE → 静默错块）；用 user_data 校验
+        // 收割到的 CQE 确属本次 block_idx；无论成败恒 cqe_seen 一次，保持 CQ 环一致。
+        int32_t SubmitAndWait(struct io_uring* ring, std::uint64_t expect, const char* op) {
+            int ret;
+            do { ret = io_uring_submit(ring); } while (ret == -EINTR || ret == -EAGAIN);
+            if (ret != 1) {
+                CABE_LOG_ERROR("io_uring_submit 异常: ret=%d", ret);
+                return err::kIoBase;
+            }
+            struct io_uring_cqe* cqe = nullptr;
+            do { ret = io_uring_wait_cqe(ring, &cqe); } while (ret == -EINTR);
+            if (ret < 0) {
+                CABE_LOG_ERROR("io_uring_wait_cqe 失败: ret=%d", ret);
+                return err::kIoBase;
+            }
+            const std::uint64_t got = io_uring_cqe_get_data64(cqe);
+            const int res = cqe->res;
+            io_uring_cqe_seen(ring, cqe);
+            if (got != expect) {
+                CABE_LOG_ERROR("io_uring CQE 错位: 期望 block_idx=%llu 实际=%llu",
+                               static_cast<unsigned long long>(expect),
+                               static_cast<unsigned long long>(got));
+                return err::kIoBase;
+            }
+            if (res != static_cast<int>(kValueSize)) {
+                CABE_LOG_ERROR("io_uring %s 不完整: block_idx=%llu res=%d",
+                               op, static_cast<unsigned long long>(expect), res);
+                return err::kIoBase;
+            }
+            return err::kSuccess;
+        }
+    } // namespace
+
     int32_t IoUringIoBackend::Write(std::uint64_t block_idx, const std::byte* buf) {
+        if (block_idx >= block_count_) {
+            CABE_LOG_ERROR("block_idx 越界: %llu >= block_count_=%llu",
+                           static_cast<unsigned long long>(block_idx),
+                           static_cast<unsigned long long>(block_count_));
+            return err::kIoBase;
+        }
         struct io_uring_sqe* sqe = io_uring_get_sqe(&ring_);
         if (!sqe) {
             CABE_LOG_ERROR("io_uring_get_sqe 失败");
             return err::kIoBase;
         }
-
-        const auto offset = static_cast<__u64>(block_idx * kValueSize);
+        const auto offset = static_cast<__u64>(kDataRegionOffset + block_idx * kValueSize);
         io_uring_prep_write(sqe, 0, buf, kValueSize, offset);
         sqe->flags |= IOSQE_FIXED_FILE;
-
-        int ret = io_uring_submit(&ring_);
-        if (ret < 0) {
-            CABE_LOG_ERROR("io_uring_submit 失败: ret=%d", ret);
-            return err::kIoBase;
-        }
-
-        struct io_uring_cqe* cqe = nullptr;
-        ret = io_uring_wait_cqe(&ring_, &cqe);
-        if (ret < 0) {
-            CABE_LOG_ERROR("io_uring_wait_cqe 失败: ret=%d", ret);
-            return err::kIoBase;
-        }
-
-        int32_t result = err::kSuccess;
-        if (cqe->res != static_cast<int>(kValueSize)) {
-            CABE_LOG_ERROR("io_uring write 不完整: block_idx=%llu res=%d",
-                           static_cast<unsigned long long>(block_idx), cqe->res);
-            result = err::kIoBase;
-        }
-
-        io_uring_cqe_seen(&ring_, cqe);
-        return result;
+        io_uring_sqe_set_data64(sqe, block_idx);
+        return SubmitAndWait(&ring_, block_idx, "write");
     }
 
     int32_t IoUringIoBackend::Read(std::uint64_t block_idx, std::byte* buf) {
+        if (block_idx >= block_count_) {
+            CABE_LOG_ERROR("block_idx 越界: %llu >= block_count_=%llu",
+                           static_cast<unsigned long long>(block_idx),
+                           static_cast<unsigned long long>(block_count_));
+            return err::kIoBase;
+        }
         struct io_uring_sqe* sqe = io_uring_get_sqe(&ring_);
         if (!sqe) {
             CABE_LOG_ERROR("io_uring_get_sqe 失败");
             return err::kIoBase;
         }
-
-        const auto offset = static_cast<__u64>(block_idx * kValueSize);
+        const auto offset = static_cast<__u64>(kDataRegionOffset + block_idx * kValueSize);
         io_uring_prep_read(sqe, 0, buf, kValueSize, offset);
         sqe->flags |= IOSQE_FIXED_FILE;
-
-        int ret = io_uring_submit(&ring_);
-        if (ret < 0) {
-            CABE_LOG_ERROR("io_uring_submit 失败: ret=%d", ret);
-            return err::kIoBase;
-        }
-
-        struct io_uring_cqe* cqe = nullptr;
-        ret = io_uring_wait_cqe(&ring_, &cqe);
-        if (ret < 0) {
-            CABE_LOG_ERROR("io_uring_wait_cqe 失败: ret=%d", ret);
-            return err::kIoBase;
-        }
-
-        int32_t result = err::kSuccess;
-        if (cqe->res != static_cast<int>(kValueSize)) {
-            CABE_LOG_ERROR("io_uring read 不完整: block_idx=%llu res=%d",
-                           static_cast<unsigned long long>(block_idx), cqe->res);
-            result = err::kIoBase;
-        }
-
-        io_uring_cqe_seen(&ring_, cqe);
-        return result;
+        io_uring_sqe_set_data64(sqe, block_idx);
+        return SubmitAndWait(&ring_, block_idx, "read");
     }
 
     bool IoUringIoBackend::is_open() const noexcept {

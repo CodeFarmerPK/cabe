@@ -112,7 +112,7 @@
 ### 4.1 数据 Schema（详 [P0M2_schema_design.md](P0M2_schema_design.md)）
 
 - **`kValueSize`**：1 MiB 定长 value（D1 锁定，跨阶段不变）。
-- **`BlockId`**：`uint64_t`，高 8 位 `device_id`，低 56 位 `block_idx`；`byte_offset() = block_idx * kValueSize`（D5）。
+- **`BlockId`**：`uint64_t`，高 8 位 `device_id`，低 56 位 `block_idx`；`logical_byte_offset() = block_idx * kValueSize`（D5，逻辑偏移；P5 起物理偏移由 IoBackend 加 kDataRegionOffset）。
 - **`DeviceId`**：`uint8_t`，取值 [0, 256)。
 - **`DataView` / `DataBuffer`**：`std::span<const std::byte>` / `std::span<std::byte>`，设备上裸字节
   视图（D2 / D4）。

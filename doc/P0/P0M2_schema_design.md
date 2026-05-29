@@ -143,7 +143,7 @@ struct BlockId {
     }
     constexpr DeviceId      dev()         const noexcept { return static_cast<DeviceId>(raw >> kIdxBits); }
     constexpr std::uint64_t block_idx()   const noexcept { return raw & kIdxMask; }
-    constexpr std::uint64_t byte_offset() const noexcept { return block_idx() * kValueSize; }  // 块号 × 块大小
+    constexpr std::uint64_t logical_byte_offset() const noexcept { return block_idx() * kValueSize; }  // 逻辑偏移=块号×块大小；物理偏移 P5 起由 IoBackend 加 kDataRegionOffset(8K)
 
     // C++20：defaulted <=> 自动合成 == 与全部关系运算（FreeList 排序 / 一致性比较用）
     constexpr auto operator<=>(const BlockId&) const noexcept = default;
@@ -219,11 +219,12 @@ inline constexpr std::size_t   kWalOffReserved  = 7;
 - `Make(dev, idx)`：`(uint64_t(dev) << 56) | (idx & kIdxMask)`；`Make` 对 `block_idx`
   做掩码。为防分配器 bug 传入越界 idx 时静默写错物理块，`Make` 内加一道
   `assert(block_idx <= kIdxMask)`：Debug 防线，`NDEBUG` 下零成本消除；编译期常量求值越界则直接 ill-formed（见 M2-D9）。
-- `dev()` = `raw >> 56`；`block_idx()` = `raw & kIdxMask`；`byte_offset()` =
+- `dev()` = `raw >> 56`；`block_idx()` = `raw & kIdxMask`；`logical_byte_offset()` =
   `block_idx() * kValueSize`（"块号 × 块大小"，不写魔数 `<<20`，随 `kValueSize` 自洽）。
+  注：这是**逻辑**偏移；P5 起设备头部 8K 为双份超级块，真实物理偏移 = `kDataRegionOffset + 此值`，由 IoBackend 负责加。
 - 提供 defaulted `<=>`：C++20 下它**自动合成** `==` 与全部关系运算（FreeList 升序分配排序、
   一致性相等比较用），无需再显式声明 `==`。
-- **溢出边界（注明，非缺陷）**：`byte_offset()` 返回 `uint64_t`，当 `block_idx ≥ 2^44`
+- **溢出边界（注明，非缺陷）**：`logical_byte_offset()` 返回 `uint64_t`，当 `block_idx ≥ 2^44`
   时 `<<20` 会溢出 64 位。对应单设备容量 `2^44 × 1 MiB = 16 EiB`，现实 NVMe 不触及
   （TB–PB 级 = `2^40–2^50` 字节，`block_idx` 远小于 `2^44`）。P1 设备打开时按真实容量
   推导 `block_idx` 上限，天然落在安全区。
@@ -350,10 +351,10 @@ static_assert(std::is_standard_layout_v<ValueMeta>);
 | M2-D4 | `DataView`/`DataBuffer` 切 `std::byte`，连带改 `crc32.cpp` | 保留 `char` | `std::byte` 明确"裸字节"语义，契合裸设备 I/O（D2） | 锁定 |
 | M2-D5 | 加 `is_trivially_copyable`/`standard_layout` 断言 | 不加 | 锚定"可 `memcpy` 序列化"契约，为 P5 WAL/snapshot 兜底 | 锁定 |
 | M2-D6 | WAL 帧头仅放布局占位常量 | M2 即写编解码 | WAL 模块在 P5，M2 无 WAL 源码 | 锁定 |
-| M2-D7 | `byte_offset` 溢出边界仅注明、不加运行期检查 | 加 assert / 饱和 | 现实设备 `block_idx ≪ 2^44`，永不触及；加检查是热路径无谓开销 | 锁定 |
+| M2-D7 | `logical_byte_offset` 溢出边界仅注明、不加运行期检查 | 加 assert / 饱和 | 现实设备 `block_idx ≪ 2^44`，永不触及；加检查是热路径无谓开销 | 锁定 |
 | M2-D8 | `ValueMeta` 末尾隐式 padding 显式化为 `reserved[3] = {}` | 留隐式 padding | 隐式 padding 在聚合初始化下不确定，破坏 memcpy 序列化确定性 / CRC 可复现 / 防信息泄露；并兼作小扩展位 | 锁定（M2 review 修正） |
 | M2-D9 | `BlockId::Make` 加 `assert(block_idx <= kIdxMask)` | 不检查（纯调用方责任） | 防分配器 bug 越界静默写错块；Debug 防线、`NDEBUG` 零成本，编译期越界直接 ill-formed | 锁定（M2 review 修正） |
-| M2-D10 | `byte_offset` 用 `block_idx() * kValueSize` 而非魔数 `<< 20` | 硬编码 `<< 20` | 消除与 `kValueSize` 脱钩的魔数，语义自解释且自洽（编译器仍优化为移位） | 锁定（M2 review 修正） |
+| M2-D10 | `logical_byte_offset` 用 `block_idx() * kValueSize` 而非魔数 `<< 20` | 硬编码 `<< 20` | 消除与 `kValueSize` 脱钩的魔数，语义自解释且自洽（编译器仍优化为移位） | 锁定（M2 review 修正） |
 
 ---
 
@@ -363,7 +364,7 @@ static_assert(std::is_standard_layout_v<ValueMeta>);
 |---|---|---|
 | `CABE_VALUE_DATA_SIZE → kValueSize`（D1） | §5.1 | ✅ |
 | `DataView`/`DataBuffer` 切 `std::byte`（D4） | §5.3 / §7 | ✅ |
-| `BlockId` 8/56 编码 + `Make`/`dev`/`block_idx`/`byte_offset`（D5） | §5.4 | ✅ |
+| `BlockId` 8/56 编码 + `Make`/`dev`/`block_idx`/`logical_byte_offset`（D5） | §5.4 | ✅ |
 | 新增 `DeviceId=uint8_t`、`enum ValueState` | §5.2 / §5.5 | ✅ |
 | 旧 `ChunkMeta`/`DataState` 改名删除 | §5.8 | ✅ |
 | `ValueMeta` 24 字节 + `static_assert(==24)` 与 `sizeof(BlockId)==8` | §5.6 / §6 | ⚠️ 达成 24，但**字段顺序与字面不同**（§3 决策-2，待终审） |
@@ -395,7 +396,7 @@ static_assert(std::is_standard_layout_v<ValueMeta>);
 4. `grep` 全仓无旧名残留：`CABE_VALUE_DATA_SIZE` / `ChunkMeta` / `DataState` /
    `blockId`（字段名）/ `KeyMeta`。
 5. `BlockId` 编解码自检（可在 M5 单测固化）：`Make(d,i).dev()==d`、`.block_idx()==i`、
-   `.byte_offset()==i<<20`（`i` 在安全区内）。
+   `.logical_byte_offset()==i<<20`（`i` 在安全区内）。
 
 > **不含**：`ValueMeta`/`BlockId` 的单元测试（M5）、WAL 编解码（P5）。M2 验证为编译期
 > 断言 + 双工具链构建 + 无残留 `grep`。

@@ -104,7 +104,7 @@ namespace cabe {
         FreeList() = default;
 
         // 初始化：预填 [0, block_count) 的 BlockId（device_id 绑定 dev）。
-        // 尾部不足 kValueSize 的空间被丢弃（block_count = device_bytes / kValueSize）。
+        // 尾部不足 kValueSize 的空间被丢弃（P5：block_count = (device_bytes - kDataRegionOffset) / kValueSize，头部 8K 为超级块）。
         int32_t Init(DeviceId dev, std::uint64_t block_count);
 
         // 分配一个空闲块。成功写 *out 返回 kSuccess；空返回 kEngineNoSpace。
@@ -291,7 +291,7 @@ if (::ioctl(fd, BLKGETSIZE64, &dev_bytes) < 0) {
     // 清理已打开的 fd...
     return Status::Error(err::kIoBase);
 }
-std::uint64_t block_count = dev_bytes / kValueSize;  // 尾部不足 1 MiB 丢弃
+std::uint64_t block_count = (dev_bytes - kDataRegionOffset) / kValueSize;  // P5：扣除头部 8K 超级块；尾部不足 1 MiB 丢弃
 if (block_count == 0) {
     CABE_LOG_ERROR("设备太小: %llu 字节 < 1 MiB", (unsigned long long)dev_bytes);
     // 清理...
@@ -359,7 +359,7 @@ static_assert(kIndexKeyNotFound > kIndexBase - kSegmentSize);
 | `AllocateExhausted` | Allocate 所有块 → 再 Allocate 返回 `kEngineNoSpace` |
 | `FreeRestores` | Allocate → Free → Allocate 返回同一 BlockId |
 | `DeviceIdPreserved` | `Init(dev=5, count=3)` → Allocate → `bid.dev() == 5` |
-| `TailDiscarded` | 验证理念：`block_count = dev_bytes / kValueSize` 向下取整（调用方传入——FreeList 本身不算，测 Init 传入的值即可） |
+| `TailDiscarded` | 验证理念：`block_count = (dev_bytes - kDataRegionOffset) / kValueSize` 向下取整（P5；调用方传入——FreeList 本身不算，测 Init 传入的值即可） |
 | `MoveConstruct` | move 后原对象 empty，新对象保留块 |
 
 ### 8.2 MetaIndex 单元测试（`meta_index_test.cpp`）

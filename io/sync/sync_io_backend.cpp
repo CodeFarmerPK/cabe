@@ -1,4 +1,5 @@
 #include "io/sync/sync_io_backend.h"
+#include "util/io_retry.h"
 #include "common/logger.h"
 
 #include <fcntl.h>
@@ -50,7 +51,14 @@ namespace cabe {
             fd_ = -1;
             return err::kIoBase;
         }
-        block_count_ = dev_bytes / kValueSize;
+        // 数据区从 kDataRegionOffset 起（头部 8K 为双份超级块，P5）
+        if (dev_bytes <= kDataRegionOffset) {
+            CABE_LOG_ERROR("设备太小: %llu 字节", static_cast<unsigned long long>(dev_bytes));
+            ::close(fd_);
+            fd_ = -1;
+            return err::kEngineInvalidOpts;
+        }
+        block_count_ = (dev_bytes - kDataRegionOffset) / kValueSize;
         if (block_count_ == 0) {
             CABE_LOG_ERROR("设备太小: %llu 字节", static_cast<unsigned long long>(dev_bytes));
             ::close(fd_);
@@ -73,22 +81,34 @@ namespace cabe {
     }
 
     int32_t SyncIoBackend::Write(std::uint64_t block_idx, const std::byte* buf) {
-        const auto offset = static_cast<off_t>(block_idx * kValueSize);
-        ssize_t written = ::pwrite(fd_, buf, kValueSize, offset);
-        if (written != static_cast<ssize_t>(kValueSize)) {
-            CABE_LOG_ERROR("pwrite 失败: fd=%d block_idx=%llu written=%zd",
-                           fd_, static_cast<unsigned long long>(block_idx), written);
+        if (block_idx >= block_count_) {
+            CABE_LOG_ERROR("block_idx 越界: %llu >= block_count_=%llu",
+                           static_cast<unsigned long long>(block_idx),
+                           static_cast<unsigned long long>(block_count_));
+            return err::kIoBase;
+        }
+        const std::uint64_t offset = kDataRegionOffset + block_idx * kValueSize;
+        // EINTR 重试 + 部分写累加（见 util/io_retry.h；sync 是默认后端，信号下也需健壮）
+        if (!io_util::WriteExact(fd_, buf, kValueSize, offset)) {
+            CABE_LOG_ERROR("pwrite 失败: fd=%d block_idx=%llu",
+                           fd_, static_cast<unsigned long long>(block_idx));
             return err::kIoBase;
         }
         return err::kSuccess;
     }
 
     int32_t SyncIoBackend::Read(std::uint64_t block_idx, std::byte* buf) {
-        const auto offset = static_cast<off_t>(block_idx * kValueSize);
-        ssize_t nread = ::pread(fd_, buf, kValueSize, offset);
-        if (nread != static_cast<ssize_t>(kValueSize)) {
-            CABE_LOG_ERROR("pread 失败: fd=%d block_idx=%llu nread=%zd",
-                           fd_, static_cast<unsigned long long>(block_idx), nread);
+        if (block_idx >= block_count_) {
+            CABE_LOG_ERROR("block_idx 越界: %llu >= block_count_=%llu",
+                           static_cast<unsigned long long>(block_idx),
+                           static_cast<unsigned long long>(block_count_));
+            return err::kIoBase;
+        }
+        const std::uint64_t offset = kDataRegionOffset + block_idx * kValueSize;
+        // EINTR 重试 + 部分读累加（见 util/io_retry.h）
+        if (!io_util::ReadExact(fd_, buf, kValueSize, offset)) {
+            CABE_LOG_ERROR("pread 失败: fd=%d block_idx=%llu",
+                           fd_, static_cast<unsigned long long>(block_idx));
             return err::kIoBase;
         }
         return err::kSuccess;

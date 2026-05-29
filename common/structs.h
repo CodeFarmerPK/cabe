@@ -23,6 +23,14 @@ namespace cabe {
     // ---- 固定 value 大小（D1）----
     inline constexpr std::size_t kValueSize = 1024 * 1024; // 1 MiB
 
+    // ---- 设备超级块布局（P5；bcache 风格）----
+    // 三种设备（数据 / WAL / 快照）统一布局：头部双份超级块（主 @0 + 备 @kSuperBlockSize），
+    // 数据区 / 环形区 / 快照区从 kDataRegionOffset 起。逻辑 block 从 0 编号，
+    // 数据块物理偏移 = kDataRegionOffset + block_idx * kValueSize（由 IoBackend 加偏移）。
+    inline constexpr std::size_t kSuperBlockSize   = 4096;                              // 单份超级块 4K
+    inline constexpr std::size_t kSuperBlockCopies = 2;                                 // 双份（主 + 备）
+    inline constexpr std::size_t kDataRegionOffset = kSuperBlockSize * kSuperBlockCopies; // 8K，数据区起始偏移
+
     // ---- 设备标识（D5：占 BlockId 高 8 位）----
     using DeviceId = std::uint8_t;
 
@@ -44,7 +52,9 @@ namespace cabe {
 
         constexpr DeviceId dev() const noexcept { return static_cast<DeviceId>(raw >> kIdxBits); }
         constexpr std::uint64_t block_idx() const noexcept { return raw & kIdxMask; }
-        constexpr std::uint64_t byte_offset() const noexcept { return block_idx() * kValueSize; } // 块号 × 块大小
+        // 逻辑字节偏移（块号 × 块大小，不含数据区偏移）。真实物理偏移 =
+        // kDataRegionOffset + 此值，由 IoBackend 负责加偏移；切勿直接当物理偏移使用。
+        constexpr std::uint64_t logical_byte_offset() const noexcept { return block_idx() * kValueSize; }
 
         // C++20：defaulted <=> 自动合成 == 与全部关系运算（FreeList 排序 / 一致性比较用）
         constexpr auto operator<=>(const BlockId &) const noexcept = default;

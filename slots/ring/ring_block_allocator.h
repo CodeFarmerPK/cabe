@@ -30,9 +30,8 @@ namespace cabe {
                                    std::span<const BlockId> active_blocks);
 
     private:
-        // 当前 Init 从块 0 开始。P5 引入超级块后，设备头部将独立预留为
-        // 元数据区域（非数据块），届时需调整起始块号或偏移计算。
-        // 详见 doc/P4.5/README.md "关键技术备忘" 第 7 条。
+        // 逻辑块从 0 起。设备头部 8K 为双份超级块（P5，bcache 风格），
+        // 数据区物理偏移由 IoBackend 加 kDataRegionOffset 处理——分配器不感知超级块。
         BlockId* slots_ = nullptr;
         std::size_t capacity_ = 0;
         std::size_t head_ = 0;

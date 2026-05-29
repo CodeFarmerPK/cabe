@@ -10,7 +10,7 @@ TEST(BlockId, MakeRoundTrip) {
     const auto b = cabe::BlockId::Make(0xAB, 0x123456789ull);
     EXPECT_EQ(static_cast<unsigned>(b.dev()), 0xABu);
     EXPECT_EQ(b.block_idx(), 0x123456789ull);
-    EXPECT_EQ(b.byte_offset(), 0x123456789ull * cabe::kValueSize);
+    EXPECT_EQ(b.logical_byte_offset(), 0x123456789ull * cabe::kValueSize);
 }
 
 TEST(BlockId, Sizes) {

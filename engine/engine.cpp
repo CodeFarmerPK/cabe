@@ -1,4 +1,5 @@
 #include "engine/engine.h"
+#include "engine/super_block.h"
 #include "common/logger.h"
 #include "util/crc32.h"
 #include "util/util.h"
@@ -19,18 +20,45 @@ namespace cabe {
         if (opts.devices.empty()) return Status::Error(err::kEngineInvalidOpts);
         if (opts.devices.size() > 1) return Status::Error(err::kEngineInvalidOpts);
 
-        for (const auto& cfg : opts.devices) {
+        for (std::size_t i = 0; i < opts.devices.size(); ++i) {
+            const auto& cfg = opts.devices[i];
             DeviceContext dc;
 
-            int32_t rc = dc.io.Open(cfg.path);
+            // 超级块：create 写双份 / recover 读校验（含双向配对 + 设备编号）
+            int32_t rc = opts.create
+                ? CreateDeviceGroup(cfg, i, &dc.super_block)
+                : RecoverDeviceGroup(cfg, i, &dc.super_block);
             if (rc != err::kSuccess) {
                 for (auto& d : devices_) d.io.Close();
                 devices_.clear();
                 return Status::Error(rc);
             }
 
+            // 打开数据设备的 IoBackend
+            rc = dc.io.Open(cfg.data_path);
+            if (rc != err::kSuccess) {
+                for (auto& d : devices_) d.io.Close();
+                devices_.clear();
+                return Status::Error(rc);
+            }
+
+            // 兜底：超级块持久 block_count 不应超过 IoBackend 实测可寻址块数（recover 已核对，
+            // 此处再防御任何绕过 RecoverDeviceGroup 的路径或现算/持久值漂移）。
+            if (dc.super_block.block_count > dc.io.BlockCount()) {
+                CABE_LOG_ERROR("block_count 不一致: 超级块=%llu > 设备=%llu",
+                               static_cast<unsigned long long>(dc.super_block.block_count),
+                               static_cast<unsigned long long>(dc.io.BlockCount()));
+                for (auto& d : devices_) d.io.Close();
+                devices_.clear();
+                return Status::Error(err::kSuperBlockSizeMismatch);
+            }
+
             dc.pool = BufferPool(kDefaultPoolBlocks);
-            dc.block_allocator.Init(0, dc.io.BlockCount());
+            // 用超级块记录的 block_count（数据区块数，权威值）；逻辑 block 从 0，
+            // 物理偏移由 IoBackend 加 kDataRegionOffset
+            // TODO(P7/多设备): BlockId 的 device 位此处硬编码为 0，而 super_block.device_id=i；
+            //   多设备启用后应改为 static_cast<DeviceId>(i) 并与 RouteKey 路由对齐。
+            dc.block_allocator.Init(0, dc.super_block.block_count);
             devices_.push_back(std::move(dc));
         }
 

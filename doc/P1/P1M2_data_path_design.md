@@ -67,7 +67,7 @@
   打开文件——**未加 O_DIRECT**。
 - **`DeviceContext` 只含 `int fd`**——需补入 `BufferPool`。
 - **测试用 `/tmp/`（tmpfs）**——不支持 O_DIRECT，P1M2 加 O_DIRECT 后会 EINVAL。需改测试环境。
-- **P0 已有**：`kValueSize = 1 MiB`、`BlockId::byte_offset()` = `block_idx × kValueSize`——
+- **P0 已有**：`kValueSize = 1 MiB`、`BlockId::logical_byte_offset()` = `block_idx × kValueSize`——
   I/O 偏移天然对齐。
 - **`setup-dev.sh` 已装 `util-linux`**（含 `losetup`）——可直接创建 loop 设备。
 
@@ -262,7 +262,7 @@ namespace cabe {
 namespace cabe {
 
     int32_t WriteBlock(int fd, std::uint64_t block_idx, const std::byte* buf) {
-        const auto offset = static_cast<off_t>(block_idx * kValueSize);
+        const auto offset = static_cast<off_t>(kDataRegionOffset + block_idx * kValueSize);  // P5：数据区在头部 8K 超级块之后
         ssize_t written = ::pwrite(fd, buf, kValueSize, offset);
         if (written != static_cast<ssize_t>(kValueSize)) {
             CABE_LOG_ERROR("pwrite 失败: fd=%d block_idx=%llu written=%zd",
@@ -273,7 +273,7 @@ namespace cabe {
     }
 
     int32_t ReadBlock(int fd, std::uint64_t block_idx, std::byte* buf) {
-        const auto offset = static_cast<off_t>(block_idx * kValueSize);
+        const auto offset = static_cast<off_t>(kDataRegionOffset + block_idx * kValueSize);  // P5：数据区在头部 8K 超级块之后
         ssize_t nread = ::pread(fd, buf, kValueSize, offset);
         if (nread != static_cast<ssize_t>(kValueSize)) {
             CABE_LOG_ERROR("pread 失败: fd=%d block_idx=%llu nread=%zd",
@@ -290,7 +290,7 @@ namespace cabe {
 - **返回 `int32_t` 错误码**（按返回值分层约定：内部组件不用 `Status`；调用方 Engine 在公开方法里转 `Status::Error(rc)`）。
 - 每次读写恰好 `kValueSize`（1 MiB）——不做 short read / short write 重试（O_DIRECT 对块设备
   / loop 设备不会 short write；如果真的 short → 硬件或文件系统级故障，返回错误码）。
-- `offset = block_idx × kValueSize`——与 `BlockId::byte_offset()` 一致。
+- `offset = kDataRegionOffset + block_idx × kValueSize`（P5：头部 8K 超级块之后）——逻辑偏移见 `BlockId::logical_byte_offset()`。
 - 错误码用 `err::kIoBase`（io 段第 0 号，-101000）；P3 IoBackend 抽象层时细化为
   `kIoWriteFailed` / `kIoReadFailed` 等具体码。
 - 不做 `buf` 对齐校验——内部代码，由 BufferPool 保证（设计原则"只在系统边界做校验"）。

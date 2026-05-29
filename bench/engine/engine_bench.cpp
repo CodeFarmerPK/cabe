@@ -9,9 +9,9 @@
 
 namespace {
 
-std::string GetTestDevice() {
-    const char* dev = std::getenv("CABE_TEST_DEVICE");
-    return dev ? std::string(dev) : "";
+std::string GetEnv(const char* name) {
+    const char* v = std::getenv(name);
+    return v ? std::string(v) : "";
 }
 
 std::vector<std::byte> MakeValue(std::byte fill) {
@@ -23,12 +23,15 @@ std::vector<std::byte> MakeValue(std::byte fill) {
 class EngineBench : public benchmark::Fixture {
 public:
     void SetUp(benchmark::State& state) override {
-        device_ = GetTestDevice();
-        if (device_.empty()) {
-            state.SkipWithMessage("CABE_TEST_DEVICE 未设置");
+        data_ = GetEnv("CABE_TEST_DEVICE");
+        wal_  = GetEnv("CABE_TEST_WAL_DEVICE");
+        snap_ = GetEnv("CABE_TEST_SNAPSHOT_DEVICE");
+        if (data_.empty() || wal_.empty() || snap_.empty()) {
+            state.SkipWithMessage("需要 CABE_TEST_DEVICE / CABE_TEST_WAL_DEVICE / CABE_TEST_SNAPSHOT_DEVICE");
             return;
         }
-        auto s = engine_.Open(cabe::Options{{cabe::DeviceConfig{device_}}});
+        // 首次 create 格式化设备组；BM_Put 写满后重开用 recover 仅重置内存 FreeList
+        auto s = engine_.Open(MakeOpts(/*create=*/true));
         if (!s.ok()) {
             state.SkipWithMessage("Engine::Open 失败");
             return;
@@ -40,8 +43,15 @@ public:
     }
 
 protected:
+    cabe::Options MakeOpts(bool create) {
+        cabe::Options opts;
+        opts.devices.push_back({data_, wal_, snap_});
+        opts.create = create;
+        return opts;
+    }
+
     cabe::Engine engine_;
-    std::string device_;
+    std::string data_, wal_, snap_;
 };
 
 } // namespace
@@ -53,9 +63,9 @@ BENCHMARK_DEFINE_F(EngineBench, BM_Put)(benchmark::State& state) {
         std::string key = "put-" + std::to_string(seq++);
         auto s = engine_.Put(key, cabe::DataView{value});
         if (!s.ok()) {
-            // 写满 → 关闭重开重置 FreeList
+            // 写满 → 关闭重开（recover，仅重置内存 FreeList，不重新格式化）
             engine_.Close();
-            engine_.Open(cabe::Options{{cabe::DeviceConfig{device_}}});
+            engine_.Open(MakeOpts(/*create=*/false));
             seq = 0;
         }
         benchmark::ClobberMemory();

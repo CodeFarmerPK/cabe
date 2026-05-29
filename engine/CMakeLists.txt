@@ -3,6 +3,7 @@
 add_library(cabe_engine STATIC
     engine.cpp
     buffer_pool.cpp
+    super_block.cpp
 )
 target_link_libraries(cabe_engine PUBLIC cabe_util cabe_io cabe_index cabe_slots)
 add_library(cabe::engine ALIAS cabe_engine)

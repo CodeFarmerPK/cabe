@@ -43,6 +43,7 @@ namespace cabe {
         head_ = 0;
         tail_ = 0;
 
+        // 逻辑块从 0 起（超级块在设备头部 8K，数据区偏移由 IoBackend 处理，分配器不感知）
         for (std::uint64_t i = 0; i < block_count; ++i) {
             slots_[tail_] = BlockId::Make(dev, i);
             tail_ = (tail_ + 1) % capacity_;
@@ -80,9 +81,13 @@ namespace cabe {
 
         std::vector<bool> used(block_count, false);
         for (const auto& bid : active_blocks) {
-            used[bid.block_idx()] = true;
+            // 越界守卫：跳过超出当前 block_count 的陈旧/异常索引，避免越界写位图（堆 UB）
+            if (bid.block_idx() < block_count) {
+                used[bid.block_idx()] = true;
+            }
         }
 
+        // 逻辑块从 0 起（超级块在设备头部，数据区偏移由 IoBackend 处理）
         for (std::uint64_t i = 0; i < block_count; ++i) {
             if (!used[i]) {
                 slots_[tail_] = BlockId::Make(dev, i);

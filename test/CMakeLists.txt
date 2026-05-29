@@ -29,6 +29,9 @@ cabe_add_test(test_cpu_features util/cpu_features_test.cpp)
 cabe_add_test(test_structs      common/structs_test.cpp)
 cabe_add_test(test_error_code   common/error_code_test.cpp)
 
+# P5M1：RawDevice 测试（需设备）
+cabe_add_test(test_raw_device   util/raw_device_test.cpp)
+
 # P1M1：Engine 测试（链接 cabe::engine，不走 cabe_add_test 的默认链接列表）
 add_executable(test_engine engine/engine_test.cpp)
 target_link_libraries(test_engine PRIVATE cabe::engine GTest::gtest_main)
@@ -57,6 +60,11 @@ gtest_discover_tests(test_meta_index_contract DISCOVERY_TIMEOUT 60)
 add_executable(test_block_allocator_contract slots/block_allocator_contract_test.cpp)
 target_link_libraries(test_block_allocator_contract PRIVATE cabe::slots GTest::gtest_main)
 gtest_discover_tests(test_block_allocator_contract DISCOVERY_TIMEOUT 60)
+
+# P5M1：设备超级块测试（需 3 个 loop 设备）
+add_executable(test_super_block engine/super_block_test.cpp)
+target_link_libraries(test_super_block PRIVATE cabe::engine GTest::gtest_main)
+gtest_discover_tests(test_super_block DISCOVERY_TIMEOUT 60)
 
 # P4M1：IoUringIoBackend 测试（仅 io_uring 后端时编译）
 if(CABE_IO_BACKEND STREQUAL "io_uring")

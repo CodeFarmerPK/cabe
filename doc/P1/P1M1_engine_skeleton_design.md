@@ -173,7 +173,10 @@ ROADMAP P2 段给的 Options 含 `std::vector<DeviceContext> devices`——但 `
 namespace cabe {
 
     struct DeviceConfig {
-        std::string path;  // 设备节点或文件路径（如 "/dev/nvme0n1" 或 "/tmp/cabe-test.data"）
+        // P5 起：一个设备组 = 数据 + WAL + 快照三块设备
+        std::string data_path;       // 数据设备（如 "/dev/nvme0n1"）
+        std::string wal_path;        // WAL 设备
+        std::string snapshot_path;   // 快照设备
     };
 
     struct Options {

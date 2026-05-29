@@ -88,13 +88,21 @@ public:
 
 ```cpp
 struct DeviceConfig {
-    std::string path;                   // 设备节点或文件路径
-    // 未来可追加字段（如 capacity_hint 等）——末尾追加向后兼容
+    std::string data_path;       // 数据设备（裸块设备，存 value）
+    std::string wal_path;        // WAL 设备（P5 起）
+    std::string snapshot_path;   // 快照设备（P5 起）
 };
 
 struct Options {
-    std::vector<DeviceConfig> devices;  // N 在 Open 时固定（D8）
-    // 未来可追加字段（如 pool_blocks 等）——末尾追加向后兼容
+    std::vector<DeviceConfig> devices;  // 设备组列表，N 在 Open 时固定（D8）
+    bool create = false;                // P5：false=recover（默认）/ true=create（破坏性初始化）
+    // P5 WAL / 快照 / 恢复配置（全局统一，末尾追加）：
+    WalLevel wal_level = WalLevel::WalSync;
+    std::size_t wal_buffer_size = 32 * 1024;
+    std::uint32_t wal_flush_interval_ms = 1000;
+    std::uint64_t snapshot_threshold_bytes = 512ull * 1024 * 1024;
+    std::uint32_t snapshot_interval_sec = 600;
+    bool verify_value_crc_on_recovery = false;
 };
 ```
 
@@ -219,8 +227,8 @@ P1 期间确立的约定，P2 冻结确认：
 | 风险 | 说明 | 缓解 |
 |---|---|---|
 | 冻结太早 | P3-P12 可能发现公开 API 不够用——需要改签名 | 冻结是意图声明非绝对约束；改了同步更新文档 |
-| Options 太简 | 当前只有 `DeviceConfig { path }`——未来可能需要 capacity / pool_size 等 | 可追加字段约定已声明；追加不破坏已有代码 |
-| 错误码太少 | 当前 13 个——后续 io / wal / wal_recovery 段尚未分配 | 6000 容量充足；段内追加即可 |
+| Options 扩展 | P5 已按"末尾追加"约定扩展：`DeviceConfig` 改三路径（data/wal/snapshot）、`Options` 增 `create` + WAL/快照/恢复字段 | 追加字段未改既有字段语义；DeviceConfig 由单路径变三路径属被迫改动，已同步本文 |
+| 错误码扩展 | P5M1 已在 wal_recovery 段分配超级块校验码（`kSuperBlock*`，-105000 起）；io / wal 段仍按需追加 | 6000 容量充足；段内追加即可 |
 | Put 无持久化保证 | 当前 power loss 丢全部数据 | P5 WAL 解决；API 承诺语义已声明"P5+ 才有持久化原子性" |
 
 ---

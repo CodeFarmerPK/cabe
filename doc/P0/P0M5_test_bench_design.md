@@ -169,7 +169,7 @@ bench/
 | `util/hash_test` | 冻结基线 `Hash("")==0x2D06800538D394C2` 等若干钉死值；`Hash(DataView)==Hash(string_view)` 一致；100K 随机 key 分布卡方 < 临界；`RouteToDevice` 值域 `[0,N)` |
 | `util/util_test` | `GetMonotonicTimeNs` 单调不减；`GetWallTimeNs`/`GetMonotonicTimeNs` 语义（两次调用差为正、量级合理） |
 | `util/cpu_features_test` | smoke：`GetArch()` 返回非崩溃值；`HasSSE42/HasAVX2/HasARMCRC` 可调用且自洽（x86 上多次调用一致） |
-| `common/structs_test` | `BlockId::Make(d,i)` 往返 `dev()==d`/`block_idx()==i`/`byte_offset()==i*kValueSize`（安全区 i）；`sizeof(BlockId)==8`、`sizeof(ValueMeta)==24`、`alignof==8`（运行时再确认）；`ValueMeta{}` 全零、`reserved` 为 0；`ValueState` 取值；`<=>` 比较 |
+| `common/structs_test` | `BlockId::Make(d,i)` 往返 `dev()==d`/`block_idx()==i`/`logical_byte_offset()==i*kValueSize`（安全区 i）；`sizeof(BlockId)==8`、`sizeof(ValueMeta)==24`、`alignof==8`（运行时再确认）；`ValueMeta{}` 全零、`reserved` 为 0；`ValueState` 取值；`<=>` 比较 |
 | `common/error_code_test` | 段基址数值、相邻段不重叠（运行时验证 `static_assert` 同款关系）；memory 段取值 `kMemNullPointer==-100000`… |
 | `common/logger_test` | 捕获 stderr 验格式 `^\[WARN\]\[\d+\]\[logger_test.cpp:\d+\] …$`；**级别过滤**：注入阈值后 DEBUG 被过滤、ERROR 输出（依赖 §7 钩子）；非变参与变参两种调用 |
 

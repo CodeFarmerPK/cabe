@@ -177,7 +177,7 @@ int32_t SyncIoBackend::Open(const std::string& path) {
         fd_ = -1;
         return err::kIoBase;
     }
-    block_count_ = dev_bytes / kValueSize;  // 尾部不足 1 MiB 丢弃
+    block_count_ = (dev_bytes - kDataRegionOffset) / kValueSize;  // P5：扣除头部 8K 超级块（另有 dev_bytes<=kDataRegionOffset 守卫防下溢）
     if (block_count_ == 0) {
         CABE_LOG_ERROR("设备太小: %llu 字节", (unsigned long long)dev_bytes);
         ::close(fd_);
@@ -202,7 +202,7 @@ int32_t SyncIoBackend::Close() {
 **Write / Read**（从 P1 io.cpp 迁入）：
 ```cpp
 int32_t SyncIoBackend::Write(std::uint64_t block_idx, const std::byte* buf) {
-    const auto offset = static_cast<off_t>(block_idx * kValueSize);
+    const auto offset = static_cast<off_t>(kDataRegionOffset + block_idx * kValueSize);  // P5：数据区在头部 8K 之后（另有 block_idx 越界守卫）
     ssize_t written = ::pwrite(fd_, buf, kValueSize, offset);
     if (written != static_cast<ssize_t>(kValueSize)) {
         CABE_LOG_ERROR("pwrite 失败: fd=%d block_idx=%llu", fd_, (unsigned long long)block_idx);
@@ -295,7 +295,7 @@ cabe_flags (INTERFACE)
 | `OpenCloseNormal` | Open 成功 → is_open() == true → Close → is_open() == false |
 | `DoubleOpenFails` | Open → 再 Open 返回错误 |
 | `CloseIdempotent` | 未 Open 就 Close → 不报错（幂等） |
-| `BlockCountCorrect` | Open → BlockCount() == dev_bytes / kValueSize |
+| `BlockCountCorrect` | Open → BlockCount() == (dev_bytes - kDataRegionOffset) / kValueSize（P5） |
 | `WriteReadRoundTrip` | 分配对齐 buffer → 填 pattern → Write → Read → 比对一致 |
 | `WriteReadMultipleBlocks` | 写 block 0-3 不同 pattern → 逐块读回验证 |
 | `DestructorAutoCloses` | Open 后直接析构 → 不崩溃（日志警告） |
