@@ -79,6 +79,7 @@ Status Engine::Put(std::string_view key, DataView value) {
     auto& dc = devices_[RouteKey(key)];
 
     // ---- 覆盖写处理：如果 key 已存在，先释放旧块 ----
+    //   （P1 做法；P5M2 起已反转为"先申请新块、提交后才回收旧块"并接入 WAL，见 P5M2 §7.3）
     ValueMeta old_meta{};
     int32_t lookup_rc = dc.meta_index.Lookup(key, &old_meta);
     if (lookup_rc == err::kSuccess) {

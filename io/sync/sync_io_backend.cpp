@@ -94,6 +94,13 @@ namespace cabe {
                            fd_, static_cast<unsigned long long>(block_idx));
             return err::kIoBase;
         }
+        // P5M2 级别 1：value FUA 持久——落盘后才返回（WAL 级别语义见 P5M2 §7.5）。
+        // M3 起按级别分支：异步级别（3/4）的 value 不在此刻 fdatasync。
+        if (::fdatasync(fd_) < 0) {
+            CABE_LOG_ERROR("fdatasync 失败: fd=%d block_idx=%llu",
+                           fd_, static_cast<unsigned long long>(block_idx));
+            return err::kIoBase;
+        }
         return err::kSuccess;
     }
 

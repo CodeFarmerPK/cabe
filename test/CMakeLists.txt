@@ -66,6 +66,11 @@ add_executable(test_super_block engine/super_block_test.cpp)
 target_link_libraries(test_super_block PRIVATE cabe::engine GTest::gtest_main)
 gtest_discover_tests(test_super_block DISCOVERY_TIMEOUT 60)
 
+# P5M2：WAL 核心测试（帧编解码往返不需设备；端到端级别 1 需 3 个 loop 设备）
+add_executable(test_wal wal/wal_test.cpp)
+target_link_libraries(test_wal PRIVATE cabe::engine cabe::wal GTest::gtest_main)
+gtest_discover_tests(test_wal DISCOVERY_TIMEOUT 60)
+
 # P4M1：IoUringIoBackend 测试（仅 io_uring 后端时编译）
 if(CABE_IO_BACKEND STREQUAL "io_uring")
     add_executable(test_io_uring_backend io/io_uring_backend_test.cpp)

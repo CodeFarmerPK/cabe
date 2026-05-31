@@ -29,7 +29,7 @@ namespace cabe {
                 ? CreateDeviceGroup(cfg, i, &dc.super_block)
                 : RecoverDeviceGroup(cfg, i, &dc.super_block);
             if (rc != err::kSuccess) {
-                for (auto& d : devices_) d.io.Close();
+                for (auto& d : devices_) { d.wal.Close(); d.io.Close(); }
                 devices_.clear();
                 return Status::Error(rc);
             }
@@ -37,7 +37,7 @@ namespace cabe {
             // 打开数据设备的 IoBackend
             rc = dc.io.Open(cfg.data_path);
             if (rc != err::kSuccess) {
-                for (auto& d : devices_) d.io.Close();
+                for (auto& d : devices_) { d.wal.Close(); d.io.Close(); }
                 devices_.clear();
                 return Status::Error(rc);
             }
@@ -48,7 +48,7 @@ namespace cabe {
                 CABE_LOG_ERROR("block_count 不一致: 超级块=%llu > 设备=%llu",
                                static_cast<unsigned long long>(dc.super_block.block_count),
                                static_cast<unsigned long long>(dc.io.BlockCount()));
-                for (auto& d : devices_) d.io.Close();
+                for (auto& d : devices_) { d.wal.Close(); d.io.Close(); }
                 devices_.clear();
                 return Status::Error(err::kSuperBlockSizeMismatch);
             }
@@ -59,6 +59,17 @@ namespace cabe {
             // TODO(P7/多设备): BlockId 的 device 位此处硬编码为 0，而 super_block.device_id=i；
             //   多设备启用后应改为 static_cast<DeviceId>(i) 并与 RouteKey 路由对齐。
             dc.block_allocator.Init(0, dc.super_block.block_count);
+
+            // P5M2：仅 create 模式打开 WAL（D9）；recover 的 WAL 重放 + 续写在 M5。
+            if (opts.create) {
+                rc = dc.wal.Open(cfg.wal_path, opts.wal_level);
+                if (rc != err::kSuccess) {
+                    for (auto& d : devices_) { d.wal.Close(); d.io.Close(); }
+                    devices_.clear();
+                    return Status::Error(rc);
+                }
+            }
+
             devices_.push_back(std::move(dc));
         }
 
@@ -71,6 +82,7 @@ namespace cabe {
         if (!opened_) return Status::Error(err::kEngineNotOpen);
 
         for (auto& dc : devices_) {
+            dc.wal.Close();
             dc.io.Close();
         }
         devices_.clear();
@@ -84,13 +96,11 @@ namespace cabe {
         if (key.empty()) return Status::Error(err::kMemEmptyKey);
         if (value.size() != kValueSize) return Status::Error(err::kEngineInvalidValue);
 
+        if (key.size() > kWalKeyMax) return Status::Error(err::kWalKeyTooLong);
+
         auto& dc = devices_[RouteKey(key)];
 
-        ValueMeta old_meta{};
-        if (dc.meta_index.Lookup(key, &old_meta) == err::kSuccess) {
-            dc.block_allocator.Recycle(old_meta.block);
-        }
-
+        // 申请新块（不先回收旧块——旧块在提交成功后才回收，覆盖安全；见 P5M2 §7.3）
         BlockId block_id{};
         int32_t rc = dc.block_allocator.Acquire(&block_id);
         if (rc != err::kSuccess) return Status::Error(rc);
@@ -101,7 +111,10 @@ namespace cabe {
             return Status::Error(err::kEnginePoolExhausted);
         }
         std::memcpy(buf, value.data(), kValueSize);
+        const std::uint32_t value_crc = util::CRC32(value);
+        const std::uint64_t now = util::GetWallTimeNs();
 
+        // 级别 1：value FUA 持久（io.Write 内部 fdatasync），写在 WAL 之前
         rc = dc.io.Write(block_id.block_idx(), buf);
         dc.pool.Free(buf);
         if (rc != err::kSuccess) {
@@ -109,12 +122,28 @@ namespace cabe {
             return Status::Error(rc);
         }
 
+        // 级别 1：WAL 帧同步落盘（预写日志：写在内存索引之前）
+        rc = dc.wal.WriteWal(WalEntry{WalEntryType::Put, key, block_id, value_crc, now});
+        if (rc != err::kSuccess) {
+            dc.block_allocator.Recycle(block_id);
+            return Status::Error(rc);
+        }
+
+        // 提交到内存索引（WAL 落盘成功之后）
+        ValueMeta old_meta{};
+        const bool had_old = (dc.meta_index.Lookup(key, &old_meta) == err::kSuccess);
         ValueMeta meta{};
         meta.block     = block_id;
-        meta.timestamp = util::GetWallTimeNs();
-        meta.crc       = util::CRC32(value);
+        meta.timestamp = now;
+        meta.crc       = value_crc;
         meta.state     = ValueState::Active;
         dc.meta_index.Insert(key, meta);
+
+        // 提交成功后回收旧块（覆盖写时的前一份 value）
+        if (had_old) {
+            dc.block_allocator.Recycle(old_meta.block);
+            TrimDeviceBlock(dc, old_meta.block);
+        }
 
         return Status::Ok();
     }
@@ -159,11 +188,15 @@ namespace cabe {
 
         ValueMeta meta{};
         int32_t rc = dc.meta_index.Lookup(key, &meta);
-        if (rc != err::kSuccess) return Status::Error(rc);
+        if (rc != err::kSuccess) return Status::Error(rc);   // 不存在 → 不写 WAL
 
+        // 级别 1：墓碑帧同步落盘（写在内存改动之前；预写日志）
+        rc = dc.wal.WriteWal(WalEntry{WalEntryType::Delete, key, BlockId{}, 0, util::GetWallTimeNs()});
+        if (rc != err::kSuccess) return Status::Error(rc);   // WAL 失败 → 不动内存
+
+        dc.meta_index.Delete(key);
         dc.block_allocator.Recycle(meta.block);
         TrimDeviceBlock(dc, meta.block);
-        dc.meta_index.Delete(key);
 
         return Status::Ok();
     }

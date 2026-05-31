@@ -62,9 +62,9 @@ P1 阶段全部技术结论链回 P1M1–M4 各稿：
 | 朴素 I/O | `WriteBlock` / `ReadBlock`：pwrite / pread + O_DIRECT → `int32_t` | [P1M2](P1M2_data_path_design.md) §6 |
 | FreeList | `vector<BlockId>` + LIFO；`Init(dev, block_count)` / `Allocate(out*) → int32_t` / `Free(id)` | [P1M3](P1M3_index_freelist_design.md) §4 |
 | MetaIndex | `unordered_map<string, ValueMeta>`；`Insert` / `Lookup(key, out*) → int32_t` / `Delete` | [P1M3](P1M3_index_freelist_design.md) §5 |
-| Put 路径 | 覆盖写先 Free 旧块 → Allocate 新块 → BufferPool → WriteBlock → CRC32 → MetaIndex Insert | [P1M4](P1M4_e2e_design.md) §3.1 |
+| Put 路径 | 覆盖写先 Free 旧块 → Allocate 新块 → BufferPool → WriteBlock → CRC32 → MetaIndex Insert（**P5M2 起已反转：先申请新块、提交后回收旧块 + 接入 WAL，见 P5M2 §7.3**） | [P1M4](P1M4_e2e_design.md) §3.1 |
 | Get 路径 | MetaIndex Lookup → BufferPool → ReadBlock → CRC32 校验 → memcpy 出参 | [P1M4](P1M4_e2e_design.md) §3.2 |
-| Delete 路径 | 标记删除 + 立即回收（FreeList Free + MetaIndex Delete）；不做 I/O、不发 TRIM | [P1M4](P1M4_e2e_design.md) §3.3 |
+| Delete 路径 | 标记删除 + 立即回收（FreeList Free + MetaIndex Delete）；不做 I/O、不发 TRIM（**P5M2 起：先写 WAL 墓碑帧（落盘）再删内存、回收，见 P5M2 §7.4**） | [P1M4](P1M4_e2e_design.md) §3.3 |
 | 测试环境 | loop 设备（`scripts/mkloop.sh`）；`CABE_TEST_DEVICE` 环境变量 | [P1M2](P1M2_data_path_design.md) §8 |
 | 错误码 | engine 段 8 个码（AlreadyOpen / NotOpen / InvalidOpts / InvalidValue / NotImplemented / NoSpace / PoolExhausted / DataCorrupted）+ index 段 1 个码（KeyNotFound） | `common/error_code.h` |
 

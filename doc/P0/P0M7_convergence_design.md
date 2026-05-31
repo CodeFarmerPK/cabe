@@ -120,7 +120,7 @@
   ——为达成 24 字节布局并保证 memcpy 序列化的确定性而非 ROADMAP 字面顺序；论证详见
   [P0M2 §3 / §6](P0M2_schema_design.md)。
 - **`ValueState`**：`uint8_t` 枚举，`Active = 0` / `Deleted = 1`。
-- **WAL 帧头占位**：8 字节布局常量（`kWalFrameHeaderSize` 等），P5 真实编解码时移入 `wal` 模块。
+- **WAL 帧头占位**：8 字节布局常量（`kWalFrameHeaderSize` 等）。（P5M2 已完成：真实 128 字节帧入 `wal/wal_frame.h`，占位常量已从 `structs.h` 移除。）
 - **完整 `static_assert` 链**：`BlockId` 8 字节、`ValueMeta` 24 字节 / 8 字节对齐 / trivially-copyable
   / standard-layout —— 编译期不可绕过。
 

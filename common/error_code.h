@@ -57,6 +57,12 @@ namespace cabe::err {
 
     static_assert(kIndexKeyNotFound > kIndexBase - kSegmentSize);
 
+    // ---- wal 段（P5M2 新增：WAL 运行期）----
+    inline constexpr int kWalKeyTooLong  = InSeg(kWalBase, 0); // -103000  key 超过 kWalKeyMax（Put 拒绝）
+    inline constexpr int kWalWriteFailed = InSeg(kWalBase, 1); // -103001  WAL 设备写/落盘失败（区别于数据盘 IO 错）
+
+    static_assert(kWalWriteFailed > kWalBase - kSegmentSize);
+
     // ---- wal_recovery 段（P5M1 新增：设备超级块校验）----
     inline constexpr int kSuperBlockMagicMismatch      = InSeg(kWalRecoveryBase, 0); // -105000  主备都非本格式/未格式化（魔数或版本不符）
     inline constexpr int kSuperBlockCrcMismatch        = InSeg(kWalRecoveryBase, 1); // -105001  本格式但主备 CRC 均损坏
@@ -71,6 +77,6 @@ namespace cabe::err {
 
     static_assert(kSuperBlockSizeMismatch > kWalRecoveryBase - kSegmentSize);
 
-    // io / wal 段的具体码随各模块产生时补入。
+    // io 段的具体码随模块产生时补入。
 } // namespace cabe::err
 #endif // CABE_ERROR_CODE_H

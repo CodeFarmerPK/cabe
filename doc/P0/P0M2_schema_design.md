@@ -172,7 +172,7 @@ static_assert(alignof(ValueMeta) == 8);
 static_assert(std::is_trivially_copyable_v<ValueMeta>);
 static_assert(std::is_standard_layout_v<ValueMeta>);
 
-// ---- WAL 帧头占位（D13；真实编解码在 P5，届时这些常量可迁入 wal 模块）----
+// ---- WAL 帧头占位（D13）— 注：P5M2 已移除以下占位常量，真实 128 字节帧见 wal/wal_frame.h ----
 // 布局：magic:4 | version:1 | flags:1 | entry_type:1 | reserved:1 = 8 字节
 inline constexpr std::size_t   kWalFrameHeaderSize = 8;
 inline constexpr std::uint32_t kWalMagic   = 0x45424143u;   // "CABE"（字节序在 P5 最终确定）
@@ -249,6 +249,10 @@ inline constexpr std::size_t   kWalOffReserved  = 7;
   与 `is_standard_layout`，故 `sizeof==24`、可平凡复制、标准布局全部不变。
 
 ### 5.7 WAL 帧头占位常量（D13）
+
+> **P5M2 已取代**：真实 128 字节 WAL 帧（结构 + 编解码 + 常量）落在 `wal/wal_frame.h`；
+> 本节描述的 8 字节占位常量（`kWalFrameHeaderSize` / `kWalMagic` / `kWalVersion` / `kWalOff*`）
+> 已从 `common/structs.h` 移除。以下为 P0M2 当时的占位设计，留作历史记录。
 
 - M2 只放**布局占位**：`kWalFrameHeaderSize=8`、`kWalMagic`、`kWalVersion` 及各字段偏移
   `kWalOff*`，让 schema 文件先固定帧头尺寸与字段位置。

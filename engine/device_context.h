@@ -4,11 +4,13 @@
 #include "engine/backend_config.h"
 #include "engine/buffer_pool.h"
 #include "engine/super_block.h"
+#include "wal/wal.h"
 
 namespace cabe {
 
     struct DeviceContext {
         IoBackendImpl io;
+        Wal wal;                    // P5M2：管 WAL 设备（与 io 分离，复用 RawDevice）
         BufferPool pool{0};
         BlockAllocatorImpl block_allocator;
         MetaIndexImpl meta_index;

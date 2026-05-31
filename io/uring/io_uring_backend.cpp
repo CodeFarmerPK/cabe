@@ -176,7 +176,16 @@ namespace cabe {
         io_uring_prep_write(sqe, 0, buf, kValueSize, offset);
         sqe->flags |= IOSQE_FIXED_FILE;
         io_uring_sqe_set_data64(sqe, block_idx);
-        return SubmitAndWait(&ring_, block_idx, "write");
+        int32_t rc = SubmitAndWait(&ring_, block_idx, "write");
+        if (rc != err::kSuccess) return rc;
+        // P5M2 级别 1：value FUA 持久——落盘后才返回（与 sync 后端语义一致）。
+        // P7 异步化后改用每笔 RWF_DSYNC（见 P5M2 §11），届时移除此整盘 fdatasync。
+        if (::fdatasync(fd_) < 0) {
+            CABE_LOG_ERROR("fdatasync 失败: fd=%d block_idx=%llu",
+                           fd_, static_cast<unsigned long long>(block_idx));
+            return err::kIoBase;
+        }
+        return err::kSuccess;
     }
 
     int32_t IoUringIoBackend::Read(std::uint64_t block_idx, std::byte* buf) {

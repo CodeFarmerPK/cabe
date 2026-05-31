@@ -223,7 +223,7 @@ int32_t MetaIndex::Insert(std::string_view key, const ValueMeta& meta) {
 
 - `map_[string(key)]`：key 不存在时插入 + 赋值；key 存在时覆盖。
 - 覆盖语义：cabe 的 Put 是"最后一次写生效"——重复 key 覆盖旧 meta（含旧 BlockId——
-  Engine 层负责先 FreeList.Free 旧块再 Insert 新 meta，详见 P1M4）。
+  Engine 层负责先 FreeList.Free 旧块再 Insert 新 meta，详见 P1M4；**P5M2 起已改为先申请新块、提交后才回收旧块**，见 P5M2 §7.3）。
 
 **Lookup**：
 ```cpp
