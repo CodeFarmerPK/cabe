@@ -47,6 +47,9 @@ protected:
         cabe::Options opts;
         opts.devices.push_back({data_, wal_, snap_});
         opts.create = create;
+        // 不设 wal_level → 默认级别 3（WalSync：WAL 同步、value 异步，不 FUA）。
+        // 注意：M2 时引擎强制级别 1（value 也 FUA），故 M3 后 BM_Put 少一次 value fdatasync，
+        //   数字会比 M2 基线好——对比历史基准时须知此为持久级别变化，非纯代码优化。
         return opts;
     }
 

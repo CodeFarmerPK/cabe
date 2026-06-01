@@ -28,6 +28,9 @@ namespace cabe {
         Status Get(std::string_view key, DataBuffer value);
         Status Delete(std::string_view key);
 
+        // P5M3：运行时改 WAL 级别（收紧档时先刷攒批缓冲）。
+        Status SetWalLevel(WalLevel level);
+
         bool is_open() const noexcept;
 
     private:
@@ -35,6 +38,7 @@ namespace cabe {
         void TrimDeviceBlock(DeviceContext& dc, BlockId id);
 
         bool opened_ = false;
+        Options options_;                          // P5M3：常驻；Wal/IoBackend 现读 wal_level
         std::vector<DeviceContext> devices_;
     };
 

@@ -21,11 +21,13 @@ namespace cabe {
         , block_count_(other.block_count_)
         , ring_(other.ring_)
         , ring_initialized_(other.ring_initialized_)
-        , files_registered_(other.files_registered_) {
+        , files_registered_(other.files_registered_)
+        , opts_(other.opts_) {
         other.fd_ = -1;
         other.block_count_ = 0;
         other.ring_initialized_ = false;
         other.files_registered_ = false;
+        other.opts_ = nullptr;
     }
 
     IoUringIoBackend& IoUringIoBackend::operator=(IoUringIoBackend&& other) noexcept {
@@ -39,17 +41,20 @@ namespace cabe {
             ring_ = other.ring_;
             ring_initialized_ = other.ring_initialized_;
             files_registered_ = other.files_registered_;
+            opts_ = other.opts_;
 
             other.fd_ = -1;
             other.block_count_ = 0;
             other.ring_initialized_ = false;
             other.files_registered_ = false;
+            other.opts_ = nullptr;
         }
         return *this;
     }
 
-    int32_t IoUringIoBackend::Open(const std::string& path) {
+    int32_t IoUringIoBackend::Open(const std::string& path, const Options* opts) {
         if (fd_ >= 0) return err::kIoBase;
+        opts_ = opts;
 
         fd_ = ::open(path.c_str(), O_RDWR | O_DIRECT, 0);
         if (fd_ < 0) {
@@ -178,12 +183,15 @@ namespace cabe {
         io_uring_sqe_set_data64(sqe, block_idx);
         int32_t rc = SubmitAndWait(&ring_, block_idx, "write");
         if (rc != err::kSuccess) return rc;
-        // P5M2 级别 1：value FUA 持久——落盘后才返回（与 sync 后端语义一致）。
-        // P7 异步化后改用每笔 RWF_DSYNC（见 P5M2 §11），届时移除此整盘 fdatasync。
-        if (::fdatasync(fd_) < 0) {
-            CABE_LOG_ERROR("fdatasync 失败: fd=%d block_idx=%llu",
-                           fd_, static_cast<unsigned long long>(block_idx));
-            return err::kIoBase;
+        // P5M3：value 持久按 WAL 级别——级别 1/2 做 FUA（fdatasync），3/4 异步（不刷）。
+        // opts_ == nullptr 按级别 3：不 FUA。P7 异步化后改用每笔 RWF_DSYNC（见 P5M2 §11）。
+        const WalLevel lvl = opts_ ? opts_->wal_level : WalLevel::WalSync;
+        if (IsValueFuaLevel(lvl)) {
+            if (::fdatasync(fd_) < 0) {
+                CABE_LOG_ERROR("fdatasync 失败: fd=%d block_idx=%llu",
+                               fd_, static_cast<unsigned long long>(block_idx));
+                return err::kIoBase;
+            }
         }
         return err::kSuccess;
     }

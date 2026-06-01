@@ -4,6 +4,7 @@
 #include "io/io_backend.h"
 #include "common/error_code.h"
 #include "common/structs.h"
+#include "engine/options.h"   // P5M3：现读 wal_level 决定 value 是否 FUA
 
 #include <cstdint>
 #include <string>
@@ -20,7 +21,7 @@ namespace cabe {
         SyncIoBackend(SyncIoBackend&& other) noexcept;
         SyncIoBackend& operator=(SyncIoBackend&& other) noexcept;
 
-        int32_t Open(const std::string& path);
+        int32_t Open(const std::string& path, const Options* opts = nullptr);
         int32_t Close();
         std::uint64_t BlockCount() const noexcept;
         int32_t Write(std::uint64_t block_idx, const std::byte* buf);
@@ -31,6 +32,7 @@ namespace cabe {
     private:
         int fd_ = -1;
         std::uint64_t block_count_ = 0;
+        const Options* opts_ = nullptr;   // P5M3：现读 wal_level（nullptr → 级别 3，不 FUA）
     };
 
     static_assert(IoBackend<SyncIoBackend>);

@@ -24,9 +24,9 @@
 
 | 里程碑 | 主题 | 设计稿 | 状态 |
 |---|---|---|---|
-| M1 | 设备超级块 | `P5M1_super_block_design.md` | ✅ 已实装（工作区，未提交） |
-| M2 | WAL 模块 + 帧格式 + 严格级别 | `P5M2_wal_core_design.md` | 设计稿 |
-| M3 | WAL 分级 2/3/4 + 缓冲区配置 | `P5M3_wal_levels_design.md` | 待设计 |
+| M1 | 设备超级块 | `P5M1_super_block_design.md` | ✅ 已实装 |
+| M2 | WAL 模块 + 帧格式 + 严格级别 | `P5M2_wal_core_design.md` | ✅ 已实装 |
+| M3 | WAL 分级 2/3/4 + 缓冲区配置 | `P5M3_wal_levels_design.md` | 设计稿 |
 | M4 | MetaIndex 快照 + WAL 环形队列 | `P5M4_snapshot_design.md` | 待设计 |
 | M5 | 崩溃恢复 + Engine 集成收尾 | `P5M5_recovery_design.md` | 待设计 |
 | M6 | P5 收敛 | `P5M6_convergence_design.md` | 待设计 |
@@ -59,7 +59,7 @@ P5M1 ──► P5M2 ──► P5M3 ──► P5M4 ──► P5M5 ──► P5M6
 | P5-D8 | 超级块与 block 编号 | bcache 风格：头部 8K 双份超级块，数据区从偏移 8K 起，逻辑 block 从 0；物理偏移 = `kDataRegionOffset + block_idx * kValueSize`，由 IoBackend 加，BlockAllocator 不感知超级块 |
 | P5-D9 | 快照协调 | 协调逻辑放 Engine 层；手动接口 `Engine::Snapshot()` |
 | P5-D10 | 测试策略 | 基础恢复测试 + WAL 损坏测试；完整崩溃注入矩阵推迟 |
-| P5-D11 | 启动模式 + 恢复 | 仅 create/recover；恢复时 value CRC 校验默认关可选；WAL 自管缓冲区且运行时可调 |
+| P5-D11 | 启动模式 + 恢复 | 仅 create/recover；恢复时 value CRC 校验默认关可选；WAL 自管缓冲区（大小 Open 时定死，运行时改大小留未来；`wal_level` 可运行时改） |
 
 ## WAL 4 级持久化（D4）
 
@@ -96,12 +96,14 @@ P5M1 ──► P5M2 ──► P5M3 ──► P5M4 ──► P5M5 ──► P5M6
 
 ### P5M3（WAL 分级 2/3/4 + 缓冲区配置）
 
-- 级别 2（value 等 + WAL 攒批）
-- 级别 3（value 异步 + WAL 等）——默认级别
-- 级别 4（全异步）+ 异步落盘策略（累积量优先 + 定时兜底）
-- Options 加 WAL 级别 / 缓冲区大小 / 异步刷出间隔
-- WAL 缓冲区大小运行时可调（修改时先刷出当前缓冲）
-- 级别 3/4 下 value 损坏的读时 CRC 检测路径
+- 级别 2（value 落盘 + WAL 攒批）、级别 3（value 异步 + WAL 落盘，默认）、级别 4（全异步）
+- 级别内化：`Engine` 只分发，`Wal`/`IoBackend` 现读 `Options.wal_level` 分支；`Engine::Put/Delete` 不变
+- WAL 攒批：一块 `wal_buffer_size` 缓冲、两档共用；新增 `Flush()`；刷出触发 = 攒满 + Close + 切档收紧（**定时刷出 → P7**）
+- value 异步（3/4）：`io.Write` 按级别决定 FUA
+- Options 的 WAL 字段生效：`wal_level`、`wal_buffer_size` 生效；`wal_flush_interval_ms` 存而不用（P7）
+- `wal_buffer_size` Open 时定死、运行期固定（运行时改大小 → 未来）；级别可运行时改（Engine 改级别入口，收紧先刷缓冲）
+- 默认级别从 M2 的"强制级别 1"变回级别 3
+- 级别 3/4 下 value 损坏的读时检测：复用现有 `Get` 的 CRC；崩溃场景验证在 M5
 
 ### P5M4（MetaIndex 快照 + WAL 环形队列）
 

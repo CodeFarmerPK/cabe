@@ -19,9 +19,11 @@ namespace cabe {
 
     SyncIoBackend::SyncIoBackend(SyncIoBackend&& other) noexcept
         : fd_(other.fd_)
-        , block_count_(other.block_count_) {
+        , block_count_(other.block_count_)
+        , opts_(other.opts_) {
         other.fd_ = -1;
         other.block_count_ = 0;
+        other.opts_ = nullptr;
     }
 
     SyncIoBackend& SyncIoBackend::operator=(SyncIoBackend&& other) noexcept {
@@ -29,14 +31,17 @@ namespace cabe {
             if (fd_ >= 0) Close();
             fd_ = other.fd_;
             block_count_ = other.block_count_;
+            opts_ = other.opts_;
             other.fd_ = -1;
             other.block_count_ = 0;
+            other.opts_ = nullptr;
         }
         return *this;
     }
 
-    int32_t SyncIoBackend::Open(const std::string& path) {
+    int32_t SyncIoBackend::Open(const std::string& path, const Options* opts) {
         if (fd_ >= 0) return err::kIoBase;
+        opts_ = opts;
 
         fd_ = ::open(path.c_str(), O_RDWR | O_DIRECT, 0);
         if (fd_ < 0) {
@@ -94,12 +99,15 @@ namespace cabe {
                            fd_, static_cast<unsigned long long>(block_idx));
             return err::kIoBase;
         }
-        // P5M2 级别 1：value FUA 持久——落盘后才返回（WAL 级别语义见 P5M2 §7.5）。
-        // M3 起按级别分支：异步级别（3/4）的 value 不在此刻 fdatasync。
-        if (::fdatasync(fd_) < 0) {
-            CABE_LOG_ERROR("fdatasync 失败: fd=%d block_idx=%llu",
-                           fd_, static_cast<unsigned long long>(block_idx));
-            return err::kIoBase;
+        // P5M3：value 持久按 WAL 级别——级别 1/2 做 FUA（fdatasync），3/4 异步（不刷）。
+        // opts_ == nullptr（bench/test 单独构造）按级别 3：不 FUA。
+        const WalLevel lvl = opts_ ? opts_->wal_level : WalLevel::WalSync;
+        if (IsValueFuaLevel(lvl)) {
+            if (::fdatasync(fd_) < 0) {
+                CABE_LOG_ERROR("fdatasync 失败: fd=%d block_idx=%llu",
+                               fd_, static_cast<unsigned long long>(block_idx));
+                return err::kIoBase;
+            }
         }
         return err::kSuccess;
     }

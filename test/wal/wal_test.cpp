@@ -35,6 +35,21 @@ cabe::WalFrame ReadWalFrame(const std::string& wal_path, std::uint64_t block_idx
     return f;
 }
 
+// 把 WAL 日志区前 n_blocks 个 4K 块清零（避免 loop 设备残留帧让"攒批未刷"判定误报）。
+void ZeroWalRegion(const std::string& wal_path, std::size_t n_blocks) {
+    cabe::RawDevice dev;
+    ASSERT_EQ(dev.Open(wal_path), cabe::err::kSuccess);
+    std::byte* buf = cabe::RawDevice::AllocAligned(cabe::kWalBlockSize);
+    ASSERT_NE(buf, nullptr);
+    std::memset(buf, 0, cabe::kWalBlockSize);
+    for (std::size_t i = 0; i < n_blocks; ++i) {
+        ASSERT_EQ(dev.WriteAt(cabe::kDataRegionOffset + i * cabe::kWalBlockSize, buf, cabe::kWalBlockSize),
+                  cabe::err::kSuccess);
+    }
+    cabe::RawDevice::FreeAligned(buf);
+    dev.Close();
+}
+
 } // namespace
 
 // ============================================================
@@ -116,7 +131,7 @@ protected:
         }
     }
 
-    cabe::Options MakeOpts() const {
+    cabe::Options MakeOpts(cabe::WalLevel lvl = cabe::WalLevel::Strict) const {
         cabe::Options opts;
         cabe::DeviceConfig cfg;
         cfg.data_path     = data_;
@@ -124,7 +139,7 @@ protected:
         cfg.snapshot_path = snap_;
         opts.devices.push_back(cfg);
         opts.create    = true;                  // create：格式化三设备
-        opts.wal_level = cabe::WalLevel::Strict; // M2 显式跑级别 1
+        opts.wal_level = lvl;
         return opts;
     }
 
@@ -207,8 +222,10 @@ TEST_F(WalDeviceTest, PutThenGet) {
 
 // 直接驱动 Wal：写满一个 4K 块后第 33 帧落到第二个块开头（seq=33）。
 TEST_F(WalDeviceTest, BlockAdvance) {
+    cabe::Options opts;
+    opts.wal_level = cabe::WalLevel::Strict;
     cabe::Wal wal;
-    ASSERT_EQ(wal.Open(wal_, cabe::WalLevel::Strict), cabe::err::kSuccess);
+    ASSERT_EQ(wal.Open(wal_, &opts), cabe::err::kSuccess);
 
     for (int i = 0; i < 33; ++i) {
         cabe::WalEntry e{};
@@ -229,8 +246,10 @@ TEST_F(WalDeviceTest, BlockAdvance) {
 
 // 直接驱动 Wal：超长 key 被 WriteWal 拒绝。
 TEST_F(WalDeviceTest, WalRejectsLongKey) {
+    cabe::Options opts;
+    opts.wal_level = cabe::WalLevel::Strict;
     cabe::Wal wal;
-    ASSERT_EQ(wal.Open(wal_, cabe::WalLevel::Strict), cabe::err::kSuccess);
+    ASSERT_EQ(wal.Open(wal_, &opts), cabe::err::kSuccess);
 
     cabe::WalEntry e{};
     e.type = cabe::WalEntryType::Put;
@@ -238,4 +257,123 @@ TEST_F(WalDeviceTest, WalRejectsLongKey) {
     e.key = big;
     EXPECT_EQ(wal.WriteWal(e), cabe::err::kWalKeyTooLong);
     wal.Close();
+}
+
+// ============================================================
+// P5M3：级别 2/3/4 的可观测时机
+// ============================================================
+
+// 攒批档（级别 4）：Put 后帧还在缓冲、盘上为空；Close 触发 Flush 后才落盘。
+TEST_F(WalDeviceTest, Level4Buffers) {
+    ZeroWalRegion(wal_, 2);   // 清零日志区前两块，避免 loop 设备残留误判
+    cabe::Engine engine;
+    ASSERT_EQ(engine.Open(MakeOpts(cabe::WalLevel::Async)).code, cabe::err::kSuccess);
+
+    const std::string key = "lvl4";
+    const auto value = MakeValue(std::byte{0x44});
+    ASSERT_EQ(engine.Put(key, cabe::DataView{value.data(), value.size()}).code, cabe::err::kSuccess);
+
+    EXPECT_FALSE(cabe::VerifyFrame(ReadWalFrame(wal_, 0, 0))) << "攒批档 Put 后帧不应立刻落盘";
+
+    engine.Close();   // Close → Flush → 帧落盘
+    const cabe::WalFrame f = ReadWalFrame(wal_, 0, 0);
+    ASSERT_TRUE(cabe::VerifyFrame(f));
+    EXPECT_EQ(f.entry_type, static_cast<std::uint8_t>(cabe::WalEntryType::Put));
+    EXPECT_EQ(f.key_len, key.size());
+}
+
+// 默认级别 = WalSync（3）：WAL 同步，Put 后帧立刻在盘。
+TEST_F(WalDeviceTest, DefaultLevelWalSync) {
+    ZeroWalRegion(wal_, 2);
+    cabe::Options opts;
+    cabe::DeviceConfig cfg;
+    cfg.data_path = data_; cfg.wal_path = wal_; cfg.snapshot_path = snap_;
+    opts.devices.push_back(cfg);
+    opts.create = true;   // 不设 wal_level → 默认 WalSync=3
+    cabe::Engine engine;
+    ASSERT_EQ(engine.Open(opts).code, cabe::err::kSuccess);
+
+    const std::string key = "deflt";
+    const auto value = MakeValue(std::byte{0x33});
+    ASSERT_EQ(engine.Put(key, cabe::DataView{value.data(), value.size()}).code, cabe::err::kSuccess);
+
+    const cabe::WalFrame f = ReadWalFrame(wal_, 0, 0);
+    ASSERT_TRUE(cabe::VerifyFrame(f)) << "级别 3 应 WAL 同步，帧立刻在盘";
+    EXPECT_EQ(f.entry_type, static_cast<std::uint8_t>(cabe::WalEntryType::Put));
+    engine.Close();
+}
+
+// 切档收紧（级别 4 → 1）：SetWalLevel 先刷攒批缓冲，帧落盘。
+TEST_F(WalDeviceTest, FlushOnTighten) {
+    ZeroWalRegion(wal_, 2);
+    cabe::Engine engine;
+    ASSERT_EQ(engine.Open(MakeOpts(cabe::WalLevel::Async)).code, cabe::err::kSuccess);
+
+    const std::string key = "tighten";
+    const auto value = MakeValue(std::byte{0x55});
+    ASSERT_EQ(engine.Put(key, cabe::DataView{value.data(), value.size()}).code, cabe::err::kSuccess);
+    EXPECT_FALSE(cabe::VerifyFrame(ReadWalFrame(wal_, 0, 0)));   // 攒批：还没落盘
+
+    ASSERT_EQ(engine.SetWalLevel(cabe::WalLevel::Strict).code, cabe::err::kSuccess);
+
+    const cabe::WalFrame f = ReadWalFrame(wal_, 0, 0);
+    ASSERT_TRUE(cabe::VerifyFrame(f)) << "收紧档应刷净缓冲";
+    EXPECT_EQ(f.key_len, key.size());
+    engine.Close();
+}
+
+// 读己之写：四个级别下 Put 完紧接 Get 都读回原值（进程内，与级别无关）。
+TEST_F(WalDeviceTest, ReadYourWritesAllLevels) {
+    const cabe::WalLevel levels[] = {
+        cabe::WalLevel::Strict, cabe::WalLevel::ValueSync,
+        cabe::WalLevel::WalSync, cabe::WalLevel::Async,
+    };
+    for (cabe::WalLevel lvl : levels) {
+        cabe::Engine engine;
+        ASSERT_EQ(engine.Open(MakeOpts(lvl)).code, cabe::err::kSuccess);
+        const std::string key = "ryw";
+        const auto value = MakeValue(std::byte{0x77});
+        ASSERT_EQ(engine.Put(key, cabe::DataView{value.data(), value.size()}).code, cabe::err::kSuccess);
+        std::vector<std::byte> out(cabe::kValueSize);
+        ASSERT_EQ(engine.Get(key, cabe::DataBuffer{out.data(), out.size()}).code, cabe::err::kSuccess);
+        EXPECT_EQ(out, value) << "level=" << static_cast<int>(lvl);
+        engine.Close();
+    }
+}
+
+// 攒批档"缓冲攒满自动刷出"：直接驱动 Wal，连写满一整块缓冲（默认 32K=256 帧），
+// 验证满前不在盘、第 256 帧触发 Flush 后整批落盘（覆盖 wal.cpp 满判定 + 多块刷出算术）。
+TEST_F(WalDeviceTest, FlushOnBufferFull) {
+    cabe::Options opts;
+    opts.wal_level = cabe::WalLevel::Async;   // 攒批档；wal_buffer_size 默认 32K
+    const std::size_t cap = opts.wal_buffer_size / cabe::kWalFrameSize;    // 256 帧
+    const std::size_t blocks = opts.wal_buffer_size / cabe::kWalBlockSize; // 8 块
+    ZeroWalRegion(wal_, blocks + 1);          // 清零将被刷的整块缓冲区域
+
+    cabe::Wal wal;
+    ASSERT_EQ(wal.Open(wal_, &opts), cabe::err::kSuccess);
+
+    // 写前 cap-1 帧：缓冲未满，盘上为空
+    for (std::size_t i = 0; i + 1 < cap; ++i) {
+        cabe::WalEntry e{};
+        e.type = cabe::WalEntryType::Put; e.key = "k";
+        e.block = cabe::BlockId::Make(0, i); e.value_crc = 1; e.timestamp = 1;
+        ASSERT_EQ(wal.WriteWal(e), cabe::err::kSuccess);
+    }
+    EXPECT_FALSE(cabe::VerifyFrame(ReadWalFrame(wal_, 0, 0))) << "攒批未满，不应落盘";
+
+    // 写第 cap 帧：触发自动刷出，整批落盘
+    cabe::WalEntry last_e{};
+    last_e.type = cabe::WalEntryType::Put; last_e.key = "k";
+    last_e.block = cabe::BlockId::Make(0, cap - 1); last_e.value_crc = 1; last_e.timestamp = 1;
+    ASSERT_EQ(wal.WriteWal(last_e), cabe::err::kSuccess);
+    wal.Close();
+
+    const cabe::WalFrame first = ReadWalFrame(wal_, 0, 0);                  // block0 slot0
+    ASSERT_TRUE(cabe::VerifyFrame(first));
+    EXPECT_EQ(first.seq, 1u);
+    const std::uint32_t fpb = static_cast<std::uint32_t>(cabe::kWalFramesPerBlock);
+    const cabe::WalFrame last = ReadWalFrame(wal_, blocks - 1, fpb - 1);    // 最后一块最后一槽
+    ASSERT_TRUE(cabe::VerifyFrame(last));
+    EXPECT_EQ(last.seq, static_cast<std::uint64_t>(cap));                   // seq=256
 }

@@ -309,8 +309,8 @@ namespace cabe {
 
         // WAL 配置（全局统一；M3 起生效，M1 占位）
         WalLevel wal_level = WalLevel::WalSync;        // 默认级别 3
-        std::size_t wal_buffer_size = 32 * 1024;       // 攒批缓冲，默认 32K（仅级别 2/4 生效，运行时可调）
-        std::uint32_t wal_flush_interval_ms = 1000;    // 级别 4 定时刷出兜底，默认 1s
+        std::size_t wal_buffer_size = 32 * 1024;       // 攒批缓冲，默认 32K（P5M3：同步/攒批共用单块、Open 时定死，运行时改大小留未来）
+        std::uint32_t wal_flush_interval_ms = 1000;    // 定时刷出兜底，默认 1s（P5M3 不读；定时刷出需后台线程，推迟 P7）
 
         // 快照配置（全局统一；M4 起生效，M1 占位）
         std::uint64_t snapshot_threshold_bytes = 512ull * 1024 * 1024; // WAL 达 512M 触发快照

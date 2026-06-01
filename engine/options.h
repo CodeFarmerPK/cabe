@@ -16,6 +16,19 @@ namespace cabe {
         Async     = 4,  // 仅内存 → 返回（value + WAL 全异步）
     };
 
+    // 四档 = 两个正交开关（P5-D4）：WAL 是否同步落盘、value 是否 FUA。集中在此，
+    // 供 Wal / IoBackend / Engine 现读级别时统一判定，避免散落硬编码枚举集合。
+    inline constexpr bool IsWalSyncLevel(WalLevel lvl) noexcept {   // WAL 每帧同步落盘（1/3）
+        return lvl == WalLevel::Strict || lvl == WalLevel::WalSync;
+    }
+    inline constexpr bool IsValueFuaLevel(WalLevel lvl) noexcept {  // value FUA 持久（1/2）
+        return lvl == WalLevel::Strict || lvl == WalLevel::ValueSync;
+    }
+    inline constexpr bool IsValidWalLevel(WalLevel lvl) noexcept {  // 枚举合法性（1..4）
+        return lvl == WalLevel::Strict || lvl == WalLevel::ValueSync ||
+               lvl == WalLevel::WalSync || lvl == WalLevel::Async;
+    }
+
     // 设备组：每个数据设备关联一块 WAL 设备 + 一块快照设备（P5-D3/D6）。
     // 注意：三成员同为 string，位置式聚合初始化 {a,b,c} 易把 wal/snapshot 写反且无编译报错；
     // 构造时建议用逐字段赋值（.data_path=.../.wal_path=...）或确保顺序为 数据→WAL→快照。
@@ -33,8 +46,8 @@ namespace cabe {
 
         // ---- WAL 配置（全局统一；M3 起生效，M1 占位）----
         WalLevel wal_level = WalLevel::WalSync;                 // 默认级别 3
-        std::size_t wal_buffer_size = 32 * 1024;                // 攒批缓冲，默认 32K（仅级别 2/4；运行时可调）
-        std::uint32_t wal_flush_interval_ms = 1000;             // 级别 4 定时刷出兜底，默认 1s
+        std::size_t wal_buffer_size = 32 * 1024;                // 同步/攒批共用的单块缓冲，默认 32K；Open 时定死、运行期固定（运行时改大小留未来 Options 维护接口）
+        std::uint32_t wal_flush_interval_ms = 1000;             // 定时刷出兜底，默认 1s；M3 不读此字段（攒满/Close/切档刷），定时刷出需后台线程，推迟 P7
 
         // ---- 快照配置（全局统一；M4 起生效，M1 占位）----
         std::uint64_t snapshot_threshold_bytes = 512ull * 1024 * 1024; // WAL 达此值触发快照，默认 512M

@@ -4,6 +4,7 @@
 #include "io/io_backend.h"
 #include "common/error_code.h"
 #include "common/structs.h"
+#include "engine/options.h"   // P5M3：现读 wal_level 决定 value 是否 FUA
 
 #include <cstdint>
 #include <liburing.h>
@@ -21,7 +22,7 @@ namespace cabe {
         IoUringIoBackend(IoUringIoBackend&& other) noexcept;
         IoUringIoBackend& operator=(IoUringIoBackend&& other) noexcept;
 
-        int32_t Open(const std::string& path);
+        int32_t Open(const std::string& path, const Options* opts = nullptr);
         int32_t Close();
         std::uint64_t BlockCount() const noexcept;
         int32_t Write(std::uint64_t block_idx, const std::byte* buf);
@@ -37,6 +38,7 @@ namespace cabe {
         struct io_uring ring_{};
         bool ring_initialized_ = false;
         bool files_registered_ = false;
+        const Options* opts_ = nullptr;   // P5M3：现读 wal_level（nullptr → 级别 3，不 FUA）
     };
 
     static_assert(IoBackend<IoUringIoBackend>);

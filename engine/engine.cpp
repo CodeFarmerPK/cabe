@@ -20,6 +20,8 @@ namespace cabe {
         if (opts.devices.empty()) return Status::Error(err::kEngineInvalidOpts);
         if (opts.devices.size() > 1) return Status::Error(err::kEngineInvalidOpts);
 
+        options_ = opts;   // P5M3：常驻；组件持 &options_ 现读 wal_level
+
         for (std::size_t i = 0; i < opts.devices.size(); ++i) {
             const auto& cfg = opts.devices[i];
             DeviceContext dc;
@@ -35,7 +37,7 @@ namespace cabe {
             }
 
             // 打开数据设备的 IoBackend
-            rc = dc.io.Open(cfg.data_path);
+            rc = dc.io.Open(cfg.data_path, &options_);
             if (rc != err::kSuccess) {
                 for (auto& d : devices_) { d.wal.Close(); d.io.Close(); }
                 devices_.clear();
@@ -62,7 +64,7 @@ namespace cabe {
 
             // P5M2：仅 create 模式打开 WAL（D9）；recover 的 WAL 重放 + 续写在 M5。
             if (opts.create) {
-                rc = dc.wal.Open(cfg.wal_path, opts.wal_level);
+                rc = dc.wal.Open(cfg.wal_path, &options_);
                 if (rc != err::kSuccess) {
                     for (auto& d : devices_) { d.wal.Close(); d.io.Close(); }
                     devices_.clear();
@@ -81,14 +83,18 @@ namespace cabe {
     Status Engine::Close() {
         if (!opened_) return Status::Error(err::kEngineNotOpen);
 
+        // 关闭每个设备：先 wal（含攒批档收尾 Flush）再 io；记下第一个错误并向上传播，
+        // 但仍关完所有设备（避免 fd 泄漏）。级别 2/4 收尾刷盘失败必须让调用方知道。
+        int32_t first_err = err::kSuccess;
         for (auto& dc : devices_) {
-            dc.wal.Close();
-            dc.io.Close();
+            int32_t wrc = dc.wal.Close();
+            int32_t irc = dc.io.Close();
+            if (first_err == err::kSuccess) first_err = (wrc != err::kSuccess) ? wrc : irc;
         }
         devices_.clear();
         opened_ = false;
         CABE_LOG_INFO("Engine::Close 完成");
-        return Status::Ok();
+        return first_err != err::kSuccess ? Status::Error(first_err) : Status::Ok();
     }
 
     Status Engine::Put(std::string_view key, DataView value) {
@@ -114,7 +120,7 @@ namespace cabe {
         const std::uint32_t value_crc = util::CRC32(value);
         const std::uint64_t now = util::GetWallTimeNs();
 
-        // 级别 1：value FUA 持久（io.Write 内部 fdatasync），写在 WAL 之前
+        // 按级别（io.Write 现读 wal_level）：1/2 value FUA、3/4 异步；写在 WAL 之前
         rc = dc.io.Write(block_id.block_idx(), buf);
         dc.pool.Free(buf);
         if (rc != err::kSuccess) {
@@ -122,7 +128,7 @@ namespace cabe {
             return Status::Error(rc);
         }
 
-        // 级别 1：WAL 帧同步落盘（预写日志：写在内存索引之前）
+        // 按级别（wal.WriteWal 现读 wal_level）：1/3 同步落盘、2/4 攒批；预写日志，写在内存索引之前
         rc = dc.wal.WriteWal(WalEntry{WalEntryType::Put, key, block_id, value_crc, now});
         if (rc != err::kSuccess) {
             dc.block_allocator.Recycle(block_id);
@@ -190,7 +196,7 @@ namespace cabe {
         int32_t rc = dc.meta_index.Lookup(key, &meta);
         if (rc != err::kSuccess) return Status::Error(rc);   // 不存在 → 不写 WAL
 
-        // 级别 1：墓碑帧同步落盘（写在内存改动之前；预写日志）
+        // 按级别：1/3 同步落盘、2/4 攒批；墓碑帧写在内存改动之前（预写日志）
         rc = dc.wal.WriteWal(WalEntry{WalEntryType::Delete, key, BlockId{}, 0, util::GetWallTimeNs()});
         if (rc != err::kSuccess) return Status::Error(rc);   // WAL 失败 → 不动内存
 
@@ -198,6 +204,24 @@ namespace cabe {
         dc.block_allocator.Recycle(meta.block);
         TrimDeviceBlock(dc, meta.block);
 
+        return Status::Ok();
+    }
+
+    Status Engine::SetWalLevel(WalLevel new_level) {
+        if (!opened_) return Status::Error(err::kEngineNotOpen);
+        if (!IsValidWalLevel(new_level)) return Status::Error(err::kEngineInvalidOpts);
+        // 注：recover 模式 M3 不开 WAL（仅 create 开），此入口对 WAL 落盘无实际作用——
+        //   改级别只动 options_，而 recover 下 WAL 通路本就不写（重放/续写留 M5）。
+        const WalLevel old = options_.wal_level;
+        // 收紧 WAL（攒批档 2/4 → 同步档 1/3）：先把各设备攒批缓冲刷净，新保证才从此刻成立。
+        const bool tighten_wal = !IsWalSyncLevel(old) && IsWalSyncLevel(new_level);
+        if (tighten_wal) {
+            for (auto& dc : devices_) {
+                int32_t rc = dc.wal.Flush();
+                if (rc != err::kSuccess) return Status::Error(rc);
+            }
+        }
+        options_.wal_level = new_level;   // 组件下次操作自然现读到
         return Status::Ok();
     }
 

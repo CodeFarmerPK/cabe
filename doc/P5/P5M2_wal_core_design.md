@@ -258,11 +258,13 @@ namespace cabe {
 } // namespace cabe
 ```
 
+> **P5M3 起本节 `Wal` 接口已改写**（下文代码为 M2 当时形态）：`Open` 改为 `Open(wal_path, const Options*)`、去掉 `level_`（改现读 `opts->wal_level`）、缓冲从单个 4K 块改为 `wal_buffer_size` 单块（同步/攒批两档共用）、新增公开 `Flush()`。详见 `P5M3_wal_levels_design.md` §6。
+
 要点：
-- **公共只有 `Open` / `WriteWal` / `Close`**；`Append`/`Sync` 私有。级别策略封装在 `WriteWal` 内部——M2 即"`Append` + `Sync`"（级别 1）；M3 按级别分支（同步级 `Append`+`Sync`；异步级 `Append`+缓冲，由背景刷出调 `Sync`），**接口不变**。
+- **公共只有 `Open` / `WriteWal` / `Close` / `Flush`**；`Append`/`Sync` 私有。级别策略封装在 `WriteWal` 内部——M2 即"`Append` + `Sync`"（级别 1）；P5M3 按级别分支（同步档每帧落盘；攒批档只 `Append`、靠攒满/Close/切档收紧触发 `Flush()`，后台刷出推迟 P7）。
 - **职责划分**：调用方给逻辑内容（type/key/block/value_crc/timestamp）；`Wal` 拥有 `seq`、帧 CRC、设备偏移、4K 块缓冲——`Engine` 看不到裸设备（满足 D2）。
 - **移动语义**：`DeviceContext` 会被 `std::move` 进 `devices_`，故 `Wal` 必须可移动且移动时置空源 `dev_`/`cur_buf_`，避免双重 close / 双重 free（与 `RawDevice`/`IoBackend` 同款）。
-- （M4 备注）快照前需"强制刷净 WAL 缓冲",届时加公共 `Flush()`/屏障方法;M2 不需要(级别 1 每帧即落盘)。
+- （备注）公共 `Flush()` 在 **P5M3** 新增（攒批档刷出 / 切档收紧 / Close 用）；M4 快照前"强制刷净 WAL 缓冲"复用它;M2 不需要(级别 1 每帧即落盘)。
 
 ---
 
@@ -444,7 +446,7 @@ WAL 的 I/O 机制分两层:**底层机制**(P5:`RawDevice` 同步) 与 **上层
 - **环形缓冲 + 头部回收 + 写满兜底**：依赖快照,P5M4。
 - **崩溃恢复 / WAL 重放 / recover 续写**：P5M5。重放用 `seq` 定边界、消环形区绕圈歧义。
 - **真正的 TRIM**：异步批量 `BLKDISCARD`,P7;M2 沿用空桩。
-- **WAL 缓冲区大小运行时可调**：随级别 2/4 的攒批缓冲,P5M3。
+- **WAL 缓冲区大小运行时可调**：P5M3 已定缓冲大小 Open 时定死、运行期固定；运行时改大小进一步推迟到未来 Options 维护接口。
 
 ---
 

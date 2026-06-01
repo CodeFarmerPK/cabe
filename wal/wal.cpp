@@ -3,6 +3,7 @@
 #include "common/error_code.h"
 #include "common/logger.h"
 #include "util/crc32.h"
+#include "util/util.h"
 
 #include <cstring>
 #include <utility>
@@ -55,10 +56,11 @@ namespace cabe {
     Wal::Wal(Wal&& o) noexcept
         : dev_(std::move(o.dev_))
         , cur_buf_(o.cur_buf_)
+        , buf_size_(o.buf_size_)
         , cur_off_(o.cur_off_)
-        , slot_(o.slot_)
+        , n_frames_(o.n_frames_)
         , seq_next_(o.seq_next_)
-        , level_(o.level_) {
+        , opts_(o.opts_) {
         o.cur_buf_ = nullptr;
     }
 
@@ -67,31 +69,46 @@ namespace cabe {
             if (cur_buf_ != nullptr) RawDevice::FreeAligned(cur_buf_);
             dev_      = std::move(o.dev_);
             cur_buf_  = o.cur_buf_;
+            buf_size_ = o.buf_size_;
             cur_off_  = o.cur_off_;
-            slot_     = o.slot_;
+            n_frames_ = o.n_frames_;
             seq_next_ = o.seq_next_;
-            level_    = o.level_;
+            opts_     = o.opts_;
             o.cur_buf_ = nullptr;
         }
         return *this;
     }
 
-    int32_t Wal::Open(const std::string& wal_path, WalLevel level) {
+    bool Wal::sync_level() const noexcept {
+        return IsWalSyncLevel(opts_->wal_level);
+    }
+
+    int32_t Wal::Open(const std::string& wal_path, const Options* opts) {
+        if (opts == nullptr) {   // Wal 必须有 Options 现读 wal_level（与 IoBackend 不同，不接受 nullptr）
+            CABE_LOG_ERROR("Wal::Open 收到空 Options 指针");
+            return err::kIoBase;
+        }
         int32_t rc = dev_.Open(wal_path);
         if (rc != err::kSuccess) return rc;
 
-        cur_buf_ = RawDevice::AllocAligned(kWalBlockSize);
+        opts_ = opts;
+        // 缓冲大小 = wal_buffer_size 向上取整到 4K 倍数且 ≥ 4K（O_DIRECT + 整块整帧）。
+        std::size_t sz = opts->wal_buffer_size;
+        if (sz < kWalBlockSize) sz = kWalBlockSize;
+        sz = util::AlignUp(sz, kWalBlockSize);
+        buf_size_ = sz;
+
+        cur_buf_ = RawDevice::AllocAligned(buf_size_);
         if (cur_buf_ == nullptr) {
-            CABE_LOG_ERROR("WAL 当前块缓冲分配失败: %zu 字节", kWalBlockSize);
+            CABE_LOG_ERROR("WAL 缓冲分配失败: %zu 字节", buf_size_);
             dev_.Close();
             return err::kIoBase;
         }
-        std::memset(cur_buf_, 0, kWalBlockSize);
+        std::memset(cur_buf_, 0, buf_size_);
 
         cur_off_  = kDataRegionOffset;   // create：日志从头部 8K 之后起，空日志
-        slot_     = 0;
+        n_frames_ = 0;
         seq_next_ = 1;
-        level_    = level;
         return err::kSuccess;
     }
 
@@ -101,33 +118,37 @@ namespace cabe {
         int32_t rc = Append(e);
         if (rc != err::kSuccess) return rc;
 
-        // M2：统一按级别 1（Strict）——Append 后立即整块落盘，落盘成功才返回。
-        // M3 起据 level_ 分支：同步级即时 Sync()，异步级仅 Append() 交背景刷出。
-        (void)level_;
-        return Sync();
+        if (sync_level()) {
+            // 同步档（级别 1/3）：每帧整块落盘，落盘成功才返回。
+            return SyncCurrentBlock();
+        }
+        // 攒批档（级别 2/4）：只攒；缓冲满了才一次性刷（定时刷出留 P7）。
+        if (static_cast<std::size_t>(n_frames_) * kWalFrameSize >= buf_size_) {
+            return Flush();
+        }
+        return err::kSuccess;
     }
 
     int32_t Wal::Append(const WalEntry& e) {
         if (cur_buf_ == nullptr) {
-            // WAL 未打开（如 M2 的 recover 模式不开 WAL）——拒绝写入，避免空指针解引用。
+            // WAL 未打开（如 recover 模式 M2/M3 不开 WAL）——拒绝写入，避免空指针解引用。
             CABE_LOG_ERROR("WAL 未打开，拒绝 Append");
             return err::kWalWriteFailed;
         }
-        if (slot_ == kWalFramesPerBlock) {
-            // 当前 4K 块已满，前进到下一块（M2 线性增长，不判满；环形回收见 M4）。
+        // 同步档：当前 4K 块满 32 帧 → 推进到下一个 4K 块（同步档只用缓冲的第一个块）。
+        if (sync_level() && n_frames_ == kWalFramesPerBlock) {
             cur_off_ += kWalBlockSize;
-            slot_ = 0;
+            n_frames_ = 0;
             std::memset(cur_buf_, 0, kWalBlockSize);
         }
         const WalFrame f = EncodeFrame(e, seq_next_++);
-        std::memcpy(cur_buf_ + slot_ * kWalFrameSize, &f, kWalFrameSize);
-        ++slot_;
+        std::memcpy(cur_buf_ + static_cast<std::size_t>(n_frames_) * kWalFrameSize, &f, kWalFrameSize);
+        ++n_frames_;
         return err::kSuccess;
     }
 
-    int32_t Wal::Sync() {
-        // 整块写当前 4K 块 + fdatasync（级别 1：落盘后才返回）。
-        // 块内已写帧每次以完全相同字节重写，torn-write 安全（见 P5M2 §5.4）。
+    int32_t Wal::SyncCurrentBlock() {
+        // 同步档：整块写当前 4K 块 + fdatasync。块内已写帧每次以相同字节重写，对不完整写入安全。
         if (dev_.WriteAt(cur_off_, cur_buf_, kWalBlockSize) != err::kSuccess) {
             CABE_LOG_ERROR("WAL 写失败: off=%llu", static_cast<unsigned long long>(cur_off_));
             return err::kWalWriteFailed;
@@ -139,12 +160,38 @@ namespace cabe {
         return err::kSuccess;
     }
 
+    int32_t Wal::Flush() {
+        if (cur_buf_ == nullptr) return err::kSuccess;   // 未打开：无待刷，空操作
+        if (sync_level())        return err::kSuccess;   // 同步档：每帧已落盘
+        if (n_frames_ == 0)      return err::kSuccess;   // 攒批档但缓冲空
+
+        // 攒批档：把已用的整数个 4K 块一次性写出 + fdatasync。
+        const std::size_t used  = static_cast<std::size_t>(n_frames_) * kWalFrameSize;
+        const std::size_t bytes = util::AlignUp(used, kWalBlockSize);
+        if (dev_.WriteAt(cur_off_, cur_buf_, bytes) != err::kSuccess) {
+            CABE_LOG_ERROR("WAL 攒批刷出失败: off=%llu bytes=%zu",
+                           static_cast<unsigned long long>(cur_off_), bytes);
+            return err::kWalWriteFailed;
+        }
+        if (dev_.Sync() != err::kSuccess) {
+            CABE_LOG_ERROR("WAL fdatasync 失败: off=%llu", static_cast<unsigned long long>(cur_off_));
+            return err::kWalWriteFailed;
+        }
+        cur_off_ += bytes;
+        n_frames_ = 0;
+        std::memset(cur_buf_, 0, buf_size_);
+        return err::kSuccess;
+    }
+
     int32_t Wal::Close() {
+        int32_t frc = err::kSuccess;
         if (cur_buf_ != nullptr) {
+            frc = Flush();   // 优雅关闭前刷净攒批缓冲（同步档 / 空缓冲为空操作）
             RawDevice::FreeAligned(cur_buf_);
             cur_buf_ = nullptr;
         }
-        return dev_.Close();
+        int32_t crc = dev_.Close();
+        return frc != err::kSuccess ? frc : crc;
     }
 
 } // namespace cabe

@@ -11,6 +11,7 @@
 #define CABE_UTIL_H
 
 #include <chrono>
+#include <cstddef>
 #include <cstdint>
 
 namespace cabe::util {
@@ -29,6 +30,11 @@ namespace cabe::util {
         return std::chrono::duration_cast<std::chrono::nanoseconds>(
             std::chrono::steady_clock::now().time_since_epoch())
             .count();
+    }
+
+    // 把 x 向上取整到 a 的倍数（a 须为正）。用于 4K / O_DIRECT 对齐等。
+    constexpr std::size_t AlignUp(std::size_t x, std::size_t a) noexcept {
+        return ((x + a - 1) / a) * a;
     }
 
 } // namespace cabe::util
