@@ -12,6 +12,11 @@
 namespace cabe::util {
     uint32_t CRC32(DataView data);
 
+    // P5M4：流式增量 CRC32C（软件路径，复用同一张表）。供快照分块累积 data_crc——
+    //   caller 自管首末：crc = 0xFFFFFFFF 起，逐块 crc = CRC32CStreamUpdate(crc, chunk)，末取 ~crc。
+    //   与 CRC32 一致：~CRC32CStreamUpdate(0xFFFFFFFF, whole) == CRC32(whole)。
+    uint32_t CRC32CStreamUpdate(uint32_t crc, DataView data) noexcept;
+
     // 仅供测试：转发到内部两条实现，用于验证"软件 fallback 与硬件 SSE4.2 路径一致"
     // （见 doc/P0/P0M5_test_bench_design.md §7.1）。业务代码请用 CRC32（运行时自动分派）。
     namespace detail {

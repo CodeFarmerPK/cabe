@@ -34,7 +34,7 @@ namespace cabe {
         std::uint8_t  flags;        // @5    预留标志位（M2 不用）
         std::uint8_t  entry_type;   // @6    WalEntryType
         std::uint8_t  reserved0;    // @7    对齐/预留
-        std::uint64_t seq;          // @8    单调 LSN（排序 + 环形区消歧；M5 重放定边界）
+        std::uint64_t seq;          // @8    单调 LSN（排序 + 环形区消歧；M6 重放定边界）
         std::uint64_t block;        // @16   BlockId.raw（Delete 填 0）
         std::uint64_t timestamp;    // @24   util::GetWallTimeNs（还原 ValueMeta.timestamp / 未来 TTL）
         std::uint32_t value_crc;    // @32   value 的 CRC32C（Delete 填 0）

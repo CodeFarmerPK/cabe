@@ -31,7 +31,7 @@ namespace cabe {
 
     // 把逻辑记录编码成一帧（分配 seq、算 frame_crc）。供 Wal 内部与测试使用。
     WalFrame EncodeFrame(const WalEntry& e, std::uint64_t seq);
-    // 校验一帧：魔数 / 版本 / key_len 上限 / 帧 CRC。供测试与 M5 重放使用。
+    // 校验一帧：魔数 / 版本 / key_len 上限 / 帧 CRC。供测试与 M6 重放使用。
     bool VerifyFrame(const WalFrame& f);
 
     class Wal {
@@ -52,6 +52,11 @@ namespace cabe {
         // 刷出攒着、未落盘的帧（攒满 / Close / 切档收紧调用）；同步档或缓冲空时为空操作。
         int32_t Flush();
         int32_t Close();
+
+        // P5M4：已分配的最大 seq（= seq_next_-1，空时为 0），供快照取 covered_seq。
+        std::uint64_t last_seq() const noexcept { return seq_next_ - 1; }
+        // P5M4：WAL 设备容量（部署期校验用；M4 暂不查，见 P5M4 §11 备注，M5 起用）。
+        std::uint64_t SizeBytes() const noexcept { return dev_.SizeBytes(); }
 
     private:
         int32_t Append(const WalEntry& e);     // 编码一帧入缓冲（分配 seq、算 frame_crc）

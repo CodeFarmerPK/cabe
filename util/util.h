@@ -37,6 +37,12 @@ namespace cabe::util {
         return ((x + a - 1) / a) * a;
     }
 
+    // 把"用户配置的缓冲大小"规整为可直接用于 O_DIRECT 的值：钳到 ≥ block 且向上取整到
+    // block 的倍数。Wal::Open 与 Snapshot::Write 共用（P5M4，消除两处重复）。
+    constexpr std::size_t RoundUpBufferSize(std::size_t size, std::size_t block) noexcept {
+        return AlignUp(size < block ? block : size, block);
+    }
+
 } // namespace cabe::util
 
 #endif // CABE_UTIL_H

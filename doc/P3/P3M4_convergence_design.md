@@ -79,7 +79,7 @@
 
 ### 3.2 MetaIndex 抽象层（详 [P3M2_meta_index_design.md](P3M2_meta_index_design.md)）
 
-- **MetaIndexBackend C++20 concept**：7 个方法——`Insert` / `Lookup` / `Delete` / `Size` / `Contains` / `ForEach` / `WriteSnapshot` / `LoadSnapshot`（后两个空壳，P5 实装）。
+- **MetaIndexBackend C++20 concept**：7 个方法——`Insert` / `Lookup` / `Delete` / `Size` / `Contains` / `ForEach` / `WriteSnapshot` / `LoadSnapshot`（后两个空壳，P5 实装）。**（P5M4 起收窄为 5 方法：移除 `WriteSnapshot` / `LoadSnapshot`，`ForEach` 改返回 `int32_t` 可中止——见 P5M4 设计稿。）**
 - **HashMetaIndex**：包装 `unordered_map<string, ValueMeta>`；`ForEach` 已实装遍历逻辑，`WriteSnapshot` / `LoadSnapshot` 返回 `kEngineNotImplemented`。
 - **MetaIndexVisitor**：`std::function<void(string_view, const ValueMeta&)>`。
 - **目录结构**：`index/meta_index.h`（接口）+ `index/hash/hash_meta_index.*`（实现）——P9 加 `index/bplustree/`。

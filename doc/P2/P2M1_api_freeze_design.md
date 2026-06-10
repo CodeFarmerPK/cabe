@@ -69,9 +69,16 @@ public:
     Status Get(std::string_view key, DataBuffer value); // value.size() == kValueSize
     Status Delete(std::string_view key);
 
+    Status SetWalLevel(WalLevel level);                 // P5M3 起新增：运行时改 WAL 级别
+    Status Snapshot();                                  // P5M4 起新增：手动触发一份快照（同步返结果）
+
     bool is_open() const noexcept;
 };
 ```
+
+> **冻结追加注（P5）**：`SetWalLevel`（P5M3）与 `Snapshot()`（P5M4）为冻结后按 P5-D5
+> "破坏冻结、同步更新文档"约定追加的公开方法。`Snapshot()` 在 recover 模式（M4 未打开
+> 快照设备）返回 `kEngineNotImplemented`（恢复编排在 P5M6）。
 
 **承诺语义**：
 
@@ -101,6 +108,9 @@ struct Options {
     std::size_t wal_buffer_size = 32 * 1024;
     std::uint32_t wal_flush_interval_ms = 1000;
     std::uint64_t snapshot_threshold_bytes = 512ull * 1024 * 1024;
+    std::size_t   snapshot_buffer_size     = 1024 * 1024;   // P5M4 新增。注：按主题插入快照配置块内（threshold 与 interval 之间），
+                                                            //   未严格"末尾追加"——带默认值、不改已有字段类型/含义，但移动了后续字段位置；
+                                                            //   cabe 不承诺 ABI 且 Options 不用位置式聚合初始化，故可接受（合约定精神）
     std::uint32_t snapshot_interval_sec = 600;
     bool verify_value_crc_on_recovery = false;
 };

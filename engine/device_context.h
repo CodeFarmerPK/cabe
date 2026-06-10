@@ -5,12 +5,14 @@
 #include "engine/buffer_pool.h"
 #include "engine/super_block.h"
 #include "wal/wal.h"
+#include "snapshot/snapshot.h"
 
 namespace cabe {
 
     struct DeviceContext {
         IoBackendImpl io;
         Wal wal;                    // P5M2：管 WAL 设备（与 io 分离，复用 RawDevice）
+        Snapshot snapshot;          // P5M4：管快照设备（与 wal/io 平级，复用 RawDevice）
         BufferPool pool{0};
         BlockAllocatorImpl block_allocator;
         MetaIndexImpl meta_index;

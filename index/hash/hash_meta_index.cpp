@@ -29,20 +29,12 @@ namespace cabe {
         return map_.count(std::string(key)) > 0;
     }
 
-    void HashMetaIndex::ForEach(MetaIndexVisitor visitor) const {
+    int32_t HashMetaIndex::ForEach(MetaIndexVisitor visitor) const {
         for (const auto& [key, meta] : map_) {
-            visitor(key, meta);
+            int32_t rc = visitor(key, meta);
+            if (rc != err::kSuccess) return rc;   // P5M4：回调返错 → 提前停、把错误传出（快照写失败时用）
         }
-    }
-
-    int32_t HashMetaIndex::WriteSnapshot(const std::string& path) const {
-        (void)path;
-        return err::kEngineNotImplemented;
-    }
-
-    int32_t HashMetaIndex::LoadSnapshot(const std::string& path) {
-        (void)path;
-        return err::kEngineNotImplemented;
+        return err::kSuccess;
     }
 
 } // namespace cabe

@@ -1,8 +1,8 @@
 #include "engine/engine.h"
+#include "test/common/test_env.h"
 
 #include <gtest/gtest.h>
 
-#include <cstdlib>
 #include <cstring>
 #include <fcntl.h>
 #include <string>
@@ -11,10 +11,7 @@
 
 namespace {
 
-std::string GetEnv(const char* name) {
-    const char* v = std::getenv(name);
-    return v ? std::string(v) : "";
-}
+using cabe::test::GetEnv;   // P5M4：收敛到共享测试头（原各文件逐字拷贝）
 
 std::vector<std::byte> MakeValue(std::byte fill) {
     std::vector<std::byte> v(cabe::kValueSize);

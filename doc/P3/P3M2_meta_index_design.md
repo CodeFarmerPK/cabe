@@ -5,6 +5,8 @@
 > 测试套件（`TYPED_TEST`——未来 P9 B+ 树实现加入 `Types<>` 即可复用同一套用例）。
 >
 > **本文为详细设计**；其中 C++ 片段为设计示意，代码实装阶段以此为准。
+>
+> **⚠️ P5M4 起本 concept 已收窄（以 [P5M4 设计稿](../P5/P5M4_snapshot_design.md) 为准）**：移除 `WriteSnapshot` / `LoadSnapshot`（快照读写 I/O 上移到独立 `snapshot/` 模块，后端只保留 `ForEach` + `Insert`）；`ForEach` 改为**返回 `int32_t`、可中途报错中止**（原 `void`）。下文"7 个方法 / `ForEach` 返回 void / `WriteSnapshot` / `LoadSnapshot` 空壳"等描述保留作历史记录。
 
 ---
 

@@ -80,18 +80,28 @@ TYPED_TEST(MetaIndexContractTest, ForEachVisitsAll) {
     this->index_.Insert("c", MakeMeta(3, 0));
 
     std::vector<std::string> keys;
-    this->index_.ForEach([&](std::string_view key, const cabe::ValueMeta&) {
+    // P5M4：ForEach 返回 int32_t；回调返 kSuccess 继续。
+    EXPECT_EQ(this->index_.ForEach([&](std::string_view key, const cabe::ValueMeta&) {
         keys.emplace_back(key);
-    });
+        return cabe::err::kSuccess;
+    }), cabe::err::kSuccess);
     EXPECT_EQ(keys.size(), 3u);
 }
 
-TYPED_TEST(MetaIndexContractTest, WriteSnapshotStub) {
-    EXPECT_EQ(this->index_.WriteSnapshot("/tmp/dummy"), cabe::err::kEngineNotImplemented);
-}
+// P5M4：ForEach 可中止——回调返非成功即提前停，并把错误码原样传出。
+TYPED_TEST(MetaIndexContractTest, ForEachAbortsOnError) {
+    this->index_.Insert("a", MakeMeta(1, 0));
+    this->index_.Insert("b", MakeMeta(2, 0));
+    this->index_.Insert("c", MakeMeta(3, 0));
 
-TYPED_TEST(MetaIndexContractTest, LoadSnapshotStub) {
-    EXPECT_EQ(this->index_.LoadSnapshot("/tmp/dummy"), cabe::err::kEngineNotImplemented);
+    int visited = 0;
+    constexpr int32_t kStop = -42;
+    const int32_t rc = this->index_.ForEach([&](std::string_view, const cabe::ValueMeta&) -> int32_t {
+        ++visited;
+        return kStop;          // 第一条就返错
+    });
+    EXPECT_EQ(rc, kStop);      // 错误被传出
+    EXPECT_EQ(visited, 1);     // 提前停：只访问了一条
 }
 
 TYPED_TEST(MetaIndexContractTest, ConceptSatisfied) {

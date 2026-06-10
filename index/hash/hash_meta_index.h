@@ -23,9 +23,8 @@ namespace cabe {
         std::size_t Size() const noexcept;
         bool Contains(std::string_view key) const;
 
-        void ForEach(MetaIndexVisitor visitor) const;
-        int32_t WriteSnapshot(const std::string& path) const;
-        int32_t LoadSnapshot(const std::string& path);
+        // P5M4：返回 int32_t、可中止——回调返非成功即提前停并把错误传出（快照写失败时用）。
+        int32_t ForEach(MetaIndexVisitor visitor) const;
 
     private:
         std::unordered_map<std::string, ValueMeta> map_;

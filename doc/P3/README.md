@@ -15,6 +15,7 @@
 - `SyncIoBackend` 默认实现：包装 P1 的 pwrite / pread + O_DIRECT
 - `MetaIndex` C++20 concept：7 个方法（Insert / Lookup / Delete / Size / Contains / ForEach / WriteSnapshot / LoadSnapshot）
 - `HashMetaIndex` 默认实现：包装 P1 的 `unordered_map`（ForEach / WriteSnapshot / LoadSnapshot 为空壳，P5 实装）
+- （P5M4 起 concept 收窄为 5 方法：移除 `WriteSnapshot` / `LoadSnapshot`，`ForEach` 改返回 `int32_t` 可中止——见 P5M4 设计稿）
 - DeviceContext 改为持有抽象层实现
 - Engine 通过 concept 接口调用（功能不变）
 - CMake `CABE_IO_BACKEND` / `CABE_META_INDEX` 编译期分派生效

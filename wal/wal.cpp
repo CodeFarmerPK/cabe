@@ -84,19 +84,16 @@ namespace cabe {
     }
 
     int32_t Wal::Open(const std::string& wal_path, const Options* opts) {
-        if (opts == nullptr) {   // Wal 必须有 Options 现读 wal_level（与 IoBackend 不同，不接受 nullptr）
+        if (opts == nullptr) {   // 调用方编程错误（非设备故障）：Wal 必须有 Options 现读 wal_level
             CABE_LOG_ERROR("Wal::Open 收到空 Options 指针");
-            return err::kIoBase;
+            return err::kEngineInvalidOpts;
         }
         int32_t rc = dev_.Open(wal_path);
         if (rc != err::kSuccess) return rc;
 
         opts_ = opts;
-        // 缓冲大小 = wal_buffer_size 向上取整到 4K 倍数且 ≥ 4K（O_DIRECT + 整块整帧）。
-        std::size_t sz = opts->wal_buffer_size;
-        if (sz < kWalBlockSize) sz = kWalBlockSize;
-        sz = util::AlignUp(sz, kWalBlockSize);
-        buf_size_ = sz;
+        // 缓冲大小 = wal_buffer_size 钳到 ≥4K 并向上取整 4K（O_DIRECT + 整块整帧；与快照共用规整函数）。
+        buf_size_ = util::RoundUpBufferSize(opts->wal_buffer_size, kWalBlockSize);
 
         cur_buf_ = RawDevice::AllocAligned(buf_size_);
         if (cur_buf_ == nullptr) {

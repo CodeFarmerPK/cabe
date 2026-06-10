@@ -121,6 +121,7 @@ add_subdirectory(io)                 # P3M1：IoBackend 抽象层
 add_subdirectory(index)              # P3M2：MetaIndex 抽象层
 add_subdirectory(slots)              # P4.5M1：块分配器抽象层
 add_subdirectory(wal)                # P5M2：WAL 核心（帧 + Wal 类 + 级别 1）
+add_subdirectory(snapshot)           # P5M4：快照模块（检查点）
 # test/ bench/ 推迟到 M5（设计 §3 偏差-2）；EXISTS 守卫使 M1/M5 无需回改本文件。
 if(CABE_BUILD_TESTS AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/test/CMakeLists.txt")
     add_subdirectory(test)

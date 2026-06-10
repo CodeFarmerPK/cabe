@@ -6,7 +6,7 @@
 
 ## 状态
 
-🚧 **进行中**（M1 设备超级块已实装；M2 WAL 核心设计稿完成，待实装；M3~M6 待设计）
+🚧 **进行中**（M1 / M2 / M3 已实装；M4 起按"快照 → 环形 → 恢复 → 收敛"重新拆分里程碑）
 
 ## 范围摘要
 
@@ -27,14 +27,15 @@
 | M1 | 设备超级块 | `P5M1_super_block_design.md` | ✅ 已实装 |
 | M2 | WAL 模块 + 帧格式 + 严格级别 | `P5M2_wal_core_design.md` | ✅ 已实装 |
 | M3 | WAL 分级 2/3/4 + 缓冲区配置 | `P5M3_wal_levels_design.md` | 设计稿 |
-| M4 | MetaIndex 快照 + WAL 环形队列 | `P5M4_snapshot_design.md` | 待设计 |
-| M5 | 崩溃恢复 + Engine 集成收尾 | `P5M5_recovery_design.md` | 待设计 |
-| M6 | P5 收敛 | `P5M6_convergence_design.md` | 待设计 |
+| M4 | MetaIndex 快照（检查点） | `P5M4_snapshot_design.md` | 待设计 |
+| M5 | WAL 环形队列回收 | `P5M5_wal_ring_design.md` | 待设计 |
+| M6 | 崩溃恢复 + Engine 集成收尾 | `P5M6_recovery_design.md` | 待设计 |
+| M7 | P5 收敛 | `P5M7_convergence_design.md` | 待设计 |
 
 ## 里程碑依赖
 
 ```
-P5M1 ──► P5M2 ──► P5M3 ──► P5M4 ──► P5M5 ──► P5M6
+P5M1 ──► P5M2 ──► P5M3 ──► P5M4 ──► P5M5 ──► P5M6 ──► P5M7
 ```
 
 严格串行：超级块（基础设施）→ WAL 核心 → WAL 分级 → 快照 → 恢复集成 → 收敛。
@@ -92,7 +93,7 @@ P5M1 ──► P5M2 ──► P5M3 ──► P5M4 ──► P5M5 ──► P5M6
 - 级别 1（严格）：value FUA + WAL 同步落盘 + 内存写入，**并端到端接进 `Engine::Put/Delete`**（`DeviceContext` 加 `Wal` 成员）
 - WAL 走 `RawDevice`（不经 IoBackend）；线性追加、4K 块整块重写
 - 复用 M1 的裸设备 I/O 工具
-- 注：M2 只做线性追加、**不判写满**；环形队列（绕圈复用 + 截断回收 + 写满兜底）见 M4
+- 注：M2 只做线性追加、**不判写满**；环形队列（绕圈复用 + 截断回收 + 写满兜底）见 M5
 
 ### P5M3（WAL 分级 2/3/4 + 缓冲区配置）
 
@@ -103,26 +104,36 @@ P5M1 ──► P5M2 ──► P5M3 ──► P5M4 ──► P5M5 ──► P5M6
 - Options 的 WAL 字段生效：`wal_level`、`wal_buffer_size` 生效；`wal_flush_interval_ms` 存而不用（P7）
 - `wal_buffer_size` Open 时定死、运行期固定（运行时改大小 → 未来）；级别可运行时改（Engine 改级别入口，收紧先刷缓冲）
 - 默认级别从 M2 的"强制级别 1"变回级别 3
-- 级别 3/4 下 value 损坏的读时检测：复用现有 `Get` 的 CRC；崩溃场景验证在 M5
+- 级别 3/4 下 value 损坏的读时检测：复用现有 `Get` 的 CRC；崩溃场景验证在 M6
 
-### P5M4（MetaIndex 快照 + WAL 环形队列）
+### P5M4（MetaIndex 快照 / 检查点）
 
-- `WriteSnapshot` / `LoadSnapshot` 接口参数从文件路径改为裸设备参数
-- HashMetaIndex 单线程版快照（直接遍历写出）
-- 快照触发：大小阈值（主）+ 手动 `Engine::Snapshot()`（辅）
-- 快照设备布局（超级块 + 快照数据区）
-- **WAL 环形队列空间管理（头尾指针 + 绕圈复用 + 快照后截断回收 TRIM；从 M2 移来）**
-- **WAL 设备容量规划（索引条目数 × 2 倍 + 快满时强制快照兜底）**
+- 新建结构无关的 `snapshot/` 模块（`Snapshot` 类，与 `wal`/`io` 平级）；盘上格式 = 128 字节定长 `SnapshotRecord` + 4096 字节 `SnapshotSlotHeader`
+- `MetaIndex` concept 收窄：**移除** `WriteSnapshot`/`LoadSnapshot`（快照 I/O 上移 snapshot 模块），后端只留 `ForEach`（改为返回 `int32_t` 可中止）+ `Insert`
+- HashMetaIndex 单线程版快照：`ForEach` 遍历写出（M4 为"冻结写者"的一致快照，无锁/模糊留 P7）
+- 快照设备布局：超级块 + 对半切 A/B 双缓冲两槽（每槽 [槽头 4K + 记录数据区]）；槽头记 `generation` + `covered_seq`（覆盖到的 WAL seq）
+- 落盘：临时 `snapshot_buffer_size`（默认 1 MiB）缓冲流式写、全程一次 `fdatasync`；快照前 `Wal::Flush()` 刷净 → 取 `covered_seq`
+- 触发：大小阈值（主，`snapshot_threshold_bytes`）+ 手动 `Engine::Snapshot()`（辅，同步返结果）；自动触发 fire-and-forget；定时（`snapshot_interval_sec`）→ P7
+- 原子替换 + 崩溃安全：写非活跃槽、保好覆坏；靠代际号 + 双 CRC 原子切换，任一崩溃点旧快照完好
+- 部署期容量约束：Open 时校验**快照设备**容量，不足拒开（`kDeviceTooSmall`）；WAL 设备容量校验设计已定（阈值 × 2~3）、实装推迟 M5（见 P5M4 §11 实装注）
+- 注：M4 只做**写流程**；加载快照 + 恢复 → M6；WAL 回收 → M5
 
-### P5M5（崩溃恢复 + Engine 集成收尾）
+### P5M5（WAL 环形队列回收）
+
+- 线性 WAL（M2/M3 的 `cur_off_` 只增）→ 环形：头尾指针 + 绕圈复用；`seq` 绕圈后区分新旧帧
+- 回收：快照落盘后，截断回收"覆盖 seq"之前的 WAL、对回收区发 TRIM
+- 写满兜底：快满判定 + 强制触发快照；接上 WAL 设备的 Open 容量校验（部署基准 = `snapshot_threshold_bytes × 2~3`，阈值驱动——P5M4 §11 已定该公式并否定早期"索引条目数 × 2"的提法：WAL 无几何硬顶，需求由触发阈值决定；`Wal::SizeBytes()` 已就位）
+- 依赖 M4 的快照（检查点定义可回收边界）；解除 M2/M3 "假定 WAL 不写满"
+
+### P5M6（崩溃恢复 + Engine 集成收尾）
 
 - 恢复流程：超级块校验 → 加载快照 → 重放 WAL（帧 CRC + seq 定边界）→ `BlockAllocator::RebuildFromActive`（位图反推）
+- 按**环形** WAL 重放（从头指针绕圈、靠 seq 定有效区间）——排在 M5 之后，避免按线性 WAL 写完再为环形返工
 - recover 模式接入 WAL 重放并续写（M2 的 WAL 追加只在 create 模式；`DeviceContext` 的 `Wal` 成员、级别 1 的 Put/Delete 接线已在 M2 完成）
-- 快照协调（Engine 层）
-- Options 扩展收尾：恢复时 value CRC 校验开关等（设备三路径 + create 已在 M1；WAL 级别 / 缓冲区在 M3）
+- 快照协调（Engine 层）；Options 扩展收尾：恢复时 value CRC 校验开关等
 - 基础恢复测试 + WAL 损坏测试（loop 设备：数据 + WAL + 快照）
 
-### P5M6（P5 收敛）
+### P5M7（P5 收敛）
 
 - 薄索引收敛稿 + 状态同步（设计稿 / README / ROADMAP）
 - 不引入 P6 占位
@@ -131,11 +142,12 @@ P5M1 ──► P5M2 ──► P5M3 ──► P5M4 ──► P5M5 ──► P5M6
 
 1. 三设备超级块格式 + create/recover 启动模式 + 校验逻辑
 2. WAL 模块实装，128 字节帧，4 级持久化全部生效，默认级别 3
-3. 快照 + 环形队列空间管理 + 截断回收
-4. 崩溃恢复跑通——基础恢复测试 + WAL 损坏测试全绿
-5. Engine 集成，Options 扩展，`Engine::Snapshot()` 手动接口
-6. P2 文档更新（Options 破坏冻结的说明）
-7. P5M6 收敛稿审阅通过 + ROADMAP / README 状态同步
+3. MetaIndex 快照（检查点）+ 快照设备布局 + 触发（M4）
+4. WAL 环形队列回收 + 截断 TRIM + 写满兜底（M5）
+5. 崩溃恢复跑通——基础恢复测试 + WAL 损坏测试全绿（M6）
+6. Engine 集成，Options 扩展，`Engine::Snapshot()` 手动接口
+7. P2 文档更新（Options 破坏冻结的说明）
+8. P5M7 收敛稿审阅通过 + ROADMAP / README 状态同步
 
 ## 关键技术备忘（来自决策梳理）
 
@@ -145,7 +157,7 @@ P5M1 ──► P5M2 ──► P5M3 ──► P5M4 ──► P5M5 ──► P5M6
 4. **环形队列 + TRIM**：WAL 设备空间循环使用；快照截断后对释放区域发 TRIM，避免覆盖写时的擦除开销。
 5. **快照不持久化 BlockAllocator**：恢复时从 MetaIndex 反推（位图），毫秒级纯内存操作。
 6. **恢复时间不是瓶颈**：PB 级 value 的 WAL 仅 GB 级，十几秒可完成；运行时写入延迟才是优化重点。
-7. **模糊快照留待 P7**：P5 单线程哈希表直接遍历写出（触发快照的那次 Put 阻塞，单线程下只影响当前调用者）；P7 多线程 + 模糊快照（哈希表用短暂锁 + swap，B+ 树用 COW）消除延迟尖刺。
+7. **模糊快照留待 P7**：M4 单线程哈希表"冻结写者"的一致快照（直接遍历写出；触发快照的那次 Put 阻塞，单线程下"冻结"为语义占位、不上真锁）；P7 多线程 + 模糊/无锁一致快照（哈希表用短锁 + 拷贝，B+ 树用 COW/MVCC）消除延迟尖刺。
 8. **WAL 不做抽象层但接口"假装抽象"**：方法语义通用（如 `Append(entry)` / `Sync()`），不暴露裸块设备细节（如 `WriteAt(offset, buf, 4096)`），降低未来引入抽象层的成本。
 
 ## 命名与目录约定

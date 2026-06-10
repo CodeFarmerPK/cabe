@@ -49,12 +49,12 @@ namespace cabe {
         std::size_t wal_buffer_size = 32 * 1024;                // 同步/攒批共用的单块缓冲，默认 32K；Open 时定死、运行期固定（运行时改大小留未来 Options 维护接口）
         std::uint32_t wal_flush_interval_ms = 1000;             // 定时刷出兜底，默认 1s；M3 不读此字段（攒满/Close/切档刷），定时刷出需后台线程，推迟 P7
 
-        // ---- 快照配置（全局统一；M4 起生效，M1 占位）----
-        std::uint64_t snapshot_threshold_bytes = 512ull * 1024 * 1024; // WAL 达此值触发快照，默认 512M
-        std::uint32_t snapshot_interval_sec = 600;              // 定时快照兜底，默认 10 分钟
-                                                                // 触发 = 大小阈值 OR 定时，任一满足
+        // ---- 快照配置（全局统一）----
+        std::uint64_t snapshot_threshold_bytes = 512ull * 1024 * 1024; // WAL 增长达此值触发快照（M4 生效），默认 512M
+        std::size_t   snapshot_buffer_size     = 1024 * 1024;          // 快照流式写的临时缓冲（M4 生效，可动态改）；默认 1M，每次快照现读、向上取整 4K
+        std::uint32_t snapshot_interval_sec    = 600;                  // 定时快照兜底（P7 生效，M4 不读），默认 10 分钟；触发 = 大小阈值 OR 定时
 
-        // ---- 恢复配置（M5 起生效，M1 占位）----
+        // ---- 恢复配置（M6 起生效，M1 占位）----
         bool verify_value_crc_on_recovery = false;             // 恢复时是否逐个校验 value CRC，默认关
     };
 

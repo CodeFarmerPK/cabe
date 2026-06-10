@@ -19,6 +19,7 @@ namespace cabe::err {
     inline constexpr int kWalBase         = -103000;
     inline constexpr int kEngineBase      = -104000;
     inline constexpr int kWalRecoveryBase = -105000;
+    inline constexpr int kSnapshotBase    = -106000;
 
     // ---- 段位不重叠（编译期）：相邻段恰好相距一个段容量，无缝且不交叠 ----
     static_assert(kMemoryBase - kSegmentSize == kIoBase);
@@ -26,6 +27,7 @@ namespace cabe::err {
     static_assert(kIndexBase - kSegmentSize == kWalBase);
     static_assert(kWalBase - kSegmentSize == kEngineBase);
     static_assert(kEngineBase - kSegmentSize == kWalRecoveryBase);
+    static_assert(kWalRecoveryBase - kSegmentSize == kSnapshotBase);
 
     // 段内编号：基址段的第 n 个码（n ∈ [0, kSegmentSize)）
     constexpr int InSeg(int base, int n) noexcept { return base - n; }
@@ -76,6 +78,12 @@ namespace cabe::err {
     inline constexpr int kSuperBlockSizeMismatch       = InSeg(kWalRecoveryBase, 9); // -105009  持久 block_count 与当前数据设备实际大小不符（设备被缩容）
 
     static_assert(kSuperBlockSizeMismatch > kWalRecoveryBase - kSegmentSize);
+
+    // ---- snapshot 段（P5M4 新增：快照写 + 部署期容量校验）----
+    inline constexpr int kSnapshotWriteFailed = InSeg(kSnapshotBase, 0); // -106000  写/刷快照设备失败
+    inline constexpr int kDeviceTooSmall      = InSeg(kSnapshotBase, 1); // -106001  Open 部署期容量校验不过（设备过小）
+
+    static_assert(kDeviceTooSmall > kSnapshotBase - kSegmentSize);
 
     // io 段的具体码随模块产生时补入。
 } // namespace cabe::err

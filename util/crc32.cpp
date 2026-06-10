@@ -98,6 +98,16 @@ namespace cabe::util {
         return kCRC32Impl(data);
     }
 
+    // P5M4：流式增量 CRC32C（软件路径，复用同一张表 kCRC32CTable）。不做首/末处理——
+    // caller 自管 crc=0xFFFFFFFF 起、末取 ~crc。同多项式/同表 → 与 CRC32 结果一致。
+    // 快照低频且 I/O 受限，软件路径足够（不为它再加一条硬件增量 dispatch）。
+    uint32_t CRC32CStreamUpdate(uint32_t crc, DataView data) noexcept {
+        for (const std::byte b : data) {
+            crc = (crc >> 8) ^ kCRC32CTable[(crc ^ std::to_integer<std::uint8_t>(b)) & 0xFFu];
+        }
+        return crc;
+    }
+
     // ---- detail：仅供测试，转发到上面的内部实现，供 M5 验证软/硬一致性（doc/P0/P0M5 §7.1）----
     namespace detail {
         uint32_t SoftwareCRC32C(DataView data) noexcept { return ::cabe::util::SoftwareCRC32C(data); }

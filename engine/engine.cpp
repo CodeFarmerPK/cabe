@@ -31,16 +31,14 @@ namespace cabe {
                 ? CreateDeviceGroup(cfg, i, &dc.super_block)
                 : RecoverDeviceGroup(cfg, i, &dc.super_block);
             if (rc != err::kSuccess) {
-                for (auto& d : devices_) { d.wal.Close(); d.io.Close(); }
-                devices_.clear();
+                AbortOpen(dc);
                 return Status::Error(rc);
             }
 
             // 打开数据设备的 IoBackend
             rc = dc.io.Open(cfg.data_path, &options_);
             if (rc != err::kSuccess) {
-                for (auto& d : devices_) { d.wal.Close(); d.io.Close(); }
-                devices_.clear();
+                AbortOpen(dc);
                 return Status::Error(rc);
             }
 
@@ -50,8 +48,7 @@ namespace cabe {
                 CABE_LOG_ERROR("block_count 不一致: 超级块=%llu > 设备=%llu",
                                static_cast<unsigned long long>(dc.super_block.block_count),
                                static_cast<unsigned long long>(dc.io.BlockCount()));
-                for (auto& d : devices_) { d.wal.Close(); d.io.Close(); }
-                devices_.clear();
+                AbortOpen(dc);
                 return Status::Error(err::kSuperBlockSizeMismatch);
             }
 
@@ -62,12 +59,21 @@ namespace cabe {
             //   多设备启用后应改为 static_cast<DeviceId>(i) 并与 RouteKey 路由对齐。
             dc.block_allocator.Init(0, dc.super_block.block_count);
 
-            // P5M2：仅 create 模式打开 WAL（D9）；recover 的 WAL 重放 + 续写在 M5。
+            // P5M2/M4：仅 create 模式打开 WAL + 快照设备（D9）；recover 的重放/加载在 M6。
             if (opts.create) {
                 rc = dc.wal.Open(cfg.wal_path, &options_);
                 if (rc != err::kSuccess) {
-                    for (auto& d : devices_) { d.wal.Close(); d.io.Close(); }
-                    devices_.clear();
+                    AbortOpen(dc);
+                    return Status::Error(rc);
+                }
+
+                // P5M4：打开快照设备——内含 A/B 布局计算 + 部署期快照设备容量校验
+                //   + 清空两槽、next_gen=1；容量不足返回 kDeviceTooSmall。
+                //   注：WAL 设备容量校验推迟 M5（M4 测试设备小、WAL 线性不回收，过早校验会
+                //   拒绝小 loop 设备；见 P5M4 §11 备注）。
+                rc = dc.snapshot.Open(cfg.snapshot_path, &options_, dc.super_block);
+                if (rc != err::kSuccess) {
+                    AbortOpen(dc);
                     return Status::Error(rc);
                 }
             }
@@ -87,9 +93,11 @@ namespace cabe {
         // 但仍关完所有设备（避免 fd 泄漏）。级别 2/4 收尾刷盘失败必须让调用方知道。
         int32_t first_err = err::kSuccess;
         for (auto& dc : devices_) {
+            int32_t src = dc.snapshot.Close();
             int32_t wrc = dc.wal.Close();
             int32_t irc = dc.io.Close();
-            if (first_err == err::kSuccess) first_err = (wrc != err::kSuccess) ? wrc : irc;
+            if (first_err == err::kSuccess)
+                first_err = (src != err::kSuccess) ? src : (wrc != err::kSuccess) ? wrc : irc;
         }
         devices_.clear();
         opened_ = false;
@@ -151,6 +159,8 @@ namespace cabe {
             TrimDeviceBlock(dc, old_meta.block);
         }
 
+        // P5M4：写已提交，查大小阈值，到了就（自动、fire-and-forget）触发一份快照。
+        MaybeRequestSnapshot(dc);
         return Status::Ok();
     }
 
@@ -204,6 +214,8 @@ namespace cabe {
         dc.block_allocator.Recycle(meta.block);
         TrimDeviceBlock(dc, meta.block);
 
+        // P5M4：墓碑写已提交，查大小阈值（Delete 也让 WAL 增长）。
+        MaybeRequestSnapshot(dc);
         return Status::Ok();
     }
 
@@ -211,7 +223,7 @@ namespace cabe {
         if (!opened_) return Status::Error(err::kEngineNotOpen);
         if (!IsValidWalLevel(new_level)) return Status::Error(err::kEngineInvalidOpts);
         // 注：recover 模式 M3 不开 WAL（仅 create 开），此入口对 WAL 落盘无实际作用——
-        //   改级别只动 options_，而 recover 下 WAL 通路本就不写（重放/续写留 M5）。
+        //   改级别只动 options_，而 recover 下 WAL 通路本就不写（重放/续写留 M6）。
         const WalLevel old = options_.wal_level;
         // 收紧 WAL（攒批档 2/4 → 同步档 1/3）：先把各设备攒批缓冲刷净，新保证才从此刻成立。
         const bool tighten_wal = !IsWalSyncLevel(old) && IsWalSyncLevel(new_level);
@@ -236,6 +248,70 @@ namespace cabe {
         // TODO(P7): 通过待 TRIM 队列异步批量发送 BLKDISCARD
         (void)dc;
         (void)id;
+    }
+
+    void Engine::AbortOpen(DeviceContext& dc) {
+        // Open 失败路径统一清理：先关当前还未入列的局部 dc（已打开的句柄不留给析构兜底），
+        // 再关已入列设备、清空列表。各 Close 对未打开句柄都是安全空操作；
+        // 错误码不在此收集——Open 向上返回的是原始失败码。
+        dc.snapshot.Close();
+        dc.wal.Close();
+        dc.io.Close();
+        for (auto& d : devices_) { d.snapshot.Close(); d.wal.Close(); d.io.Close(); }
+        devices_.clear();
+    }
+
+    // ---- P5M4：快照触发链 ----
+
+    Status Engine::Snapshot() {
+        if (!opened_) return Status::Error(err::kEngineNotOpen);
+        // 手动触发：同步执行、逐设备各做一份、返回第一个错误。
+        int32_t first_err = err::kSuccess;
+        for (auto& dc : devices_) {
+            // M4 仅 create 模式打开快照设备；recover 模式的快照/恢复编排在 M6——
+            // 明确报"未实现"，而不是落进 Write 的未打开守卫、报误导性的"写快照失败"。
+            // （自动路径 MaybeRequestSnapshot 有同款守卫，两条路保持对称。）
+            if (!dc.snapshot.is_open()) {
+                if (first_err == err::kSuccess) first_err = err::kEngineNotImplemented;
+                continue;
+            }
+            int32_t rc = DoSnapshot(dc);
+            if (first_err == err::kSuccess) first_err = rc;
+        }
+        return first_err != err::kSuccess ? Status::Error(first_err) : Status::Ok();
+    }
+
+    int32_t Engine::DoSnapshot(DeviceContext& dc) {
+        // 一次快照尝试从这里开始：先推进退避基准（成败都算，设计 §10.3）。记账放在尝试的
+        // 起点而非 Snapshot::Write 内，保证"还没到 Write 就失败"的路径（如下面刷 WAL 失败）
+        // 也被记账——否则攒批档（2/4）+ WAL 设备故障时，每次写都会重试一遍注定失败的刷盘。
+        dc.snapshot.NoteTriggerAttempt(dc.wal.last_seq());
+        // 先刷 WAL（默认级别 3 是空操作）→ 取 covered_seq → 驱动遍历写快照。
+        int32_t rc = dc.wal.Flush();
+        if (rc != err::kSuccess) return rc;
+        const std::uint64_t covered_seq = dc.wal.last_seq();
+        return dc.snapshot.Write(covered_seq, [&](const MetaIndexVisitor& v) {
+            return dc.meta_index.ForEach(v);   // 回调驱动一致扫描；可中止错误一路传出
+        });
+    }
+
+    void Engine::RequestSnapshot(DeviceContext& dc) {
+        // 自动触发汇总入口：fire-and-forget。M4 同步执行；P7 改为唤醒后台快照线程。
+        // 快照失败不连累本次写，只记日志（退避基准已在 DoSnapshot 入口推进）。
+        int32_t rc = DoSnapshot(dc);
+        if (rc != err::kSuccess) {
+            CABE_LOG_ERROR("自动触发的快照失败: rc=%d（不影响本次写，后续按退避重试）", rc);
+        }
+    }
+
+    void Engine::MaybeRequestSnapshot(DeviceContext& dc) {
+        if (!dc.snapshot.is_open()) return;   // M4 仅 create 模式开了快照设备
+        // 距上次"尝试"以来的 WAL 增长（序号差 × 帧大小）达阈值即触发（退避：基准是 last_trigger_seq）。
+        const std::uint64_t grown =
+            (dc.wal.last_seq() - dc.snapshot.last_trigger_seq()) * kWalFrameSize;
+        if (grown >= options_.snapshot_threshold_bytes) {
+            RequestSnapshot(dc);
+        }
     }
 
 } // namespace cabe

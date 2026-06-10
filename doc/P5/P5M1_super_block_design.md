@@ -6,7 +6,7 @@
 > 统一在头部 8K 写双份超级块（主 @0 + 备 @4K），数据区 / 环形区 / 快照区从偏移 8K 起；
 > 逻辑 block 从 0 编号，数据块物理偏移 = `kDataRegionOffset(8K) + block_idx * kValueSize`，
 > 偏移由 IoBackend 加——BlockAllocator 不感知超级块。本里程碑只做超级块与设备布局，
-> WAL / 快照 / 恢复在 M2~M5 叠加。
+> WAL / 快照 / 恢复在 M2~M6 叠加。
 >
 > **本文为详细设计**；其中 C++ 片段为设计示意，代码实装阶段以此为准。
 
@@ -19,7 +19,7 @@
 | 阶段 / 里程碑 | P5 / M1 |
 | 状态 | **设计稿** |
 | 上游依赖 | P3（IoBackend）、P4.5（BlockAllocator）、P5 决策梳理（D1~D11） |
-| 下游依赖本里程碑 | P5M2（WAL，复用 RawDevice + 设备布局）、P5M5（恢复，复用超级块校验） |
+| 下游依赖本里程碑 | P5M2（WAL，复用 RawDevice + 设备布局）、P5M6（恢复，复用超级块校验） |
 | 退出判定 | 见 §13 |
 
 ---
@@ -55,7 +55,7 @@
 |---|---|---|
 | WAL 实现 | P5M2 | M1 只做设备布局，WAL 设备此阶段仅写/校验超级块 |
 | 快照实现 | P5M4 | 同上 |
-| 崩溃恢复（加载快照 + 重放 WAL） | P5M5 | M1 的 recover 只校验超级块；索引重建在 M5 |
+| 崩溃恢复（加载快照 + 重放 WAL） | P5M6 | M1 的 recover 只校验超级块；索引重建在 M6 |
 | 多设备端到端 | P7 | M1 沿用单设备限制；超级块 device_id 字段为多设备预留 |
 | WAL 配置项的实际生效 | P5M3 | M1 在 Options 中占位字段，M3 起生效 |
 
@@ -233,6 +233,7 @@ namespace cabe {
   1. 打开三块设备（RawDevice 临时句柄）+ 校验大小
      - 数据设备：必须 ≥ kDataRegionOffset + kValueSize（8K 超级块 + 至少 1 个数据块）
      - WAL / 快照设备：必须 ≥ kDataRegionOffset（8K，双份超级块）
+       （注：快照 / WAL 设备的部署期容量下界校验在 P5M4 引入——见 P5M4 §11；此处 M1 只保证 ≥8K 能放下超级块）
   2. 生成引擎全局 UUID + 三设备 device_uuid（getrandom(2)）；
      任一失败 → 整体 create 失败，返回 kSuperBlockEntropyFailure，不写任何超级块
   3. 填充三个 SuperBlock（数据设备记 paired_wal/snapshot + device_id + block_count；
@@ -279,7 +280,7 @@ namespace cabe {
   6. DeviceContext 保存数据设备的 SuperBlock
 ```
 
-**M1 里程碑衔接**：M1 阶段 recover 只校验超级块，索引仍为空（WAL/快照恢复在 M5）。M1 重启后数据不持久——正常，M1 只验证超级块机制。
+**M1 里程碑衔接**：M1 阶段 recover 只校验超级块，索引仍为空（WAL/快照恢复在 M6）。M1 重启后数据不持久——正常，M1 只验证超级块机制。
 
 ---
 
@@ -314,10 +315,12 @@ namespace cabe {
 
         // 快照配置（全局统一；M4 起生效，M1 占位）
         std::uint64_t snapshot_threshold_bytes = 512ull * 1024 * 1024; // WAL 达 512M 触发快照
-        std::uint32_t snapshot_interval_sec = 600;     // 定时快照兜底，默认 10 分钟
+        // （P5M4 新增 snapshot_buffer_size = 1M：快照流式写的临时缓冲，每次快照现读、可动态改——
+        //   M1 的"完整字段清单"未含此项，M4 按需补入快照配置块）
+        std::uint32_t snapshot_interval_sec = 600;     // 定时快照兜底，默认 10 分钟（P5M4 注：M4 不读、P7 起生效）
                                                        // 触发 = 大小阈值 OR 定时，任一满足
 
-        // 恢复配置（M5 起生效，M1 占位）
+        // 恢复配置（M6 起生效，M1 占位）
         bool verify_value_crc_on_recovery = false;     // 恢复时是否逐个校验 value CRC，默认关
     };
 
@@ -499,7 +502,7 @@ test/engine/super_block_test.cpp     # 新建
 |---|---|
 | **P5M2（WAL）** | 复用 `RawDevice` 读写 WAL 设备；WAL 环形区从 @8K 起；超级块已校验设备身份 |
 | **P5M4（快照）** | 复用 `RawDevice`；快照区从 @8K 起 |
-| **P5M5（恢复）** | recover 流程已搭好超级块校验骨架，M5 在校验通过后追加"加载快照 + 重放 WAL + 重建 BlockAllocator" |
+| **P5M6（恢复）** | recover 流程已搭好超级块校验骨架，M6 在校验通过后追加"加载快照 + 重放 WAL + 重建 BlockAllocator" |
 | **P7（多设备）** | 超级块 device_id 字段已就位，多设备时校验顺序；解除单设备限制 |
 
 ---

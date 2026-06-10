@@ -5,20 +5,17 @@
 #include "common/error_code.h"
 #include "common/structs.h"
 #include "util/raw_device.h"
+#include "test/common/test_env.h"
 
 #include <gtest/gtest.h>
 
-#include <cstdlib>
 #include <cstring>
 #include <string>
 #include <vector>
 
 namespace {
 
-std::string GetEnv(const char* name) {
-    const char* v = std::getenv(name);
-    return v ? std::string(v) : "";
-}
+using cabe::test::GetEnv;   // P5M4：收敛到共享测试头（原各文件逐字拷贝）
 
 // 从 WAL 设备读出第 block_idx 个 4K 块内第 slot 个帧（128 字节）。
 cabe::WalFrame ReadWalFrame(const std::string& wal_path, std::uint64_t block_idx, std::uint32_t slot) {

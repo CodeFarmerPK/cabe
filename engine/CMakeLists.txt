@@ -5,7 +5,7 @@ add_library(cabe_engine STATIC
     buffer_pool.cpp
     super_block.cpp
 )
-target_link_libraries(cabe_engine PUBLIC cabe_util cabe_io cabe_index cabe_slots cabe_wal)
+target_link_libraries(cabe_engine PUBLIC cabe_util cabe_io cabe_index cabe_slots cabe_wal cabe_snapshot)
 add_library(cabe::engine ALIAS cabe_engine)
 
 # ---- IoBackend 编译期分派 ----
