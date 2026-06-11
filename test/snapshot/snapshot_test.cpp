@@ -129,7 +129,9 @@ protected:
         dev.Close();
     }
 
-    cabe::Options MakeOpts(std::uint64_t threshold = 512ull * 1024 * 1024) const {
+    // P5M5：默认阈值从 512M 改为 1M——过 WAL 容量校验（16M 设备 vs 512M×2 会拒开）；
+    // 触发线 8192 帧远高于本文件常规用例写入量,故意触发的用例自带更小阈值。
+    cabe::Options MakeOpts(std::uint64_t threshold = 1024 * 1024) const {
         cabe::Options opts;
         cabe::DeviceConfig cfg;
         cfg.data_path     = data_;

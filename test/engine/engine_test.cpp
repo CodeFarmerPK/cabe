@@ -43,6 +43,9 @@ protected:
         cabe::Options opts;
         opts.devices.push_back({data_, wal_, snap_});
         opts.create = true;
+        // P5M5 测试基准阈值 1M：过 WAL 容量校验（16M 设备 vs 默认 512M×2 会拒开）；
+        // 触发线 8192 帧远高于本文件用例写入量——零行为扰动。
+        opts.snapshot_threshold_bytes = 1024 * 1024;
         return opts;
     }
 

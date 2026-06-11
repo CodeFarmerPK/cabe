@@ -59,11 +59,13 @@ namespace cabe::err {
 
     static_assert(kIndexKeyNotFound > kIndexBase - kSegmentSize);
 
-    // ---- wal 段（P5M2 新增：WAL 运行期）----
+    // ---- wal 段（P5M2 新增：WAL 运行期；P5M5 增补环形相关）----
     inline constexpr int kWalKeyTooLong  = InSeg(kWalBase, 0); // -103000  key 超过 kWalKeyMax（Put 拒绝）
     inline constexpr int kWalWriteFailed = InSeg(kWalBase, 1); // -103001  WAL 设备写/落盘失败（区别于数据盘 IO 错）
+    inline constexpr int kWalFull           = InSeg(kWalBase, 2); // -103002  WAL 环已满且快照救援无效（响亮的运维信号，非常态错误）
+    inline constexpr int kWalInvalidReclaim = InSeg(kWalBase, 3); // -103003  回收边界几何校验不过（内部不变式被破坏；保守失败，head 不动）
 
-    static_assert(kWalWriteFailed > kWalBase - kSegmentSize);
+    static_assert(kWalInvalidReclaim > kWalBase - kSegmentSize);
 
     // ---- wal_recovery 段（P5M1 新增：设备超级块校验）----
     inline constexpr int kSuperBlockMagicMismatch      = InSeg(kWalRecoveryBase, 0); // -105000  主备都非本格式/未格式化（魔数或版本不符）

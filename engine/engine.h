@@ -49,6 +49,10 @@ namespace cabe {
         void RequestSnapshot(DeviceContext& dc);
         void MaybeRequestSnapshot(DeviceContext& dc);
 
+        // P5M5：WAL 写入的撞墙救援包装（Put/Delete 共用）——WriteWal 返回 kWalFull 时强制做
+        // 一次快照腾空间（直调 DoSnapshot、绕过增长闸门），成功则重试一次；救不了对外 kWalFull。
+        int32_t WriteWalRescuing(DeviceContext& dc, const WalEntry& e);
+
         // P5M4：Open 失败路径统一清理——关当前还未入列的局部 dc + 已入列设备，清空列表。
         void AbortOpen(DeviceContext& dc);
 

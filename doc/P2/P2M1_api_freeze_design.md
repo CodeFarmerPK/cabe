@@ -86,9 +86,9 @@ public:
 |---|---|
 | `Open` | 已 Opened 时返回 `kEngineAlreadyOpen`（幂等防护）；P1 限单 device，未来多 device 时 `opts.devices.size() > 1` 将被支持 |
 | `Close` | 未 Opened 时返回 `kEngineNotOpen`；释放所有资源 |
-| `Put` | key 非空 + `value.size() == kValueSize`；覆盖写（同 key 最后一次 Put 生效）；**持久化原子性由 WAL 保证（P5+），当前无持久化保证** |
+| `Put` | key 非空 + `value.size() == kValueSize`；覆盖写（同 key 最后一次 Put 生效）；**持久化原子性由 WAL 保证（P5+），当前无持久化保证**。P5M5 起可能返回 `kWalFull`（仅 WAL 环空间耗尽且快照救援无效时——失败干净：索引未动、旧值可读；属运维信号） |
 | `Get` | 返回最后一次 Put 的 value；CRC32 校验不匹配返回 `kEngineDataCorrupted` |
-| `Delete` | 标记删除 + 立即回收块号；删后 Get 返回 `kIndexKeyNotFound` |
+| `Delete` | 标记删除 + 立即回收块号；删后 Get 返回 `kIndexKeyNotFound`。P5M5 起可能返回 `kWalFull`（同 Put：失败时索引/块全不动） |
 | 析构 | 若仍 Opened → 自动 Close + `CABE_LOG_WARN` |
 
 #### `cabe::Options`（`engine/options.h`）

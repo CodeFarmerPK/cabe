@@ -50,6 +50,10 @@ protected:
         // 不设 wal_level → 默认级别 3（WalSync：WAL 同步、value 异步，不 FUA）。
         // 注意：M2 时引擎强制级别 1（value 也 FUA），故 M3 后 BM_Put 少一次 value fdatasync，
         //   数字会比 M2 基线好——对比历史基准时须知此为持久级别变化，非纯代码优化。
+        // P5M5：阈值 4M（过 16M 设备的 WAL 容量校验:4M×2 ≤ 16M-8K）。M5 起 WAL 环形、
+        //   每涨 4M 自动快照+回收一次——bench 数字含周期性快照开销,这才是环形 WAL 的
+        //   真实负载形态;对比 M4 之前的基线须知此为机制变化,非纯代码退化。
+        opts.snapshot_threshold_bytes = 4ull * 1024 * 1024;
         return opts;
     }
 

@@ -136,8 +136,9 @@ namespace cabe {
             return Status::Error(rc);
         }
 
-        // 按级别（wal.WriteWal 现读 wal_level）：1/3 同步落盘、2/4 攒批；预写日志，写在内存索引之前
-        rc = dc.wal.WriteWal(WalEntry{WalEntryType::Put, key, block_id, value_crc, now});
+        // 按级别（wal.WriteWal 现读 wal_level）：1/3 同步落盘、2/4 攒批；预写日志，写在内存索引之前。
+        // P5M5：经撞墙救援包装——环满时强制快照腾空间再重试一次。
+        rc = WriteWalRescuing(dc, WalEntry{WalEntryType::Put, key, block_id, value_crc, now});
         if (rc != err::kSuccess) {
             dc.block_allocator.Recycle(block_id);
             return Status::Error(rc);
@@ -206,8 +207,9 @@ namespace cabe {
         int32_t rc = dc.meta_index.Lookup(key, &meta);
         if (rc != err::kSuccess) return Status::Error(rc);   // 不存在 → 不写 WAL
 
-        // 按级别：1/3 同步落盘、2/4 攒批；墓碑帧写在内存改动之前（预写日志）
-        rc = dc.wal.WriteWal(WalEntry{WalEntryType::Delete, key, BlockId{}, 0, util::GetWallTimeNs()});
+        // 按级别：1/3 同步落盘、2/4 攒批；墓碑帧写在内存改动之前（预写日志）。
+        // P5M5：经撞墙救援包装（同 Put）。
+        rc = WriteWalRescuing(dc, WalEntry{WalEntryType::Delete, key, BlockId{}, 0, util::GetWallTimeNs()});
         if (rc != err::kSuccess) return Status::Error(rc);   // WAL 失败 → 不动内存
 
         dc.meta_index.Delete(key);
@@ -286,13 +288,44 @@ namespace cabe {
         // 起点而非 Snapshot::Write 内，保证"还没到 Write 就失败"的路径（如下面刷 WAL 失败）
         // 也被记账——否则攒批档（2/4）+ WAL 设备故障时，每次写都会重试一遍注定失败的刷盘。
         dc.snapshot.NoteTriggerAttempt(dc.wal.last_seq());
-        // 先刷 WAL（默认级别 3 是空操作）→ 取 covered_seq → 驱动遍历写快照。
+        // 先刷 WAL（默认级别 3 是空操作）→ 定格时刻成对捕获 → 驱动遍历写快照。
         int32_t rc = dc.wal.Flush();
         if (rc != err::kSuccess) return rc;
+
+        // P5M5：与 covered_seq 同刻捕获回收边界（covered_seq 的物理孪生，设计 §6.2）。
+        // 必须在 Flush 之后——变体 Y 下此时的窗口起点才是"已持久且永不再被重写"的边界。
         const std::uint64_t covered_seq = dc.wal.last_seq();
-        return dc.snapshot.Write(covered_seq, [&](const MetaIndexVisitor& v) {
+        const std::uint64_t boundary    = dc.wal.reclaim_boundary();
+
+        rc = dc.snapshot.Write(covered_seq, [&](const MetaIndexVisitor& v) {
             return dc.meta_index.ForEach(v);   // 回调驱动一致扫描；可中止错误一路传出
         });
+        if (rc != err::kSuccess) return rc;    // 快照失败 → 不回收，boundary 随栈丢弃（铁律）
+
+        // P5M5：快照已落地 → 回收（head 跳到边界，铁律的落点）。回收失败只记日志、不上抛——
+        // 快照确实持久了（对调用方报失败是说谎）；失败是保守方向（空间暂不复用、正确性零损），
+        // 且下次快照会捕获新边界自然再收（自愈）。Wal 侧已记 FATAL。
+        const int32_t rrc = dc.wal.ReclaimUpTo(boundary);
+        if (rrc != err::kSuccess) {
+            CABE_LOG_ERROR("WAL 回收失败（快照本身已成功，空间暂不复用）: rc=%d", rrc);
+        }
+        return err::kSuccess;                  // 快照成败 = Write 成败（D11）
+    }
+
+    int32_t Engine::WriteWalRescuing(DeviceContext& dc, const WalEntry& e) {
+        int32_t rc = dc.wal.WriteWal(e);
+        if (rc != err::kWalFull) return rc;    // 正常路径零开销：就一个比较
+
+        // 撞墙救援（P5M5 §8.2）：环满 → 强制快照腾空间。直调 DoSnapshot、绕过增长闸门——
+        // 撞墙后写入失败、WAL 不再增长，闸门若拦它会卡死且设备恢复后无法自愈。
+        // 语义自洽：本次 key 尚未入索引 → 快照不含本次写；被拒帧 seq 未分配 → covered_seq
+        // 不含它；重试的新帧 seq > covered_seq → 活帧。双故障（环满 + 快照坏）下每次写会做
+        // 一次注定失败的尝试——系统本就在持续报错，吵闹换自愈（设计 D13 如实认账）。
+        CABE_LOG_WARN("WAL 环已满，强制快照腾空间");
+        rc = DoSnapshot(dc);
+        if (rc != err::kSuccess) return err::kWalFull;   // 救不了 → 对外就是"满"（运维信号）
+
+        return dc.wal.WriteWal(e);   // 重试恰一次：快照成功 + ring ≥ 缓冲+4K（Open 校验）⇒ 必成
     }
 
     void Engine::RequestSnapshot(DeviceContext& dc) {

@@ -137,7 +137,44 @@ protected:
         opts.devices.push_back(cfg);
         opts.create    = true;                  // create：格式化三设备
         opts.wal_level = lvl;
+        // P5M5 测试基准阈值 1M：过 WAL 容量校验（16M 设备 vs 默认 512M×2 会拒开）；
+        // 触发线 8192 帧远高于既有用例最大写入量（256 帧）——零行为扰动（设计 §10）。
+        opts.snapshot_threshold_bytes = 1024 * 1024;
         return opts;
+    }
+
+    // P5M5 直驱 Wal 用：小阈值过容量校验（直驱无引擎、无自动快照，阈值只参与 Open 校验）。
+    cabe::Options MakeWalOpts(cabe::WalLevel lvl) const {
+        cabe::Options opts;
+        opts.wal_level = lvl;
+        opts.snapshot_threshold_bytes = 1024 * 1024;
+        return opts;
+    }
+
+    // 环容量：与实现同源（WalRingSize 单一来源），测试不复抄公式。
+    std::uint64_t RingBytes() const {
+        cabe::RawDevice dev;
+        EXPECT_EQ(dev.Open(wal_), cabe::err::kSuccess);
+        const std::uint64_t r = cabe::WalRingSize(dev.SizeBytes());
+        dev.Close();
+        return r;
+    }
+
+    // 连写 n 帧（断言逐帧成功），seq 由 Wal 内部连续分配。
+    static void PumpFrames(cabe::Wal& wal, std::size_t n) {
+        for (std::size_t i = 0; i < n; ++i) {
+            cabe::WalEntry e{};
+            e.type = cabe::WalEntryType::Put; e.key = "k";
+            e.block = cabe::BlockId::Make(0, i & 0xFFFF); e.value_crc = 1; e.timestamp = 1;
+            ASSERT_EQ(wal.WriteWal(e), cabe::err::kSuccess) << "第 " << i << " 帧";
+        }
+    }
+
+    static cabe::WalEntry OneFrame() {
+        cabe::WalEntry e{};
+        e.type = cabe::WalEntryType::Put; e.key = "k";
+        e.block = cabe::BlockId::Make(0, 1); e.value_crc = 1; e.timestamp = 1;
+        return e;
     }
 
     static std::vector<std::byte> MakeValue(std::byte fill) {
@@ -219,8 +256,7 @@ TEST_F(WalDeviceTest, PutThenGet) {
 
 // 直接驱动 Wal：写满一个 4K 块后第 33 帧落到第二个块开头（seq=33）。
 TEST_F(WalDeviceTest, BlockAdvance) {
-    cabe::Options opts;
-    opts.wal_level = cabe::WalLevel::Strict;
+    cabe::Options opts = MakeWalOpts(cabe::WalLevel::Strict);
     cabe::Wal wal;
     ASSERT_EQ(wal.Open(wal_, &opts), cabe::err::kSuccess);
 
@@ -243,8 +279,7 @@ TEST_F(WalDeviceTest, BlockAdvance) {
 
 // 直接驱动 Wal：超长 key 被 WriteWal 拒绝。
 TEST_F(WalDeviceTest, WalRejectsLongKey) {
-    cabe::Options opts;
-    opts.wal_level = cabe::WalLevel::Strict;
+    cabe::Options opts = MakeWalOpts(cabe::WalLevel::Strict);
     cabe::Wal wal;
     ASSERT_EQ(wal.Open(wal_, &opts), cabe::err::kSuccess);
 
@@ -287,6 +322,7 @@ TEST_F(WalDeviceTest, DefaultLevelWalSync) {
     cfg.data_path = data_; cfg.wal_path = wal_; cfg.snapshot_path = snap_;
     opts.devices.push_back(cfg);
     opts.create = true;   // 不设 wal_level → 默认 WalSync=3
+    opts.snapshot_threshold_bytes = 1024 * 1024;   // P5M5:过 WAL 容量校验(理由见 MakeOpts)
     cabe::Engine engine;
     ASSERT_EQ(engine.Open(opts).code, cabe::err::kSuccess);
 
@@ -341,8 +377,7 @@ TEST_F(WalDeviceTest, ReadYourWritesAllLevels) {
 // 攒批档"缓冲攒满自动刷出"：直接驱动 Wal，连写满一整块缓冲（默认 32K=256 帧），
 // 验证满前不在盘、第 256 帧触发 Flush 后整批落盘（覆盖 wal.cpp 满判定 + 多块刷出算术）。
 TEST_F(WalDeviceTest, FlushOnBufferFull) {
-    cabe::Options opts;
-    opts.wal_level = cabe::WalLevel::Async;   // 攒批档；wal_buffer_size 默认 32K
+    cabe::Options opts = MakeWalOpts(cabe::WalLevel::Async);   // 攒批档；wal_buffer_size 默认 32K
     const std::size_t cap = opts.wal_buffer_size / cabe::kWalFrameSize;    // 256 帧
     const std::size_t blocks = opts.wal_buffer_size / cabe::kWalBlockSize; // 8 块
     ZeroWalRegion(wal_, blocks + 1);          // 清零将被刷的整块缓冲区域
@@ -373,4 +408,223 @@ TEST_F(WalDeviceTest, FlushOnBufferFull) {
     const cabe::WalFrame last = ReadWalFrame(wal_, blocks - 1, fpb - 1);    // 最后一块最后一槽
     ASSERT_TRUE(cabe::VerifyFrame(last));
     EXPECT_EQ(last.seq, static_cast<std::uint64_t>(cap));                   // seq=256
+}
+
+// ============================================================
+// P5M5：环形队列回收（设计稿 doc/P5/P5M5_wal_ring_design.md §13）
+// 测法基石：direct-Wal —— ReclaimUpTo 直调等价"快照成功"，纯 WAL 流量、秒级。
+// ============================================================
+
+// 环几何公式（不需设备）：常规 / 取整 / 过小设备 → 0。
+TEST(WalRingGeometryTest, RingSizeFormula) {
+    EXPECT_EQ(cabe::WalRingSize(0), 0u);
+    EXPECT_EQ(cabe::WalRingSize(cabe::kDataRegionOffset), 0u);                 // 只装得下超级块
+    EXPECT_EQ(cabe::WalRingSize(cabe::kDataRegionOffset + 4096), 4096u);
+    EXPECT_EQ(cabe::WalRingSize(cabe::kDataRegionOffset + 4096 + 100), 4096u); // 零头向下取整
+    EXPECT_EQ(cabe::WalRingSize(16ull << 20), (16ull << 20) - cabe::kDataRegionOffset);
+}
+
+// 容量校验：阈值过大（默认 512M×2 ≫ 16M 设备）→ Open 拒开 kDeviceTooSmall。
+TEST_F(WalDeviceTest, OpenRejectsSmallRing) {
+    cabe::Options opts;                       // 默认阈值 512M → 需求 1G ≫ 16M 环
+    opts.wal_level = cabe::WalLevel::Strict;
+    cabe::Wal wal;
+    EXPECT_EQ(wal.Open(wal_, &opts), cabe::err::kDeviceTooSmall);
+}
+
+// 变体 Y 无空洞：提前刷出"整块推进、半块留窗"，续写后补零槽被新帧填上（设计 §6.1）。
+TEST_F(WalDeviceTest, EarlyFlushNoHoles) {
+    ZeroWalRegion(wal_, 3);
+    cabe::Options opts = MakeWalOpts(cabe::WalLevel::Async);
+    cabe::Wal wal;
+    ASSERT_EQ(wal.Open(wal_, &opts), cabe::err::kSuccess);
+
+    PumpFrames(wal, 5);                                        // seq 1..5
+    ASSERT_EQ(wal.Flush(), cabe::err::kSuccess);               // 提前刷出（不足一块）
+    EXPECT_EQ(wal.reclaim_boundary(), cabe::kDataRegionOffset) // 推进 0：半块留窗
+        << "变体 Y：不足整块的提前刷出不推进";
+    for (std::uint32_t i = 0; i < 5; ++i) {
+        const cabe::WalFrame f = ReadWalFrame(wal_, 0, i);
+        ASSERT_TRUE(cabe::VerifyFrame(f));
+        EXPECT_EQ(f.seq, i + 1u);
+    }
+    EXPECT_FALSE(cabe::VerifyFrame(ReadWalFrame(wal_, 0, 5))); // 此刻槽 5 是补零
+
+    PumpFrames(wal, 28);                                       // seq 6..33（块 0 满 + 块 1 一帧）
+    ASSERT_EQ(wal.Flush(), cabe::err::kSuccess);
+    EXPECT_EQ(wal.reclaim_boundary(), cabe::kDataRegionOffset + cabe::kWalBlockSize)
+        << "推进 1 整块，留窗 1 帧";
+    for (std::uint32_t i = 0; i < cabe::kWalFramesPerBlock; ++i) {
+        const cabe::WalFrame f = ReadWalFrame(wal_, 0, i);     // 块 0 整块紧凑——无空洞
+        ASSERT_TRUE(cabe::VerifyFrame(f)) << "槽 " << i;
+        EXPECT_EQ(f.seq, i + 1u);
+    }
+    const cabe::WalFrame f33 = ReadWalFrame(wal_, 1, 0);
+    ASSERT_TRUE(cabe::VerifyFrame(f33));
+    EXPECT_EQ(f33.seq, 33u);
+    wal.Close();
+}
+
+// 回收：head 跳跃前移；空回收幂等；全量回收（boundary == tail）取等放行（设计 §7.1/§7.2）。
+TEST_F(WalDeviceTest, ReclaimAdvancesHead) {
+    cabe::Options opts = MakeWalOpts(cabe::WalLevel::Async);
+    cabe::Wal wal;
+    ASSERT_EQ(wal.Open(wal_, &opts), cabe::err::kSuccess);
+    EXPECT_EQ(wal.head_off(), cabe::kDataRegionOffset);        // 空环：head == tail
+
+    PumpFrames(wal, 256);                                      // 整窗（32K）自动刷出
+    const std::uint64_t b = wal.reclaim_boundary();
+    EXPECT_EQ(b, cabe::kDataRegionOffset + opts.wal_buffer_size);
+
+    ASSERT_EQ(wal.ReclaimUpTo(b), cabe::err::kSuccess);        // 全量回收
+    EXPECT_EQ(wal.head_off(), b);
+    ASSERT_EQ(wal.ReclaimUpTo(b), cabe::err::kSuccess);        // 空回收幂等
+    EXPECT_EQ(wal.head_off(), b);
+    wal.Close();
+}
+
+// 回收校验：倒退 / 越 tail / 不对齐 / 环外 → kWalInvalidReclaim 且 head 纹丝不动（设计 §7.2）。
+TEST_F(WalDeviceTest, ReclaimRejectsInvalid) {
+    cabe::Options opts = MakeWalOpts(cabe::WalLevel::Async);
+    cabe::Wal wal;
+    ASSERT_EQ(wal.Open(wal_, &opts), cabe::err::kSuccess);
+    PumpFrames(wal, 256);                                      // tail = start + 32K
+    const std::uint64_t b = wal.reclaim_boundary();
+    ASSERT_EQ(wal.ReclaimUpTo(b), cabe::err::kSuccess);        // head = start + 32K
+    PumpFrames(wal, 16);                                       // 攒着不刷：tail 不动
+
+    const std::uint64_t ring_end = cabe::kDataRegionOffset + RingBytes();
+    EXPECT_EQ(wal.ReclaimUpTo(b + 1), cabe::err::kWalInvalidReclaim);        // ① 不对齐
+    EXPECT_EQ(wal.ReclaimUpTo(0), cabe::err::kWalInvalidReclaim);            // ② 环外（低）
+    EXPECT_EQ(wal.ReclaimUpTo(ring_end), cabe::err::kWalInvalidReclaim);     // ② 环外（高）
+    EXPECT_EQ(wal.ReclaimUpTo(cabe::kDataRegionOffset),                      // ③ 倒退
+              cabe::err::kWalInvalidReclaim);
+    EXPECT_EQ(wal.ReclaimUpTo(b + cabe::kWalBlockSize),                      // ③ 越过 tail
+              cabe::err::kWalInvalidReclaim);
+    EXPECT_EQ(wal.head_off(), b);                              // 保守失败：head 不动
+    wal.Close();
+}
+
+// 绕圈：写 → 模拟快照回收 → 续写越过环尾绕回；seq 不重置；环上残留旧帧可与新帧分辨
+//（设计 §4/§6.3；同时隐含验证贴缝窗口截短——精确落位证明无任何跨缝写出）。
+TEST_F(WalDeviceTest, RingWrapAround) {
+    cabe::Options opts = MakeWalOpts(cabe::WalLevel::Async);
+    cabe::Wal wal;
+    ASSERT_EQ(wal.Open(wal_, &opts), cabe::err::kSuccess);
+
+    const std::uint64_t ring = RingBytes();
+    const std::uint64_t total_frames = ring / cabe::kWalFrameSize;     // 满环帧数
+    const std::size_t   kPerRound = 2048;                              // 64 块/轮（整块数）
+    const std::size_t   rounds = static_cast<std::size_t>(total_frames / kPerRound) + 1;
+    for (std::size_t r = 0; r < rounds; ++r) {
+        PumpFrames(wal, kPerRound);
+        ASSERT_EQ(wal.Flush(), cabe::err::kSuccess);
+        ASSERT_EQ(wal.ReclaimUpTo(wal.reclaim_boundary()), cabe::err::kSuccess); // 模拟快照成功
+    }
+    const std::uint64_t written = static_cast<std::uint64_t>(rounds) * kPerRound * cabe::kWalFrameSize;
+    ASSERT_GT(written, ring) << "测试前提：写入量须越过环尾";
+    const std::uint64_t expect_tail = cabe::kDataRegionOffset + written % ring;
+    EXPECT_EQ(wal.reclaim_boundary(), expect_tail);            // 紧凑性：tail = 总字节 mod 环
+    EXPECT_EQ(wal.head_off(), expect_tail);                    // 每轮全量回收 → head 跟上
+
+    // 环头块 0 = 第二圈新帧；变体 Y 紧凑 ⇒ 第 k 帧在 (k-1)*128 mod ring ⇒ 槽 0 帧 seq = 满环帧数+1
+    const cabe::WalFrame f0 = ReadWalFrame(wal_, 0, 0);
+    ASSERT_TRUE(cabe::VerifyFrame(f0));
+    EXPECT_EQ(f0.seq, total_frames + 1) << "seq 绕圈不重置 + 帧流紧凑";
+
+    // tail 之后两块：第一圈残留（合法旧帧，seq 小）——3.3 三分类中的"残留"，靠 seq 分辨
+    const std::uint64_t stale_block = (expect_tail - cabe::kDataRegionOffset) / cabe::kWalBlockSize + 2;
+    const cabe::WalFrame fs = ReadWalFrame(wal_, stale_block, 0);
+    ASSERT_TRUE(cabe::VerifyFrame(fs));
+    EXPECT_EQ(fs.seq, stale_block * cabe::kWalFramesPerBlock + 1);
+    EXPECT_LT(fs.seq, f0.seq);
+    wal.Close();
+}
+
+// 贴缝窗口截短：距环尾 4 块时窗口收口为 16K，攒满恰好顶到环尾、绕回，余帧落环头（设计 §4）。
+TEST_F(WalDeviceTest, WindowShrinkAtSeam) {
+    cabe::Options opts = MakeWalOpts(cabe::WalLevel::Async);
+    cabe::Wal wal;
+    ASSERT_EQ(wal.Open(wal_, &opts), cabe::err::kSuccess);
+
+    const std::uint64_t ring = RingBytes();
+    const std::uint64_t total_blocks = ring / cabe::kWalBlockSize;
+    const std::uint64_t pre_frames = (total_blocks - 4) * cabe::kWalFramesPerBlock;
+
+    // 推进到距环尾 4 块处（沿途轮次回收，确保不满；每轮 2048 帧 = 64 整块）
+    std::uint64_t remain = pre_frames;
+    while (remain > 0) {
+        const std::size_t batch = static_cast<std::size_t>(std::min<std::uint64_t>(remain, 2048));
+        PumpFrames(wal, batch);
+        ASSERT_EQ(wal.Flush(), cabe::err::kSuccess);
+        ASSERT_EQ(wal.ReclaimUpTo(wal.reclaim_boundary()), cabe::err::kSuccess);
+        remain -= batch;
+    }
+    const std::uint64_t seam_pos = cabe::kDataRegionOffset + ring - 4 * cabe::kWalBlockSize;
+    ASSERT_EQ(wal.reclaim_boundary(), seam_pos);
+
+    // 窗口截短为 16K = 128 帧：写 130 帧 → 第 128 帧攒满截短窗自动刷出、恰到环尾、绕回；
+    // 余 2 帧进环头新窗（缓冲内），显式 Flush 写出（留窗、推进 0）。
+    PumpFrames(wal, 130);
+    ASSERT_EQ(wal.Flush(), cabe::err::kSuccess);
+    EXPECT_EQ(wal.reclaim_boundary(), cabe::kDataRegionOffset) << "绕回后停在环头块（留窗 2 帧）";
+
+    const cabe::WalFrame f_last = ReadWalFrame(wal_, total_blocks - 1, cabe::kWalFramesPerBlock - 1);
+    ASSERT_TRUE(cabe::VerifyFrame(f_last));
+    EXPECT_EQ(f_last.seq, pre_frames + 128) << "环尾最后一槽被截短窗恰好填满，无跨缝";
+    const cabe::WalFrame g0 = ReadWalFrame(wal_, 0, 0);
+    const cabe::WalFrame g1 = ReadWalFrame(wal_, 0, 1);
+    ASSERT_TRUE(cabe::VerifyFrame(g0));
+    ASSERT_TRUE(cabe::VerifyFrame(g1));
+    EXPECT_EQ(g0.seq, pre_frames + 129);
+    EXPECT_EQ(g1.seq, pre_frames + 130);
+    EXPECT_FALSE(cabe::VerifyFrame(ReadWalFrame(wal_, 0, 2)));  // 留窗补零
+    wal.Close();
+}
+
+// 攒批档写满：不回收一路写到 kWalFull——恒留一块边界精确（容量 = 环 − 4K）；
+// 回收后惰性重开窗、写入复活（救援数学的 Wal 级验证；设计 §8.1/§8.2/D12）。
+TEST_F(WalDeviceTest, WalFullBatchModeAndReclaimRevives) {
+    cabe::Options opts = MakeWalOpts(cabe::WalLevel::Async);
+    cabe::Wal wal;
+    ASSERT_EQ(wal.Open(wal_, &opts), cabe::err::kSuccess);
+
+    const std::uint64_t ring = RingBytes();
+    const std::uint64_t cap_frames = (ring - cabe::kWalBlockSize) / cabe::kWalFrameSize;  // 恒留一块
+    PumpFrames(wal, static_cast<std::size_t>(cap_frames));     // 恰好容量内全部成功
+
+    EXPECT_EQ(wal.WriteWal(OneFrame()), cabe::err::kWalFull);  // 超出 → 满
+    EXPECT_EQ(wal.last_seq(), cap_frames) << "被拒帧 seq 未消耗";
+    EXPECT_EQ(wal.reclaim_boundary(), cabe::kDataRegionOffset + ring - cabe::kWalBlockSize)
+        << "tail 停在保留块上（块本身未写）";
+    EXPECT_EQ(wal.head_off(), cabe::kDataRegionOffset);
+
+    // 模拟快照成功 → 全量回收 → 下一次写惰性重开窗、复活
+    ASSERT_EQ(wal.Flush(), cabe::err::kSuccess);               // 满态下窗口已清，空操作
+    ASSERT_EQ(wal.ReclaimUpTo(wal.reclaim_boundary()), cabe::err::kSuccess);
+    EXPECT_EQ(wal.WriteWal(OneFrame()), cabe::err::kSuccess);
+    EXPECT_EQ(wal.last_seq(), cap_frames + 1);
+    wal.Close();
+}
+
+// 同步档写满：拒绝点在"块满推进前"——帧未编码、seq 未耗；容量边界与攒批档同一条（恒留一块）。
+TEST_F(WalDeviceTest, WalFullSyncMode) {
+    cabe::Options opts = MakeWalOpts(cabe::WalLevel::Async);   // 先攒批快速填充
+    cabe::Wal wal;
+    ASSERT_EQ(wal.Open(wal_, &opts), cabe::err::kSuccess);
+
+    const std::uint64_t ring = RingBytes();
+    const std::uint64_t blocks = ring / cabe::kWalBlockSize;
+    const std::uint64_t batch_frames = (blocks - 2) * cabe::kWalFramesPerBlock;  // 留最后一个可用块
+    PumpFrames(wal, static_cast<std::size_t>(batch_frames));
+    ASSERT_EQ(wal.Flush(), cabe::err::kSuccess);
+    ASSERT_EQ(wal.reclaim_boundary(), cabe::kDataRegionOffset + (blocks - 2) * cabe::kWalBlockSize);
+
+    // 切同步档（直驱等价于 Engine 收紧契约：先刷净再改级别；Wal 现读 opts_）
+    opts.wal_level = cabe::WalLevel::Strict;
+    PumpFrames(wal, cabe::kWalFramesPerBlock);                 // 最后一个可用块写满 32 帧
+    EXPECT_EQ(wal.WriteWal(OneFrame()), cabe::err::kWalFull);  // 第 33 帧：推进进保留块被拒
+    EXPECT_EQ(wal.last_seq(), batch_frames + cabe::kWalFramesPerBlock)
+        << "= (块数−1)×32 = 恒留一块下的精确容量；被拒帧 seq 未耗";
+    wal.Close();
 }
