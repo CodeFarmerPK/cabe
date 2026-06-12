@@ -26,8 +26,8 @@ P2 阶段只有一个技术里程碑（P2M1），产出为冻结声明文档：
 | 主题 | 锁定结论 | 详见 |
 |---|---|---|
 | 冻结总原则 | 设计意图声明（尽量保持），非绝对约束；全部完工发布后才严格约束 | [P2M1](P2M1_api_freeze_design.md) §1 |
-| 公开 API 符号清单 | Engine 8 方法 + Options / Status / 数据层类型；内部类型（DeviceContext / BufferPool / FreeList / MetaIndex / IO）不在承诺范围 | [P2M1](P2M1_api_freeze_design.md) §3 |
-| 错误码空间 | 6 段 × 1000 = 6000 容量，当前用 14 个——充足；尽量保持不改已分配码值 | [P2M1](P2M1_api_freeze_design.md) §4 |
+| 公开 API 符号清单 | Engine 8 方法 + Options / Status / 数据层类型；内部类型（DeviceContext / BufferPool / FreeList / MetaIndex / IO）不在承诺范围（P5 注：按约定追加 `SetWalLevel`/`Snapshot()` 两公开方法；FreeList 已被 P4.5 块分配器取代——均见 P2M1 冻结追加注） | [P2M1](P2M1_api_freeze_design.md) §3 |
+| 错误码空间 | 6 段 × 1000 = 6000 容量，当前用 14 个——充足；尽量保持不改已分配码值（P5M4 注：按 §4.3 约定增设第七段 snapshot(-106000)；P5 终态七段共 36 码，容量依旧宽裕） | [P2M1](P2M1_api_freeze_design.md) §4 |
 | 返回值分层 | 公开 API 用 Status；内部用 int32_t；转换点在 Engine 方法体内 | [P2M1](P2M1_api_freeze_design.md) §5 |
 | Put 持久化承诺 | WAL 保证原子性（P5+）；当前无持久化保证 | [P2M1](P2M1_api_freeze_design.md) §3.1 |
 

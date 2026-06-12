@@ -36,7 +36,7 @@ Cabe 是一个面向单机部署的 KV 存储引擎:
 | P3 | IoBackend + MetaIndex 抽象 | ✅ 完成 |
 | P4 | io_uring 后端 | ✅ 完成 |
 | P4.5 | 块分配器改造 | ✅ 完成 |
-| P5 | WAL + Recovery + Snapshot | ⏳ |
+| P5 | WAL + Recovery + Snapshot | ✅ 完成 |
 | P6 | Group Commit | ⏳ |
 | P7 | Reactor + 无锁 MT + 多 device 端到端 | ⏳ |
 | P8 | 零拷贝主路径 | ⏳ |

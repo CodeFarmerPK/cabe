@@ -17,7 +17,7 @@
 | 项 | 值 |
 |---|---|
 | 阶段 / 里程碑 | P5 / M4 |
-| 状态 | **设计稿** |
+| 状态 | **✅ 已锁定（P5M7 收敛）** |
 | 上游依赖 | P5M1（超级块 + `RawDevice` + create/recover + `DeviceContext`）、P5M2/M3（WAL 帧 + `seq` + 公开 `Flush()` + `Options`） |
 | 下游依赖本里程碑 | P5M5（环形回收：凭快照 `covered_seq` 定回收边界）、P5M6（恢复：加载快照 + 从 `covered_seq+1` 重放 WAL） |
 | 退出判定 | 见 §16 |

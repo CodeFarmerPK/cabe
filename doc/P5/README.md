@@ -6,7 +6,7 @@
 
 ## 状态
 
-🚧 **进行中**（M1~M5 已实装；M6 设计稿完成、待实装；M7 待设计）
+✅ **已完成**（M1~M6 全部实装，P5M7 收敛通过；收口实证与债务流向见 [P5M7_convergence_design.md](P5M7_convergence_design.md)）
 
 ## 范围摘要
 
@@ -29,8 +29,8 @@
 | M3 | WAL 分级 2/3/4 + 缓冲区配置 | `P5M3_wal_levels_design.md` | ✅ 已实装 |
 | M4 | MetaIndex 快照（检查点） | `P5M4_snapshot_design.md` | ✅ 已实装 |
 | M5 | WAL 环形队列回收 | `P5M5_wal_ring_design.md` | ✅ 已实装 |
-| M6 | 崩溃恢复 + Engine 集成收尾 | `P5M6_recovery_design.md` | 设计稿 |
-| M7 | P5 收敛 | `P5M7_convergence_design.md` | 待设计 |
+| M6 | 崩溃恢复 + Engine 集成收尾 | `P5M6_recovery_design.md` | ✅ 已实装 |
+| M7 | P5 收敛 | `P5M7_convergence_design.md` | ✅ 收敛通过 |
 
 ## 里程碑依赖
 
@@ -44,7 +44,7 @@ P5M1 ──► P5M2 ──► P5M3 ──► P5M4 ──► P5M5 ──► P5M6 
 
 1. ✅ P4.5 全部完成（块分配器抽象层已实装）
 2. ✅ P5 决策梳理完成（D1~D11）
-3. ⏳ 用 `/grill-with-docs P5M1` 开第一个里程碑的详细设计
+3. ✅ 七个里程碑全部经 `/grill-with-docs` 逐项设计并实装完毕
 
 ## 已锁定决策（P5 决策梳理）
 
@@ -144,6 +144,9 @@ P5M1 ──► P5M2 ──► P5M3 ──► P5M4 ──► P5M5 ──► P5M6 
 - 不引入 P6 占位
 
 ## P5 退出条件概要
+
+> **全部核销 ✅**——逐条证据见 [P5M7_convergence_design.md](P5M7_convergence_design.md) §10；
+> 收口验证（四档 sanitizer × sync 152/152、io_uring 162/162、覆盖率 86.1%）见其 §8。
 
 1. 三设备超级块格式 + create/recover 启动模式 + 校验逻辑
 2. WAL 模块实装，128 字节帧，4 级持久化全部生效，默认级别 3

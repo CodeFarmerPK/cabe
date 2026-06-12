@@ -172,6 +172,11 @@ struct Status {
 | `MetaIndex` | RAM 索引 |
 | `WriteBlock` / `ReadBlock` | 朴素 I/O 辅助函数 |
 
+> （演进注——本表为 P2 时点快照，恰因"不在冻结承诺内"而自由演进：P3 起 I/O 与索引抽象化
+> （IoBackend/MetaIndex concept）、`WriteBlock/ReadBlock` 被吸收；P4.5 起 `FreeList` →
+> `BlockAllocator`（`slots/`）；P5 起 `DeviceContext` = `{io, wal, snapshot, pool,
+> block_allocator, meta_index, super_block}`。）
+
 ---
 
 ## 4. 错误码空间审查
@@ -223,7 +228,7 @@ P1 期间确立的约定，P2 冻结确认：
 
 | 层 | 返回类型 | 示例 |
 |---|---|---|
-| 公开 API（Engine 5 个方法） | `cabe::Status` | `return Status::Ok();` |
+| 公开 API（Engine 5 个方法；P5 起 7 个——追加 `SetWalLevel`/`Snapshot()`，见 §3.1 冻结追加注） | `cabe::Status` | `return Status::Ok();` |
 | 内部组件（IO / FreeList / MetaIndex） | `int32_t` 错误码 | `return err::kSuccess;` |
 | 转换点 | Engine 方法体内 | `if (rc != err::kSuccess) return Status::Error(rc);` |
 
