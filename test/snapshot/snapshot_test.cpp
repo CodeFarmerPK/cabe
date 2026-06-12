@@ -359,3 +359,365 @@ TEST_F(SnapshotDeviceTest, OpenRejectsSmallDevice) {
     EXPECT_EQ(snap.Open(snap_, &opts, sb), cabe::err::kDeviceTooSmall);
     EXPECT_FALSE(snap.is_open());  // 拒开后设备句柄已关闭
 }
+
+// ============================================================
+// P5M6：快照恢复侧（设计稿 doc/P5/P5M6_recovery_design.md §5/§13）
+// 手法二（Close 后盘面篡改雕崩溃形态）+ 手法三（direct-Snapshot 直驱裁决/加载）。
+// ============================================================
+
+namespace {
+
+// 读数据设备超级块（recover 校验路径，与 Engine 同源）——direct-Snapshot 的 Open 需要它。
+cabe::SuperBlock RecoverDataSB(const std::string& data, const std::string& wal,
+                               const std::string& snap) {
+    cabe::DeviceConfig cfg;
+    cfg.data_path = data; cfg.wal_path = wal; cfg.snapshot_path = snap;
+    cabe::SuperBlock sb{};
+    EXPECT_EQ(cabe::RecoverDeviceGroup(cfg, 0, &sb), cabe::err::kSuccess);
+    return sb;
+}
+
+// 把 4K 原始块写到快照设备指定偏移（伪造槽头/篡改数据用）。
+void WriteRaw4K(const std::string& snap_path, std::uint64_t off, const std::byte* src) {
+    cabe::RawDevice dev;
+    ASSERT_EQ(dev.Open(snap_path), cabe::err::kSuccess);
+    std::byte* buf = cabe::RawDevice::AllocAligned(4096);
+    ASSERT_NE(buf, nullptr);
+    std::memcpy(buf, src, 4096);
+    ASSERT_EQ(dev.WriteAt(off, buf, 4096), cabe::err::kSuccess);
+    cabe::RawDevice::FreeAligned(buf);
+    dev.Close();
+}
+
+// 翻转某槽数据区首块的一个字节（模拟腐烂；槽头保持合法）。
+void FlipSlotDataByte(const std::string& snap_path, std::uint64_t slot_off) {
+    cabe::RawDevice dev;
+    ASSERT_EQ(dev.Open(snap_path), cabe::err::kSuccess);
+    std::byte* buf = cabe::RawDevice::AllocAligned(4096);
+    ASSERT_NE(buf, nullptr);
+    const std::uint64_t off = slot_off + cabe::kSnapshotSlotHeaderSize;
+    ASSERT_EQ(dev.ReadAt(off, buf, 4096), cabe::err::kSuccess);
+    buf[8] = buf[8] ^ std::byte{0xFF};
+    ASSERT_EQ(dev.WriteAt(off, buf, 4096), cabe::err::kSuccess);
+    cabe::RawDevice::FreeAligned(buf);
+    dev.Close();
+}
+
+// 把某槽头清零（模拟撕裂/作废）。
+void ZeroSlotHeader(const std::string& snap_path, std::uint64_t slot_off) {
+    std::byte zeros[4096] = {};
+    WriteRaw4K(snap_path, slot_off, zeros);
+}
+
+// 空遍历器（写"0 条记录"的快照用）。
+int32_t EmptyScan(const cabe::MetaIndexVisitor&) { return cabe::err::kSuccess; }
+
+// 收集 Load 投递的 (key, meta)。
+struct LoadedRec { std::string key; cabe::ValueMeta meta; };
+cabe::MetaIndexVisitor CollectLoad(std::vector<LoadedRec>* out) {
+    return [out](std::string_view key, const cabe::ValueMeta& m) -> int32_t {
+        out->push_back({std::string(key), m});
+        return cabe::err::kSuccess;
+    };
+}
+
+} // namespace
+
+// 双合法槽取代际最大；状态从盘上重建（active=B、next_gen=3）；Load 投递完整内容（2.2/2.5）。
+TEST_F(SnapshotDeviceTest, RecoverPicksMaxGeneration) {
+    const auto value = MakeValue(std::byte{0x11});
+    {
+        cabe::Engine engine;
+        ASSERT_EQ(engine.Open(MakeOpts()).code, cabe::err::kSuccess);
+        ASSERT_EQ(engine.Put("k1", cabe::DataView{value.data(), value.size()}).code, cabe::err::kSuccess);
+        ASSERT_EQ(engine.Snapshot().code, cabe::err::kSuccess);     // gen1 → A（含 k1）
+        ASSERT_EQ(engine.Put("k2", cabe::DataView{value.data(), value.size()}).code, cabe::err::kSuccess);
+        ASSERT_EQ(engine.Snapshot().code, cabe::err::kSuccess);     // gen2 → B（含 k1,k2）
+        engine.Close();
+    }
+    std::uint64_t a_off = 0, b_off = 0;
+    Layout(&a_off, &b_off);
+    const cabe::SnapshotSlotHeader hb = ReadHeader(b_off);
+
+    const cabe::SuperBlock sb = RecoverDataSB(data_, wal_, snap_);
+    cabe::Options ropts;                                            // create=false（默认）
+    cabe::Snapshot snap;
+    ASSERT_EQ(snap.Open(snap_, &ropts, sb), cabe::err::kSuccess);
+    EXPECT_EQ(snap.last_covered_seq(), hb.covered_seq) << "选中代际最大的 B";
+
+    std::vector<LoadedRec> recs;
+    ASSERT_EQ(snap.Load(CollectLoad(&recs)), cabe::err::kSuccess);
+    ASSERT_EQ(recs.size(), 2u);
+
+    // next_gen = max+1 = 3，写非活跃槽 = A（active=B）——下一份快照直接验证状态重建。
+    ASSERT_EQ(snap.Write(snap.last_covered_seq(), EmptyScan), cabe::err::kSuccess);
+    const cabe::SnapshotSlotHeader ha = ReadHeader(a_off);
+    ASSERT_TRUE(cabe::VerifySlotHeader(ha));
+    EXPECT_EQ(ha.generation, 3u);
+    snap.Close();
+}
+
+// 单合法槽（另一槽撕裂/清零）→ 取之（2.2 单合法形态——A/B 双缓冲的设计场景）。
+TEST_F(SnapshotDeviceTest, RecoverSingleValidSlot) {
+    const auto value = MakeValue(std::byte{0x22});
+    {
+        cabe::Engine engine;
+        ASSERT_EQ(engine.Open(MakeOpts()).code, cabe::err::kSuccess);
+        ASSERT_EQ(engine.Put("k1", cabe::DataView{value.data(), value.size()}).code, cabe::err::kSuccess);
+        ASSERT_EQ(engine.Snapshot().code, cabe::err::kSuccess);     // gen1 → A
+        ASSERT_EQ(engine.Put("k2", cabe::DataView{value.data(), value.size()}).code, cabe::err::kSuccess);
+        ASSERT_EQ(engine.Snapshot().code, cabe::err::kSuccess);     // gen2 → B
+        engine.Close();
+    }
+    std::uint64_t a_off = 0, b_off = 0;
+    Layout(&a_off, &b_off);
+    const cabe::SnapshotSlotHeader ha = ReadHeader(a_off);
+    ZeroSlotHeader(snap_, b_off);                                   // B 头作废（模拟撕裂）
+
+    const cabe::SuperBlock sb = RecoverDataSB(data_, wal_, snap_);
+    cabe::Options ropts;
+    cabe::Snapshot snap;
+    ASSERT_EQ(snap.Open(snap_, &ropts, sb), cabe::err::kSuccess);
+    EXPECT_EQ(snap.last_covered_seq(), ha.covered_seq) << "回到唯一合法的 A（gen1）";
+
+    std::vector<LoadedRec> recs;
+    ASSERT_EQ(snap.Load(CollectLoad(&recs)), cabe::err::kSuccess);
+    ASSERT_EQ(recs.size(), 1u);
+    EXPECT_EQ(recs[0].key, "k1");
+
+    // next_gen = max(合法头)=1 → 2；写非活跃槽 = B。
+    ASSERT_EQ(snap.Write(snap.last_covered_seq(), EmptyScan), cabe::err::kSuccess);
+    const cabe::SnapshotSlotHeader hb = ReadHeader(b_off);
+    ASSERT_TRUE(cabe::VerifySlotHeader(hb));
+    EXPECT_EQ(hb.generation, 2u);
+    snap.Close();
+}
+
+// 双槽头皆无效 = 合法的"从未快照"（covered=0，Load 空跑；非错误，2.5）。
+TEST_F(SnapshotDeviceTest, RecoverNoSnapshot) {
+    const auto value = MakeValue(std::byte{0x33});
+    {
+        cabe::Engine engine;
+        ASSERT_EQ(engine.Open(MakeOpts()).code, cabe::err::kSuccess);   // create 清两槽
+        ASSERT_EQ(engine.Put("k1", cabe::DataView{value.data(), value.size()}).code, cabe::err::kSuccess);
+        engine.Close();                                             // 没做过快照
+    }
+    const cabe::SuperBlock sb = RecoverDataSB(data_, wal_, snap_);
+    cabe::Options ropts;
+    cabe::Snapshot snap;
+    ASSERT_EQ(snap.Open(snap_, &ropts, sb), cabe::err::kSuccess);
+    EXPECT_EQ(snap.last_covered_seq(), 0u);
+
+    std::vector<LoadedRec> recs;
+    ASSERT_EQ(snap.Load(CollectLoad(&recs)), cabe::err::kSuccess);  // 空跑成功
+    EXPECT_TRUE(recs.empty());
+
+    // next_gen=1、active=-1 → 首份快照写 A、代际 1（与 create 后首写一致）。
+    ASSERT_EQ(snap.Write(0, EmptyScan), cabe::err::kSuccess);
+    std::uint64_t a_off = 0, b_off = 0;
+    Layout(&a_off, &b_off);
+    const cabe::SnapshotSlotHeader ha = ReadHeader(a_off);
+    ASSERT_TRUE(cabe::VerifySlotHeader(ha));
+    EXPECT_EQ(ha.generation, 1u);
+    snap.Close();
+}
+
+// 坏槽回退（2.3）：候选 gen2 数据腐烂 → 回退 gen1；next_gen = 盘上合法头 max+1 = 3（2.5 尸体论证）。
+TEST_F(SnapshotDeviceTest, RecoverFallbackOnDataCrc) {
+    const auto value = MakeValue(std::byte{0x44});
+    {
+        cabe::Engine engine;
+        ASSERT_EQ(engine.Open(MakeOpts()).code, cabe::err::kSuccess);
+        ASSERT_EQ(engine.Put("k1", cabe::DataView{value.data(), value.size()}).code, cabe::err::kSuccess);
+        ASSERT_EQ(engine.Snapshot().code, cabe::err::kSuccess);     // gen1 → A（k1）
+        ASSERT_EQ(engine.Put("k2", cabe::DataView{value.data(), value.size()}).code, cabe::err::kSuccess);
+        ASSERT_EQ(engine.Snapshot().code, cabe::err::kSuccess);     // gen2 → B（k1,k2）
+        engine.Close();
+    }
+    std::uint64_t a_off = 0, b_off = 0;
+    Layout(&a_off, &b_off);
+    const cabe::SnapshotSlotHeader ha = ReadHeader(a_off);
+    FlipSlotDataByte(snap_, b_off);                                 // B 数据腐烂（头合法）
+
+    const cabe::SuperBlock sb = RecoverDataSB(data_, wal_, snap_);
+    cabe::Options ropts;
+    cabe::Snapshot snap;
+    ASSERT_EQ(snap.Open(snap_, &ropts, sb), cabe::err::kSuccess) << "回退应成功";
+    EXPECT_EQ(snap.last_covered_seq(), ha.covered_seq) << "回退到 gen1 的覆盖点";
+
+    std::vector<LoadedRec> recs;
+    ASSERT_EQ(snap.Load(CollectLoad(&recs)), cabe::err::kSuccess);
+    ASSERT_EQ(recs.size(), 1u) << "加载的是 gen1 内容";
+    EXPECT_EQ(recs[0].key, "k1");
+
+    // 关键断言：续号必须压过盘上残存的 gen2 尸体——next_gen = max(1,2)+1 = 3，
+    // 写非活跃槽 = B（坏者被覆盖，好者作后盾）。
+    ASSERT_EQ(snap.Write(snap.last_covered_seq(), EmptyScan), cabe::err::kSuccess);
+    const cabe::SnapshotSlotHeader hb = ReadHeader(b_off);
+    ASSERT_TRUE(cabe::VerifySlotHeader(hb));
+    EXPECT_EQ(hb.generation, 3u) << "\"选中槽+1\"=2 会让新快照永远输给尸体";
+    snap.Close();
+}
+
+// 双槽数据皆坏 → 拒开不降级（2.3 梯子终点：合法头证明快照存在过，假装从未快照是编造历史）。
+TEST_F(SnapshotDeviceTest, RecoverBothDataBad) {
+    const auto value = MakeValue(std::byte{0x55});
+    {
+        cabe::Engine engine;
+        ASSERT_EQ(engine.Open(MakeOpts()).code, cabe::err::kSuccess);
+        ASSERT_EQ(engine.Put("k1", cabe::DataView{value.data(), value.size()}).code, cabe::err::kSuccess);
+        ASSERT_EQ(engine.Snapshot().code, cabe::err::kSuccess);     // gen1 → A
+        ASSERT_EQ(engine.Put("k2", cabe::DataView{value.data(), value.size()}).code, cabe::err::kSuccess);
+        ASSERT_EQ(engine.Snapshot().code, cabe::err::kSuccess);     // gen2 → B
+        engine.Close();
+    }
+    std::uint64_t a_off = 0, b_off = 0;
+    Layout(&a_off, &b_off);
+    FlipSlotDataByte(snap_, a_off);
+    FlipSlotDataByte(snap_, b_off);
+
+    const cabe::SuperBlock sb = RecoverDataSB(data_, wal_, snap_);
+    cabe::Options ropts;
+    cabe::Snapshot snap;
+    EXPECT_EQ(snap.Open(snap_, &ropts, sb), cabe::err::kSnapshotCorrupted);
+    EXPECT_FALSE(snap.is_open());
+}
+
+// 双合法撞代际 → 拒开（2.2：写侧构造保证不撞号，相等即证据矛盾）。
+TEST_F(SnapshotDeviceTest, RecoverGenerationTie) {
+    const auto value = MakeValue(std::byte{0x66});
+    {
+        cabe::Engine engine;
+        ASSERT_EQ(engine.Open(MakeOpts()).code, cabe::err::kSuccess);
+        ASSERT_EQ(engine.Put("k1", cabe::DataView{value.data(), value.size()}).code, cabe::err::kSuccess);
+        ASSERT_EQ(engine.Snapshot().code, cabe::err::kSuccess);     // gen1 → A
+        engine.Close();
+    }
+    std::uint64_t a_off = 0, b_off = 0;
+    Layout(&a_off, &b_off);
+    const cabe::SnapshotSlotHeader ha = ReadHeader(a_off);          // 伪造：B = A 的逐字节拷贝
+    std::byte raw[4096];
+    std::memcpy(raw, &ha, sizeof ha);
+    WriteRaw4K(snap_, b_off, raw);
+
+    const cabe::SuperBlock sb = RecoverDataSB(data_, wal_, snap_);
+    cabe::Options ropts;
+    cabe::Snapshot snap;
+    EXPECT_EQ(snap.Open(snap_, &ropts, sb), cabe::err::kSnapshotCorrupted);
+    EXPECT_FALSE(snap.is_open());
+}
+
+// Load 往返：盘上记录解码回来与 Put 内容逐字段等值；含空快照（entry_count=0 合法，2.4）。
+TEST_F(SnapshotDeviceTest, LoadRoundTrip) {
+    struct Expect { std::string key; std::uint32_t value_crc; };
+    std::vector<Expect> expects;
+    const std::uint64_t t0 = cabe::util::GetWallTimeNs();
+    {
+        cabe::Engine engine;
+        ASSERT_EQ(engine.Open(MakeOpts()).code, cabe::err::kSuccess);
+        const char* keys[] = {"alpha", "beta", "gamma"};
+        const std::byte fills[] = {std::byte{0x11}, std::byte{0x22}, std::byte{0x33}};
+        for (int i = 0; i < 3; ++i) {
+            const auto value = MakeValue(fills[i]);
+            ASSERT_EQ(engine.Put(keys[i], cabe::DataView{value.data(), value.size()}).code,
+                      cabe::err::kSuccess);
+            expects.push_back({keys[i], cabe::util::CRC32(cabe::DataView{value.data(), value.size()})});
+        }
+        ASSERT_EQ(engine.Snapshot().code, cabe::err::kSuccess);
+        engine.Close();
+    }
+    const std::uint64_t t1 = cabe::util::GetWallTimeNs();
+
+    const cabe::SuperBlock sb = RecoverDataSB(data_, wal_, snap_);
+    cabe::Options ropts;
+    cabe::Snapshot snap;
+    ASSERT_EQ(snap.Open(snap_, &ropts, sb), cabe::err::kSuccess);
+    std::vector<LoadedRec> recs;
+    ASSERT_EQ(snap.Load(CollectLoad(&recs)), cabe::err::kSuccess);
+    snap.Close();
+
+    ASSERT_EQ(recs.size(), 3u);
+    std::set<std::uint64_t> blocks;
+    int matched = 0;
+    for (const auto& r : recs) {
+        EXPECT_EQ(r.meta.state, cabe::ValueState::Active);
+        EXPECT_EQ(r.meta.block.dev(), 0);
+        EXPECT_GE(r.meta.timestamp, t0);
+        EXPECT_LE(r.meta.timestamp, t1);
+        blocks.insert(r.meta.block.block_idx());
+        for (const auto& e : expects) {
+            if (e.key == r.key) { EXPECT_EQ(r.meta.crc, e.value_crc) << r.key; ++matched; break; }
+        }
+    }
+    EXPECT_EQ(matched, 3);
+    EXPECT_EQ(blocks.size(), 3u);
+
+    // 空快照：索引为空时做快照（entry_count=0、合法）→ 恢复选中它、Load 空跑成功。
+    {
+        cabe::Engine engine;
+        ASSERT_EQ(engine.Open(MakeOpts()).code, cabe::err::kSuccess);   // 重新 create（清两槽）
+        ASSERT_EQ(engine.Snapshot().code, cabe::err::kSuccess);         // gen1：0 条记录
+        engine.Close();
+    }
+    const cabe::SuperBlock sb2 = RecoverDataSB(data_, wal_, snap_);
+    cabe::Snapshot snap2;
+    ASSERT_EQ(snap2.Open(snap_, &ropts, sb2), cabe::err::kSuccess);
+    std::vector<LoadedRec> recs2;
+    ASSERT_EQ(snap2.Load(CollectLoad(&recs2)), cabe::err::kSuccess);
+    EXPECT_TRUE(recs2.empty());
+    // 空快照被当作活跃槽（≠ 无快照）：下一份写非活跃槽 B、代际 2。
+    ASSERT_EQ(snap2.Write(0, EmptyScan), cabe::err::kSuccess);
+    std::uint64_t a_off = 0, b_off = 0;
+    Layout(&a_off, &b_off);
+    EXPECT_EQ(ReadHeader(b_off).generation, 2u);
+    snap2.Close();
+}
+
+// Load 的内存安全守卫：key_len > 字段容量（96）的记录 → kSnapshotCorrupted（2.4；
+// data_crc 同步伪造使 Open 裁决通过——专打"CRC 过了但内容非法"这一类）。
+TEST_F(SnapshotDeviceTest, LoadRejectsOversizeKeyLen) {
+    const auto value = MakeValue(std::byte{0x77});
+    {
+        cabe::Engine engine;
+        ASSERT_EQ(engine.Open(MakeOpts()).code, cabe::err::kSuccess);
+        ASSERT_EQ(engine.Put("k1", cabe::DataView{value.data(), value.size()}).code, cabe::err::kSuccess);
+        ASSERT_EQ(engine.Snapshot().code, cabe::err::kSuccess);     // gen1 → A，1 条记录
+        engine.Close();
+    }
+    std::uint64_t a_off = 0, b_off = 0;
+    Layout(&a_off, &b_off);
+
+    // 伪造：记录 0 的 key_len 改成 200，重算 data_crc + 槽头 CRC（让 Open 全部通过）。
+    cabe::RawDevice dev;
+    ASSERT_EQ(dev.Open(snap_), cabe::err::kSuccess);
+    std::byte* buf = cabe::RawDevice::AllocAligned(4096);
+    ASSERT_NE(buf, nullptr);
+    ASSERT_EQ(dev.ReadAt(a_off + cabe::kSnapshotSlotHeaderSize, buf, 4096), cabe::err::kSuccess);
+    cabe::SnapshotRecord rec{};
+    std::memcpy(&rec, buf, sizeof rec);
+    rec.key_len = 200;                                              // > kSnapshotKeyMax(96)
+    std::memcpy(buf, &rec, sizeof rec);
+    ASSERT_EQ(dev.WriteAt(a_off + cabe::kSnapshotSlotHeaderSize, buf, 4096), cabe::err::kSuccess);
+
+    cabe::SnapshotSlotHeader h{};
+    std::byte* hb = cabe::RawDevice::AllocAligned(4096);
+    ASSERT_NE(hb, nullptr);
+    ASSERT_EQ(dev.ReadAt(a_off, hb, 4096), cabe::err::kSuccess);
+    std::memcpy(&h, hb, sizeof h);
+    h.data_crc = ~cabe::util::CRC32CStreamUpdate(0xFFFFFFFFu,
+                     cabe::DataView{buf, static_cast<std::size_t>(h.data_len)});
+    h.header_crc32c = cabe::ComputeSlotHeaderCrc(h);
+    std::memcpy(hb, &h, sizeof h);
+    ASSERT_EQ(dev.WriteAt(a_off, hb, 4096), cabe::err::kSuccess);
+    cabe::RawDevice::FreeAligned(buf);
+    cabe::RawDevice::FreeAligned(hb);
+    dev.Close();
+
+    const cabe::SuperBlock sb = RecoverDataSB(data_, wal_, snap_);
+    cabe::Options ropts;
+    cabe::Snapshot snap;
+    ASSERT_EQ(snap.Open(snap_, &ropts, sb), cabe::err::kSuccess) << "伪造的 data_crc 应让裁决通过";
+    std::vector<LoadedRec> recs;
+    EXPECT_EQ(snap.Load(CollectLoad(&recs)), cabe::err::kSnapshotCorrupted);
+    snap.Close();
+}

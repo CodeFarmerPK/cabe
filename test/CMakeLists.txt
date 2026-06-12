@@ -76,6 +76,11 @@ add_executable(test_snapshot snapshot/snapshot_test.cpp)
 target_link_libraries(test_snapshot PRIVATE cabe::engine cabe::snapshot GTest::gtest_main)
 gtest_discover_tests(test_snapshot DISCOVERY_TIMEOUT 60)
 
+# P5M6：崩溃恢复端到端测试（需 3 个 loop 设备）
+add_executable(test_recovery engine/recovery_test.cpp)
+target_link_libraries(test_recovery PRIVATE cabe::engine cabe::snapshot cabe::wal GTest::gtest_main)
+gtest_discover_tests(test_recovery DISCOVERY_TIMEOUT 60)
+
 # P4M1：IoUringIoBackend 测试（仅 io_uring 后端时编译）
 if(CABE_IO_BACKEND STREQUAL "io_uring")
     add_executable(test_io_uring_backend io/io_uring_backend_test.cpp)

@@ -59,7 +59,7 @@
 
 | 推迟项 | 落点 | 原因 |
 |---|---|---|
-| 加载快照 `Load` + 完整恢复编排（recover 模式 Open + 重放 WAL + `RebuildFromActive`） | **P5M6** | M4 只做写流程；恢复是 M6 |
+| 加载快照 `Load` + 完整恢复编排（recover 模式 Open + 重放 WAL + `RebuildFromActive`） | **P5M6** | M4 只做写流程；恢复是 M6 （P5M6 注：已设计落定——九步恢复流水线 + `Load(MetaIndexVisitor)` 对称镜像，见 P5M6 稿） |
 | WAL 环形回收 / 截断 TRIM / 写满兜底 | **P5M5** | M4 的 WAL 仍线性只增，回收凭快照 `covered_seq`（M5）。（P5M5 注：环形回收与写满兜底已设计落定；**TRIM 实施再推 P7**——M5 仅在 `ReclaimUpTo` 内留空桩钉挂点） |
 | 定时触发（`snapshot_interval_sec` 生效） | **P7** | 定时要后台线程；定时的真正归宿是 P7 后台快照 |
 | 后台 / 异步快照（非阻塞）、并发合并、真实锁 | P7 | 单线程下快照同步内联；无并发 |
@@ -92,7 +92,7 @@
 | **P5M4-D5** | 槽头 | **恰好 4096 字节**（对标 `SuperBlock`）：`magic/version/generation/covered_seq/entry_count/data_len/data_crc/created_at/engine_uuid/header_crc32c` |
 | **P5M4-D6** | 代际号 | `新代际 = max(槽头合法各槽 generation) + 1`（按**槽头合法**取，严格递增不撞号）；首份=1；**只存槽头**，重启读两槽头续号 |
 | **P5M4-D7** | 写时选槽 + 写序 | 写**非恢复槽**（"最新可恢复槽"的另一个），保好覆坏；写序 = **数据 → 槽头 → 一次 `fdatasync`**；原子切换靠**代际 + `data_crc`**，无盘上"当前槽指针" |
-| **P5M4-D8** | 读时选槽 | 读两槽头 → 校验 → **代际最大且双校验通过**者选中；坏则回退另一槽；都不行则 `covered_seq=0` 纯 WAL 重放（选槽逻辑本里程碑定，灌索引集成在 M6） |
+| **P5M4-D8** | 读时选槽 | 读两槽头 → 校验 → **代际最大且双校验通过**者选中；坏则回退另一槽；都不行则 `covered_seq=0` 纯 WAL 重放（选槽逻辑本里程碑定，灌索引集成在 M6）。（**P5M6 细化**："都不行 → covered=0" 仅适用于**双槽头皆无效**——这是合法的"从未快照"证据；**存在合法槽头但数据全坏 = 拒开不降级**（`kSnapshotCorrupted`），按 covered=0 假装从未快照是编造历史。另：槽头**读 I/O 错**与"内容无效"二分——前者证据不可得、直接拒开。见 P5M6-D6/D7） |
 | **P5M4-D9** | 落盘机制 | 每次快照**临时 `AllocAligned`** 一块 `snapshot_buffer_size`（默认 1 MiB、Options 可改、**不进池**、4K 对齐），攒满整块写、末尾补零到 4K、**全程一次 `fdatasync`** |
 | **P5M4-D10** | `covered_seq` | M4 = `wal.last_seq()`（单线程下"已分配 = 已提交"）；**绝不报大**；`DoSnapshot` 顺序 **先 `Flush()` → 取 `covered_seq` → 写快照**；P7 须换"已提交水位" |
 | **P5M4-D11** | 模块 + 接口 | 新建 `snapshot/`（平级 `wal`/`io`）；`Snapshot` 类持设备句柄，**回调解耦**（不认识索引后端）；`MetaIndex` concept **收窄**：删 `WriteSnapshot`/`LoadSnapshot`，`ForEach` 改返回 `int32_t` 可中止 |
@@ -258,6 +258,7 @@ int32_t Engine::DoSnapshot(DeviceContext& dc) {
 ### 7.1 代际号（P5M4-D6）
 
 `新代际号 = max(槽头合法的各槽 generation) + 1`。**按"槽头合法"（`header_crc` 过）取最大，而非"数据合法"**——这样即使某槽数据写坏，它的代际号也被消耗、永不撞号，保证全设备生命里代际严格递增（"谁代际大谁最新"这条铁律永真）。首份快照代际 = 1（0 作哨兵）。**只存槽头、不另设计数器**；重启（Open）读两槽头、`next_gen = max(合法代际) + 1`、`active_slot = 最新可恢复槽`，常驻内存。`u64` 永不溢出。
+（P5M6 兑现注：recover-Open 续号按本条实装。反例论证补强——坏槽回退场景下若用"选中槽+1"，盘上残存的高代际坏槽会让新快照在之后每次恢复中**永远输给一具尸体**；"对盘上一切合法头取 max"正是为此。见 P5M6-D9。）
 
 ### 7.2 写时选槽 + 读时选槽 + 回退
 
@@ -272,6 +273,7 @@ int32_t Engine::DoSnapshot(DeviceContext& dc) {
     → 都不行 → covered_seq = 0，恢复改为从 seq=1 纯 WAL 全量重放
   ```
   "槽头合法"用于排候选，"数据合法"用于最终选中；空槽 `magic=0` 自然排除。**实现建议（落 M6）**：一遍扫——边解析记录灌索引边累积 CRC，读完比对；不过则清空索引、回退试下一候选（只读一遍）。
+  （**P5M6 否决此实装建议**：改为**两遍读**——Open 内先纯读验 `data_crc`（不解码不回调）、裁决完全收口在 Open，`Load` 退化为纯投递、永不中途反悔。一遍扫的代价（索引污染 + 失败语义搅缠 + 为回退扩 `Clear()` 接口）大于省一遍读盘——"恢复时间不是瓶颈"（P5 备忘 #6）。`Clear()` 留位随之作废。另：**回退的安全性不是免费的**——撕裂槽（回收未发生）回退安全，腐烂槽（回收已推进）回退有洞，单槽不可区分，由 WAL 重放的 seq 连续性校验兜底识破。见 P5M6-D7。）
 
 ### 7.3 加载侧无需结构特化
 
@@ -306,6 +308,10 @@ int32_t Engine::DoSnapshot(DeviceContext& dc) {
 （P5M5 实装注："据它回收"落地为**据同刻捕获的物理边界**——`DoSnapshot` 在 `Flush` 后与
 `covered_seq` 成对捕获 WAL 当前窗口起点（covered_seq 的物理孪生），快照成功后回收到该偏移，
 不做 seq→偏移换算。语义同一，见 P5M5 §6.2/§7.3。）
+（P5M6 兑现注："M6 据它从 covered_seq+1 重放"已落定——活帧判据 `合法 ∧ seq > covered_seq`，
+走读门槛要求 `min_live == covered+1` 且逐槽 seq 稠密（历史无缺页），三方契约就此闭环。
+派生红利：铁律 + 稠密校验使**快照纯粹是恢复加速器**——环未绕时即使快照全失，从 seq 1
+创世重放也能精确重建终态。见 P5M6-D12。）
 
 ---
 
@@ -340,7 +346,7 @@ private:
   ```
   `Engine` 把"具体哪个索引怎么遍历/插入"包成 lambda 注入；`Snapshot` 全权管缓冲/分槽/落盘/选槽。这正落实"格式/IO 上移共享模块、后端只管一致迭代"的缝。
 - **`Snapshot` 自持 `RawDevice`、move-only**（移动时置空源设备句柄，避免双重释放），可随 `DeviceContext` 一起移动。
-- **M4 实现 `Open`/`Write`/`Close`**；`Load` 接口形状留位、**实装在 M6**。
+- **M4 实现 `Open`/`Write`/`Close`**；`Load` 接口形状留位、**实装在 M6**。（P5M6 兑现：定形为 `int32_t Load(const MetaIndexVisitor&)`——与 `Write` 合成对称镜像（写注遍历器/读注接收器），无独立 `covered_seq_out` 参数（走既有 `last_covered_seq()` 读数口）。）
 
 ### 9.2 `MetaIndex` concept 收窄（P5M4-D11，推翻 P3 的 7 方法版）
 
@@ -352,7 +358,7 @@ private:
   // concept: { cidx.ForEach(visitor) } -> std::same_as<int32_t>;
   ```
 - **`ForEach` 的一致扫描契约**：遍历所有活键，由后端保证视图一致——M4 单线程下就是直接遍历（"冻结写者"为语义占位、不上真锁）；P7 并发时由后端内部锁/拷贝/MVCC 保证不漏稳定键（结构相关、下沉后端，§14）。
-- **`Clear()`**（M6 真恢复时"槽坏 → 清空索引回退"用）留 M6。
+- **`Clear()`**（M6 真恢复时"槽坏 → 清空索引回退"用）留 M6。（P5M6 注：**作废**——M6 改两遍读方案，裁决收口在 Open、索引永不被污染，`Clear()` 无人需要，concept 维持收窄后的六方法不变。见 §7.2 否决注。）
 
 ### 9.3 `DeviceContext` + `Engine` 编排
 
@@ -413,6 +419,8 @@ WAL 设备   部署建议：   SizeBytes ≥ snapshot_threshold_bytes × 2~3
 ```
 
 > **实装注（M4 实际代码）**：**只实装快照设备的 Open 容量校验**；**WAL 设备的 Open 容量校验推迟到 M5**。原因——M4 测试用小 loop 设备（WAL 仅约 16 MiB），而默认阈值 512M × 2 = 1G 会把它们全部拒掉；且 M4 的 WAL 是线性追加、不回收、假定不写满，WAL 容量真正起约束是在 M5（环形回收）。`Wal::SizeBytes()` 已就位，M5 接上校验即可。
+>
+> **P5M6 注**：两类设备的容量校验自 M6 起 **create/recover 一视同仁**——recover 下校验输入（超级块 `block_count`、设备大小）全在手、成本为零，而它防的"设备被换成更小分区"在 recover 场景真实存在；M4/M5 只在 create 调校验纯属"recover 当时不开这两个设备"的副产物，非设计意图。M5-D16 留给 M6 的 recover 校验欠账由 `Wal::Open` 公共段自然结清。
 >
 > **P5M5 已兑现 + 口径细化**：校验落 `Wal::Open`，公式为 `ring_size ≥ max(阈值×2, wal_buffer_size + 4K)`
 > ——基准从裸 `SizeBytes` 细化为可用环容量 `ring_size`（对齐快照侧 `slot_size` 先例），并新增

@@ -47,7 +47,7 @@ ROADMAP 原文规划了"三容器（active / sorting / recycled）轮换 + shard
 - CMake 编译期切换：`CABE_BLOCK_ALLOCATOR=ring_queue`
 - Engine 切换到块分配器抽象层，DeviceContext 持有 `BlockAllocatorImpl`
 - TRIM 占位：Engine::Delete 路径预留 TRIM 调用点，当前不实际发送，P7 reactor 完善后做异步批量
-- P5 恢复接口：`RebuildFromActive` 从已用块列表反推空闲块
+- P5 恢复接口：`RebuildFromActive` 从已用块列表反推空闲块（P5M6 兑现并增补：越界/重复活块由静默处理升级为报错，见 P4.5M1 行为变更注）
 - 删除旧代码：`engine/free_list.h` / `engine/free_list.cpp` / 相关测试
 - 块分配器不持久化——恢复时从 MetaIndex 反推，纯内存操作（毫秒级）
 - 为多设备打基础：每个 DeviceContext 独立持有自己的块分配器实例

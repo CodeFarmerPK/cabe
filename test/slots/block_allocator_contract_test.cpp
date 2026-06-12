@@ -122,3 +122,18 @@ TYPED_TEST(BlockAllocatorContractTest, MoveConstruct) {
 TYPED_TEST(BlockAllocatorContractTest, ConceptSatisfied) {
     static_assert(cabe::BlockAllocator<TypeParam>);
 }
+
+// P5M6：RebuildFromActive 增补——越界/重复活块由静默处理升级为报错（纵深防御第二道闸，
+// 唯一调用方是崩溃恢复；见 P4.5M1 行为变更注 + P5M6-D18）。
+TYPED_TEST(BlockAllocatorContractTest, RebuildRejectsOutOfRange) {
+    std::vector<cabe::BlockId> active = { cabe::BlockId::Make(0, 7) };   // ≥ block_count(5)
+    EXPECT_EQ(this->allocator_.RebuildFromActive(0, 5, active), cabe::err::kEngineBlockOutOfRange);
+}
+
+TYPED_TEST(BlockAllocatorContractTest, RebuildRejectsDuplicate) {
+    std::vector<cabe::BlockId> active = {
+        cabe::BlockId::Make(0, 2),
+        cabe::BlockId::Make(0, 2),                                       // 两键声称同块
+    };
+    EXPECT_EQ(this->allocator_.RebuildFromActive(0, 5, active), cabe::err::kEngineDuplicateBlock);
+}

@@ -81,10 +81,17 @@ namespace cabe {
 
         std::vector<bool> used(block_count, false);
         for (const auto& bid : active_blocks) {
-            // 越界守卫：跳过超出当前 block_count 的陈旧/异常索引，避免越界写位图（堆 UB）
-            if (bid.block_idx() < block_count) {
-                used[bid.block_idx()] = true;
+            // P5M6 增补（原"越界静默跳过/重复无声吸收"升级为报错）：本方法唯一调用方是崩溃恢复
+            //（终态索引 → 活块清单）——越界块意味着"一个键的块凭空消失、该块将被错当空闲"，
+            // 重复块意味着"两个键声称独占同一物理块、运行期互相腐蚀"，都是拒开级的证据矛盾；
+            // 上游（Engine 统一校验表）已拒过越界，此处为纵深防御第二道闸（P5M6-D18）。
+            if (bid.block_idx() >= block_count) {
+                return err::kEngineBlockOutOfRange;
             }
+            if (used[bid.block_idx()]) {
+                return err::kEngineDuplicateBlock;
+            }
+            used[bid.block_idx()] = true;
         }
 
         // 逻辑块从 0 起（超级块在设备头部，数据区偏移由 IoBackend 处理）

@@ -9,6 +9,7 @@
 
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <cstring>
 #include <string>
 #include <vector>
@@ -45,6 +46,55 @@ void ZeroWalRegion(const std::string& wal_path, std::size_t n_blocks) {
     }
     cabe::RawDevice::FreeAligned(buf);
     dev.Close();
+}
+
+// P5M6：把 WAL 日志区整个清零（恢复用例需要干净盘面；1 MiB 块顺序写，16M 设备瞬时完成）。
+void ZeroWalAll(const std::string& wal_path) {
+    cabe::RawDevice dev;
+    ASSERT_EQ(dev.Open(wal_path), cabe::err::kSuccess);
+    const std::uint64_t size = dev.SizeBytes();
+    const std::size_t chunk = 1024 * 1024;
+    std::byte* z = cabe::RawDevice::AllocAligned(chunk);
+    ASSERT_NE(z, nullptr);
+    std::memset(z, 0, chunk);
+    for (std::uint64_t off = cabe::kDataRegionOffset; off < size;) {
+        const std::size_t n = static_cast<std::size_t>(std::min<std::uint64_t>(chunk, size - off));
+        ASSERT_EQ(dev.WriteAt(off, z, n), cabe::err::kSuccess);
+        off += n;
+    }
+    cabe::RawDevice::FreeAligned(z);
+    dev.Close();
+}
+
+// P5M6：在第 block_idx 块第 slot 槽伪造一帧（read-modify-write 整块；测试雕崩溃形态用）。
+void ForgeWalFrame(const std::string& wal_path, std::uint64_t block_idx, std::uint32_t slot,
+                   const cabe::WalFrame& f) {
+    cabe::RawDevice dev;
+    ASSERT_EQ(dev.Open(wal_path), cabe::err::kSuccess);
+    std::byte* buf = cabe::RawDevice::AllocAligned(cabe::kWalBlockSize);
+    ASSERT_NE(buf, nullptr);
+    const std::uint64_t off = cabe::kDataRegionOffset + block_idx * cabe::kWalBlockSize;
+    ASSERT_EQ(dev.ReadAt(off, buf, cabe::kWalBlockSize), cabe::err::kSuccess);
+    std::memcpy(buf + slot * cabe::kWalFrameSize, &f, cabe::kWalFrameSize);
+    ASSERT_EQ(dev.WriteAt(off, buf, cabe::kWalBlockSize), cabe::err::kSuccess);
+    cabe::RawDevice::FreeAligned(buf);
+    dev.Close();
+}
+
+// P5M6：重放投递收集器（回调送来什么收什么，断言用）。
+struct ReplayedRec {
+    std::uint64_t      seq;
+    cabe::WalEntryType type;
+    std::string        key;        // 拷贝（视图仅回调期间有效——契约的测试侧落实）
+    std::uint64_t      block_raw;
+    std::uint32_t      value_crc;
+    std::uint64_t      timestamp;
+};
+cabe::WalReplayFn Collect(std::vector<ReplayedRec>* out) {
+    return [out](const cabe::WalEntry& e, std::uint64_t seq) -> int32_t {
+        out->push_back({seq, e.type, std::string(e.key), e.block.raw, e.value_crc, e.timestamp});
+        return cabe::err::kSuccess;
+    };
 }
 
 } // namespace
@@ -144,8 +194,20 @@ protected:
     }
 
     // P5M5 直驱 Wal 用：小阈值过容量校验（直驱无引擎、无自动快照，阈值只参与 Open 校验）。
+    // P5M6：Wal::Open 起按 opts->create 分模式——直驱"开空环写入"语义须显式 create=true
+    //（与 Engine create 路径同款；recover 形态用 MakeWalRecoverOpts）。
     cabe::Options MakeWalOpts(cabe::WalLevel lvl) const {
         cabe::Options opts;
+        opts.create    = true;
+        opts.wal_level = lvl;
+        opts.snapshot_threshold_bytes = 1024 * 1024;
+        return opts;
+    }
+
+    // P5M6 直驱恢复用：create=false → Open 只做几何/容量校验，缓冲与环状态待 Recover 重建。
+    cabe::Options MakeWalRecoverOpts(cabe::WalLevel lvl = cabe::WalLevel::Strict) const {
+        cabe::Options opts;
+        opts.create    = false;
         opts.wal_level = lvl;
         opts.snapshot_threshold_bytes = 1024 * 1024;
         return opts;
@@ -626,5 +688,402 @@ TEST_F(WalDeviceTest, WalFullSyncMode) {
     EXPECT_EQ(wal.WriteWal(OneFrame()), cabe::err::kWalFull);  // 第 33 帧：推进进保留块被拒
     EXPECT_EQ(wal.last_seq(), batch_frames + cabe::kWalFramesPerBlock)
         << "= (块数−1)×32 = 恒留一块下的精确容量；被拒帧 seq 未耗";
+    wal.Close();
+}
+
+// ============================================================
+// P5M6：恢复（设计稿 doc/P5/P5M6_recovery_design.md §13）
+// 测法：direct-Wal 构造盘面（手法三）+ Open(recover)/Recover 直驱；
+// ReclaimUpTo 直调 = 模拟"快照成功"（M5 先例延续）。
+// ============================================================
+
+// 空环恢复 = create 同款初始态（D17 三形态之三）。
+TEST_F(WalDeviceTest, RecoverEmptyRing) {
+    ZeroWalAll(wal_);
+    cabe::Options opts = MakeWalRecoverOpts();
+    cabe::Wal wal;
+    ASSERT_EQ(wal.Open(wal_, &opts), cabe::err::kSuccess);
+
+    std::vector<ReplayedRec> recs;
+    ASSERT_EQ(wal.Recover(/*covered_seq=*/0, Collect(&recs)), cabe::err::kSuccess);
+    EXPECT_TRUE(recs.empty());
+    EXPECT_EQ(wal.head_off(), cabe::kDataRegionOffset);
+    EXPECT_EQ(wal.reclaim_boundary(), cabe::kDataRegionOffset);
+    EXPECT_EQ(wal.last_seq(), 0u);
+
+    ASSERT_EQ(wal.WriteWal(OneFrame()), cabe::err::kSuccess);   // 续写从 seq=1 开始
+    wal.Close();
+    const cabe::WalFrame f = ReadWalFrame(wal_, 0, 0);
+    ASSERT_TRUE(cabe::VerifyFrame(f));
+    EXPECT_EQ(f.seq, 1u);
+}
+
+// 线性基础：写 5 帧（混 Put/Delete）→ 恢复 → 投递严格 seq 序 + 字段逐项等值（4.2 模块级落点）。
+TEST_F(WalDeviceTest, RecoverLinearBasic) {
+    ZeroWalAll(wal_);
+    {
+        cabe::Options copts = MakeWalOpts(cabe::WalLevel::Strict);
+        cabe::Wal wal;
+        ASSERT_EQ(wal.Open(wal_, &copts), cabe::err::kSuccess);
+        for (int i = 0; i < 5; ++i) {
+            cabe::WalEntry e{};
+            if (i == 2) {
+                e.type = cabe::WalEntryType::Delete;
+                e.key = "del-key";
+                e.timestamp = 1000u + i;
+            } else {
+                e.type = cabe::WalEntryType::Put;
+                e.key = (i == 0) ? "alpha" : (i == 1) ? "beta" : (i == 3) ? "gamma" : "delta";
+                e.block = cabe::BlockId::Make(0, static_cast<std::uint64_t>(i));
+                e.value_crc = 0x1000u + i;
+                e.timestamp = 1000u + i;
+            }
+            ASSERT_EQ(wal.WriteWal(e), cabe::err::kSuccess);
+        }
+        wal.Close();
+    }
+
+    cabe::Options ropts = MakeWalRecoverOpts();
+    cabe::Wal wal;
+    ASSERT_EQ(wal.Open(wal_, &ropts), cabe::err::kSuccess);
+    std::vector<ReplayedRec> recs;
+    ASSERT_EQ(wal.Recover(0, Collect(&recs)), cabe::err::kSuccess);
+
+    ASSERT_EQ(recs.size(), 5u);
+    for (std::size_t i = 0; i < 5; ++i) {
+        EXPECT_EQ(recs[i].seq, i + 1) << "投递必须严格 seq 序";
+        EXPECT_EQ(recs[i].timestamp, 1000u + i) << "timestamp 还原\"当年\"";
+    }
+    EXPECT_EQ(recs[2].type, cabe::WalEntryType::Delete);
+    EXPECT_EQ(recs[2].key, "del-key");
+    EXPECT_EQ(recs[2].block_raw, 0u);
+    EXPECT_EQ(recs[0].type, cabe::WalEntryType::Put);
+    EXPECT_EQ(recs[0].key, "alpha");
+    EXPECT_EQ(recs[0].block_raw, cabe::BlockId::Make(0, 0).raw);
+    EXPECT_EQ(recs[0].value_crc, 0x1000u);
+    EXPECT_EQ(wal.last_seq(), 5u);
+
+    // 续写衔接：第 6 帧落在留窗块第 5 槽，盘面紧凑无洞（重灌直验）。
+    ASSERT_EQ(wal.WriteWal(OneFrame()), cabe::err::kSuccess);
+    wal.Close();
+    for (std::uint32_t s = 0; s < 6; ++s) {
+        const cabe::WalFrame f = ReadWalFrame(wal_, 0, s);
+        ASSERT_TRUE(cabe::VerifyFrame(f)) << "槽 " << s;
+        EXPECT_EQ(f.seq, s + 1u);
+    }
+    EXPECT_FALSE(cabe::VerifyFrame(ReadWalFrame(wal_, 0, 6)));
+}
+
+// 回收后恢复：只投递 covered 之后；head/tail/seq_next 三定锚（5.1/5.2）。
+TEST_F(WalDeviceTest, RecoverAfterReclaim) {
+    ZeroWalAll(wal_);
+    {
+        cabe::Options copts = MakeWalOpts(cabe::WalLevel::Async);
+        cabe::Wal wal;
+        ASSERT_EQ(wal.Open(wal_, &copts), cabe::err::kSuccess);
+        PumpFrames(wal, 256);                                       // 整窗自动刷出（32K）
+        ASSERT_EQ(wal.ReclaimUpTo(wal.reclaim_boundary()), cabe::err::kSuccess);  // 模拟快照@256
+        PumpFrames(wal, 16);                                        // seq 257..272
+        ASSERT_EQ(wal.Flush(), cabe::err::kSuccess);                // 留窗 16 帧（块 8）
+        wal.Close();
+    }
+
+    cabe::Options ropts = MakeWalRecoverOpts();
+    cabe::Wal wal;
+    ASSERT_EQ(wal.Open(wal_, &ropts), cabe::err::kSuccess);
+    std::vector<ReplayedRec> recs;
+    ASSERT_EQ(wal.Recover(/*covered_seq=*/256, Collect(&recs)), cabe::err::kSuccess);
+
+    ASSERT_EQ(recs.size(), 16u) << "只重放 covered 之后的活帧";
+    EXPECT_EQ(recs.front().seq, 257u);
+    EXPECT_EQ(recs.back().seq, 272u);
+    const std::uint64_t b8 = cabe::kDataRegionOffset + 8 * cabe::kWalBlockSize;
+    EXPECT_EQ(wal.head_off(), b8) << "head = AlignDown(首活帧)";
+    EXPECT_EQ(wal.reclaim_boundary(), b8) << "tail 锚定留窗块";
+    EXPECT_EQ(wal.last_seq(), 272u);
+
+    // 续写：第 273 帧落块 8 槽 16，活区间紧凑。
+    ASSERT_EQ(wal.WriteWal(OneFrame()), cabe::err::kSuccess);
+    wal.Close();
+    const cabe::WalFrame f = ReadWalFrame(wal_, 8, 16);
+    ASSERT_TRUE(cabe::VerifyFrame(f));
+    EXPECT_EQ(f.seq, 273u);
+    const cabe::WalFrame prev = ReadWalFrame(wal_, 8, 15);
+    ASSERT_TRUE(cabe::VerifyFrame(prev));
+    EXPECT_EQ(prev.seq, 272u);
+}
+
+// 跨缝恢复：活区间越过环尾绕回，投递仍严格有序（两遍扫描的存在理由，3.1/6.3）。
+TEST_F(WalDeviceTest, RecoverWrapAround) {
+    cabe::Options copts = MakeWalOpts(cabe::WalLevel::Async);
+    const std::uint64_t ring = RingBytes();
+    const std::uint64_t total_blocks = ring / cabe::kWalBlockSize;
+    const std::uint64_t pre_frames = (total_blocks - 4) * cabe::kWalFramesPerBlock;
+    {
+        cabe::Wal wal;
+        ASSERT_EQ(wal.Open(wal_, &copts), cabe::err::kSuccess);
+        std::uint64_t remain = pre_frames;                          // 推进到距环尾 4 块
+        while (remain > 0) {
+            const std::size_t batch = static_cast<std::size_t>(std::min<std::uint64_t>(remain, 2048));
+            PumpFrames(wal, batch);
+            ASSERT_EQ(wal.Flush(), cabe::err::kSuccess);
+            ASSERT_EQ(wal.ReclaimUpTo(wal.reclaim_boundary()), cabe::err::kSuccess);
+            remain -= batch;
+        }
+        PumpFrames(wal, 130);                                       // 截短窗 128 到环尾 + 绕回 2 帧
+        ASSERT_EQ(wal.Flush(), cabe::err::kSuccess);
+        wal.Close();
+    }
+
+    cabe::Options ropts = MakeWalRecoverOpts();
+    cabe::Wal wal;
+    ASSERT_EQ(wal.Open(wal_, &ropts), cabe::err::kSuccess);
+    std::vector<ReplayedRec> recs;
+    ASSERT_EQ(wal.Recover(/*covered_seq=*/pre_frames, Collect(&recs)), cabe::err::kSuccess);
+
+    ASSERT_EQ(recs.size(), 130u);
+    for (std::size_t i = 0; i < recs.size(); ++i) {
+        EXPECT_EQ(recs[i].seq, pre_frames + 1 + i) << "跨缝投递必须保序";
+    }
+    const std::uint64_t seam_pos = cabe::kDataRegionOffset + ring - 4 * cabe::kWalBlockSize;
+    EXPECT_EQ(wal.head_off(), seam_pos);                            // 活区间头在缝前
+    EXPECT_EQ(wal.reclaim_boundary(), cabe::kDataRegionOffset);     // 尾在环头留窗块（2 帧）
+    EXPECT_EQ(wal.last_seq(), pre_frames + 130);
+
+    ASSERT_EQ(wal.WriteWal(OneFrame()), cabe::err::kSuccess);       // 续写落环头槽 2
+    wal.Close();
+    const cabe::WalFrame f = ReadWalFrame(wal_, 0, 2);
+    ASSERT_TRUE(cabe::VerifyFrame(f));
+    EXPECT_EQ(f.seq, pre_frames + 131);
+}
+
+// 满环恢复是合法终态：窗口 0 → 写返 kWalFull → 回收后复活（惰性开窗 + 救援白拿兑现，5.4）。
+TEST_F(WalDeviceTest, RecoverFullRing) {
+    ZeroWalAll(wal_);
+    const std::uint64_t ring = RingBytes();
+    const std::uint64_t cap_frames = (ring - cabe::kWalBlockSize) / cabe::kWalFrameSize;
+    {
+        cabe::Options copts = MakeWalOpts(cabe::WalLevel::Async);
+        cabe::Wal wal;
+        ASSERT_EQ(wal.Open(wal_, &copts), cabe::err::kSuccess);
+        PumpFrames(wal, static_cast<std::size_t>(cap_frames));      // 写到恒留一块的精确容量
+        ASSERT_EQ(wal.WriteWal(OneFrame()), cabe::err::kWalFull);
+        wal.Close();
+    }
+
+    cabe::Options ropts = MakeWalRecoverOpts();
+    cabe::Wal wal;
+    ASSERT_EQ(wal.Open(wal_, &ropts), cabe::err::kSuccess);
+    std::uint64_t count = 0;
+    ASSERT_EQ(wal.Recover(0, [&](const cabe::WalEntry&, std::uint64_t seq) -> int32_t {
+        ++count;
+        return seq == count ? cabe::err::kSuccess : cabe::err::kWalRecoveryCorrupted;  // 顺序自验
+    }), cabe::err::kSuccess);
+    EXPECT_EQ(count, cap_frames);
+
+    EXPECT_EQ(wal.WriteWal(OneFrame()), cabe::err::kWalFull) << "满环恢复态首写仍满";
+    ASSERT_EQ(wal.ReclaimUpTo(wal.reclaim_boundary()), cabe::err::kSuccess);  // 模拟救援快照成功
+    EXPECT_EQ(wal.WriteWal(OneFrame()), cabe::err::kSuccess) << "回收后惰性开窗复活";
+    EXPECT_EQ(wal.last_seq(), cap_frames + 1);
+    wal.Close();
+}
+
+// 留窗恢复：变体 Y 留窗块重灌后续写，盘面无洞（5.1 重灌直验 + 禁跳块的正向对照）。
+TEST_F(WalDeviceTest, RecoverLeftoverWindow) {
+    ZeroWalAll(wal_);
+    {
+        cabe::Options copts = MakeWalOpts(cabe::WalLevel::Async);
+        cabe::Wal wal;
+        ASSERT_EQ(wal.Open(wal_, &copts), cabe::err::kSuccess);
+        PumpFrames(wal, 5);
+        ASSERT_EQ(wal.Flush(), cabe::err::kSuccess);                // 留窗 5 帧（不足一块）
+        wal.Close();
+    }
+
+    cabe::Options ropts = MakeWalRecoverOpts(cabe::WalLevel::Async);
+    cabe::Wal wal;
+    ASSERT_EQ(wal.Open(wal_, &ropts), cabe::err::kSuccess);
+    std::vector<ReplayedRec> recs;
+    ASSERT_EQ(wal.Recover(0, Collect(&recs)), cabe::err::kSuccess);
+    ASSERT_EQ(recs.size(), 5u);
+    EXPECT_EQ(wal.reclaim_boundary(), cabe::kDataRegionOffset);     // 锚在留窗块
+
+    PumpFrames(wal, 2);                                             // seq 6..7 续攒
+    ASSERT_EQ(wal.Flush(), cabe::err::kSuccess);
+    wal.Close();
+    for (std::uint32_t s = 0; s < 7; ++s) {
+        const cabe::WalFrame f = ReadWalFrame(wal_, 0, s);
+        ASSERT_TRUE(cabe::VerifyFrame(f)) << "槽 " << s << " 应为连续帧（无洞）";
+        EXPECT_EQ(f.seq, s + 1u);
+    }
+    EXPECT_FALSE(cabe::VerifyFrame(ReadWalFrame(wal_, 0, 7)));
+}
+
+// 二代恢复：恢复 → 续写 → 再恢复，接缝处 seq 稠密（5.3 稠密条款回归）。
+TEST_F(WalDeviceTest, RecoverThenWriteThenRecover) {
+    ZeroWalAll(wal_);
+    {
+        cabe::Options copts = MakeWalOpts(cabe::WalLevel::Strict);
+        cabe::Wal wal;
+        ASSERT_EQ(wal.Open(wal_, &copts), cabe::err::kSuccess);
+        PumpFrames(wal, 10);
+        wal.Close();
+    }
+    {
+        cabe::Options ropts = MakeWalRecoverOpts();
+        cabe::Wal wal;
+        ASSERT_EQ(wal.Open(wal_, &ropts), cabe::err::kSuccess);
+        std::vector<ReplayedRec> recs;
+        ASSERT_EQ(wal.Recover(0, Collect(&recs)), cabe::err::kSuccess);
+        ASSERT_EQ(recs.size(), 10u);
+        PumpFrames(wal, 10);                                        // seq 11..20，接缝稠密
+        wal.Close();
+    }
+    cabe::Options ropts = MakeWalRecoverOpts();
+    cabe::Wal wal;
+    ASSERT_EQ(wal.Open(wal_, &ropts), cabe::err::kSuccess);
+    std::vector<ReplayedRec> recs;
+    ASSERT_EQ(wal.Recover(0, Collect(&recs)), cabe::err::kSuccess);
+    ASSERT_EQ(recs.size(), 20u);
+    for (std::size_t i = 0; i < 20; ++i) {
+        EXPECT_EQ(recs[i].seq, i + 1) << "两代写入合成一条稠密历史";
+    }
+    wal.Close();
+}
+
+// 碎片抹除直验（5.3 全套）：容差内碎片 → 恢复成功 + 盘上清零 + T_stop+1 续号 + 无还魂。
+TEST_F(WalDeviceTest, RecoverFragmentsErased) {
+    ZeroWalAll(wal_);
+    {
+        cabe::Options copts = MakeWalOpts(cabe::WalLevel::Async);
+        cabe::Wal wal;
+        ASSERT_EQ(wal.Open(wal_, &copts), cabe::err::kSuccess);
+        PumpFrames(wal, 3);                                         // seq 1..3
+        ASSERT_EQ(wal.Flush(), cabe::err::kSuccess);
+        wal.Close();
+    }
+    // 雕"撕裂刷出"形态：槽 3 缺（seq 4 没落盘），槽 4/5 是同一刷出的碎片（seq 5/6）。
+    cabe::WalEntry fe{};
+    fe.type = cabe::WalEntryType::Put; fe.key = "frag"; fe.block = cabe::BlockId::Make(0, 9);
+    fe.value_crc = 7; fe.timestamp = 7;
+    ForgeWalFrame(wal_, 0, 4, cabe::EncodeFrame(fe, 5));
+    ForgeWalFrame(wal_, 0, 5, cabe::EncodeFrame(fe, 6));
+
+    cabe::Options ropts = MakeWalRecoverOpts();
+    cabe::Wal wal;
+    ASSERT_EQ(wal.Open(wal_, &ropts), cabe::err::kSuccess);
+    std::vector<ReplayedRec> recs;
+    ASSERT_EQ(wal.Recover(0, Collect(&recs)), cabe::err::kSuccess);
+    ASSERT_EQ(recs.size(), 3u) << "碎片绝不重放（跳洞是拼凑）";
+    EXPECT_EQ(wal.last_seq(), 3u) << "seq_next = T_stop + 1（复用号段，非烧号）";
+
+    EXPECT_FALSE(cabe::VerifyFrame(ReadWalFrame(wal_, 0, 4))) << "碎片已从盘上抹除";
+    EXPECT_FALSE(cabe::VerifyFrame(ReadWalFrame(wal_, 0, 5))) << "碎片已从盘上抹除";
+
+    ASSERT_EQ(wal.WriteWal(OneFrame()), cabe::err::kSuccess);       // 新帧 seq=4 落槽 3
+    wal.Close();
+    const cabe::WalFrame f = ReadWalFrame(wal_, 0, 3);
+    ASSERT_TRUE(cabe::VerifyFrame(f));
+    EXPECT_EQ(f.seq, 4u);
+
+    // 无还魂：再恢复一遍，恰 4 帧、不见碎片。
+    cabe::Options ropts2 = MakeWalRecoverOpts();
+    cabe::Wal wal2;
+    ASSERT_EQ(wal2.Open(wal_, &ropts2), cabe::err::kSuccess);
+    std::vector<ReplayedRec> recs2;
+    ASSERT_EQ(wal2.Recover(0, Collect(&recs2)), cabe::err::kSuccess);
+    EXPECT_EQ(recs2.size(), 4u);
+    wal2.Close();
+}
+
+// 碎片越容差 → 拒开（3.4 双条件各打一边）。
+TEST_F(WalDeviceTest, RecoverFragmentsRejected) {
+    // 形态 A：seq 越窗（窗口帧数 = 32K/128 = 256；T_stop=3 → 上限 259）。
+    ZeroWalAll(wal_);
+    {
+        cabe::Options copts = MakeWalOpts(cabe::WalLevel::Async);
+        cabe::Wal wal;
+        ASSERT_EQ(wal.Open(wal_, &copts), cabe::err::kSuccess);
+        PumpFrames(wal, 3);
+        ASSERT_EQ(wal.Flush(), cabe::err::kSuccess);
+        wal.Close();
+    }
+    cabe::WalEntry fe{};
+    fe.type = cabe::WalEntryType::Put; fe.key = "x"; fe.block = cabe::BlockId::Make(0, 1);
+    fe.value_crc = 1; fe.timestamp = 1;
+    ForgeWalFrame(wal_, 0, 4, cabe::EncodeFrame(fe, 3 + 256 + 1));  // seq=260 > 上限
+    {
+        cabe::Options ropts = MakeWalRecoverOpts();
+        cabe::Wal wal;
+        ASSERT_EQ(wal.Open(wal_, &ropts), cabe::err::kSuccess);
+        std::vector<ReplayedRec> recs;
+        EXPECT_EQ(wal.Recover(0, Collect(&recs)), cabe::err::kWalRecoveryCorrupted);
+        wal.Close();
+    }
+
+    // 形态 B：物理越窗（容差区 = 停止块 + 32K = 块 0..7；块 8 在区外）。
+    ZeroWalAll(wal_);
+    {
+        cabe::Options copts = MakeWalOpts(cabe::WalLevel::Async);
+        cabe::Wal wal;
+        ASSERT_EQ(wal.Open(wal_, &copts), cabe::err::kSuccess);
+        PumpFrames(wal, 3);
+        ASSERT_EQ(wal.Flush(), cabe::err::kSuccess);
+        wal.Close();
+    }
+    ForgeWalFrame(wal_, 8, 0, cabe::EncodeFrame(fe, 5));            // seq 在容差内，物理在区外
+    cabe::Options ropts = MakeWalRecoverOpts();
+    cabe::Wal wal;
+    ASSERT_EQ(wal.Open(wal_, &ropts), cabe::err::kSuccess);
+    std::vector<ReplayedRec> recs;
+    EXPECT_EQ(wal.Recover(0, Collect(&recs)), cabe::err::kWalRecoveryCorrupted);
+    wal.Close();
+}
+
+// 历史缺页 → 拒开（3.3 门槛：min_live ≠ covered+1）。
+TEST_F(WalDeviceTest, RecoverGapRejected) {
+    ZeroWalAll(wal_);
+    {
+        cabe::Options copts = MakeWalOpts(cabe::WalLevel::Async);
+        cabe::Wal wal;
+        ASSERT_EQ(wal.Open(wal_, &copts), cabe::err::kSuccess);
+        PumpFrames(wal, 64);                                        // 2 整块（seq 1..64）
+        ASSERT_EQ(wal.Flush(), cabe::err::kSuccess);
+        wal.Close();
+    }
+    ZeroWalRegion(wal_, 1);                                         // 抹掉块 0（seq 1..32）
+
+    cabe::Options ropts = MakeWalRecoverOpts();
+    cabe::Wal wal;
+    ASSERT_EQ(wal.Open(wal_, &ropts), cabe::err::kSuccess);
+    std::vector<ReplayedRec> recs;
+    EXPECT_EQ(wal.Recover(0, Collect(&recs)), cabe::err::kWalRecoveryCorrupted);
+    wal.Close();
+}
+
+// census 矛盾：covered>0 而全环无帧 → 拒开（3.2；帧从不被清除的前提）。
+TEST_F(WalDeviceTest, RecoverEmptyRingButCovered) {
+    ZeroWalAll(wal_);
+    cabe::Options ropts = MakeWalRecoverOpts();
+    cabe::Wal wal;
+    ASSERT_EQ(wal.Open(wal_, &ropts), cabe::err::kSuccess);
+    std::vector<ReplayedRec> recs;
+    EXPECT_EQ(wal.Recover(/*covered_seq=*/10, Collect(&recs)), cabe::err::kWalRecoveryCorrupted);
+    wal.Close();
+}
+
+// 时序防御：recover-Open 之后、Recover 之前的写入被既有空缓冲守卫拒绝（3.5）。
+TEST_F(WalDeviceTest, RecoverPrematureWriteGuard) {
+    ZeroWalAll(wal_);
+    cabe::Options ropts = MakeWalRecoverOpts();
+    cabe::Wal wal;
+    ASSERT_EQ(wal.Open(wal_, &ropts), cabe::err::kSuccess);
+
+    EXPECT_EQ(wal.WriteWal(OneFrame()), cabe::err::kWalWriteFailed) << "恢复前写入必须被拒";
+    EXPECT_EQ(wal.Flush(), cabe::err::kSuccess) << "恢复前 Flush 是安全空操作";
+
+    std::vector<ReplayedRec> recs;
+    ASSERT_EQ(wal.Recover(0, Collect(&recs)), cabe::err::kSuccess);
+    EXPECT_EQ(wal.WriteWal(OneFrame()), cabe::err::kSuccess) << "恢复完成后写入恢复正常";
     wal.Close();
 }

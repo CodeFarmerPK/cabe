@@ -5,8 +5,15 @@
 #include "util/util.h"
 
 #include <cstring>
+#include <vector>
 
 namespace cabe {
+
+    namespace {
+        // P5M6：⑨ 步 value CRC 全检的逐键日志上限（百万条坏 value 刷屏等于没有日志；
+        // 上限 + 收尾汇总兼顾可读与全貌，设计 D16）。
+        constexpr std::uint64_t kRecoveryCrcLogCap = 100;
+    } // namespace
 
     Engine::~Engine() {
         if (opened_) {
@@ -26,7 +33,7 @@ namespace cabe {
             const auto& cfg = opts.devices[i];
             DeviceContext dc;
 
-            // 超级块：create 写双份 / recover 读校验（含双向配对 + 设备编号）
+            // 超级块：create 写双份 / recover 读校验（含双向配对 + 设备编号）——流水线 ①
             int32_t rc = opts.create
                 ? CreateDeviceGroup(cfg, i, &dc.super_block)
                 : RecoverDeviceGroup(cfg, i, &dc.super_block);
@@ -35,7 +42,7 @@ namespace cabe {
                 return Status::Error(rc);
             }
 
-            // 打开数据设备的 IoBackend
+            // 打开数据设备的 IoBackend——流水线 ②
             rc = dc.io.Open(cfg.data_path, &options_);
             if (rc != err::kSuccess) {
                 AbortOpen(dc);
@@ -59,19 +66,23 @@ namespace cabe {
             //   多设备启用后应改为 static_cast<DeviceId>(i) 并与 RouteKey 路由对齐。
             dc.block_allocator.Init(0, dc.super_block.block_count);
 
-            // P5M2/M4：仅 create 模式打开 WAL + 快照设备（D9）；recover 的重放/加载在 M6。
             if (opts.create) {
+                // create：开 WAL + 快照设备（空环 / 清槽），索引从空开始。
                 rc = dc.wal.Open(cfg.wal_path, &options_);
                 if (rc != err::kSuccess) {
                     AbortOpen(dc);
                     return Status::Error(rc);
                 }
 
-                // P5M4：打开快照设备——内含 A/B 布局计算 + 部署期快照设备容量校验
-                //   + 清空两槽、next_gen=1；容量不足返回 kDeviceTooSmall。
-                //   注：WAL 设备容量校验推迟 M5（M4 测试设备小、WAL 线性不回收，过早校验会
-                //   拒绝小 loop 设备；见 P5M4 §11 备注）。
                 rc = dc.snapshot.Open(cfg.snapshot_path, &options_, dc.super_block);
+                if (rc != err::kSuccess) {
+                    AbortOpen(dc);
+                    return Status::Error(rc);
+                }
+            } else {
+                // P5M6 recover：完整恢复链（流水线 ③~⑨）。要么完整恢复要么干净失败（D3）——
+                // 任一环错走 AbortOpen + 原始码上抛，绝不交付半份索引。
+                rc = RecoverDevice(cfg, dc);
                 if (rc != err::kSuccess) {
                     AbortOpen(dc);
                     return Status::Error(rc);
@@ -82,8 +93,10 @@ namespace cabe {
         }
 
         opened_ = true;
-        CABE_LOG_INFO("Engine::Open 成功: %zu 个设备", opts.devices.size());
+        CABE_LOG_INFO("Engine::Open 成功: %zu 个设备 (%s)", opts.devices.size(),
+                      opts.create ? "create" : "recover");
         return Status::Ok();
+        // 终态契约（P5M6-D4）：自此引擎不再记得自己怎么打开的——后续一切路径零 create/recover 分支。
     }
 
     Status Engine::Close() {
@@ -224,8 +237,6 @@ namespace cabe {
     Status Engine::SetWalLevel(WalLevel new_level) {
         if (!opened_) return Status::Error(err::kEngineNotOpen);
         if (!IsValidWalLevel(new_level)) return Status::Error(err::kEngineInvalidOpts);
-        // 注：recover 模式 M3 不开 WAL（仅 create 开），此入口对 WAL 落盘无实际作用——
-        //   改级别只动 options_，而 recover 下 WAL 通路本就不写（重放/续写留 M6）。
         const WalLevel old = options_.wal_level;
         // 收紧 WAL（攒批档 2/4 → 同步档 1/3）：先把各设备攒批缓冲刷净，新保证才从此刻成立。
         const bool tighten_wal = !IsWalSyncLevel(old) && IsWalSyncLevel(new_level);
@@ -263,20 +274,173 @@ namespace cabe {
         devices_.clear();
     }
 
+    // ---- P5M6：恢复编排（流水线 ③~⑨，设计稿 §4）----
+
+    int32_t Engine::RecoverDevice(const DeviceConfig& cfg, DeviceContext& dc) {
+        // ③ 快照设备：开 + 双槽裁决 + 状态重建（last_trigger_seq = covered 也在其内落位）。
+        int32_t rc = dc.snapshot.Open(cfg.snapshot_path, &options_, dc.super_block);
+        if (rc != err::kSuccess) return rc;
+
+        // ④ 快照记录 → 索引（基底）。接收器 = 共享校验 + Insert。
+        std::uint64_t loaded = 0;
+        rc = dc.snapshot.Load([&](std::string_view k, const ValueMeta& m) -> int32_t {
+            ++loaded;
+            return ApplyRecoveredEntry(dc, k, m);
+        });
+        if (rc != err::kSuccess) return rc;
+
+        // ⑤⑥⑦ WAL：开（几何 + recover 容量校验）→ 扫描重放（增量压基底）→ 运行态重建。
+        rc = dc.wal.Open(cfg.wal_path, &options_);
+        if (rc != err::kSuccess) return rc;
+        std::uint64_t replayed = 0;
+        rc = dc.wal.Recover(dc.snapshot.last_covered_seq(),
+                            [&](const WalEntry& e, std::uint64_t seq) -> int32_t {
+                                ++replayed;
+                                return ApplyWalEntry(dc, e, seq);
+                            });
+        if (rc != err::kSuccess) return rc;
+
+        // ⑧ 终态索引 → 分配器（空闲 = 终态补集；必须在重放完成之后——活块集合才完整，D1）。
+        rc = RebuildAllocator(dc);
+        if (rc != err::kSuccess) return rc;
+
+        // ⑨ 可选诊断（默认关）：CRC 不符不算失败；读 I/O 错拒开（回顾修正 #2：返回值必须检查）。
+        if (options_.verify_value_crc_on_recovery) {
+            rc = VerifyValuesCrc(dc);
+            if (rc != err::kSuccess) return rc;
+        }
+
+        CABE_LOG_INFO("恢复完成: 快照 %llu 条 + 重放 %llu 帧 (covered_seq=%llu), 活块 %zu/%llu",
+                      static_cast<unsigned long long>(loaded),
+                      static_cast<unsigned long long>(replayed),
+                      static_cast<unsigned long long>(dc.snapshot.last_covered_seq()),
+                      dc.meta_index.Size(),
+                      static_cast<unsigned long long>(dc.super_block.block_count));
+        return err::kSuccess;
+    }
+
+    bool Engine::ValidateRecoveredMeta(const DeviceContext& dc, std::string_view key, BlockId block,
+                                       bool has_block, const char* origin, std::uint64_t seq) const {
+        // 统一校验表（4.3，两条恢复来路同一份代码）：只查"不查会咬人"的字段——
+        // CRC 已保证内容位级忠实，这里防的是"写入方当年就写错了"。违例 = 证据矛盾，调用方拒开。
+        const char* why = nullptr;
+        if (key.empty() || key.size() > kWalKeyMax) {
+            why = "key 长度非法";                          // 空 key 是写路径门口就拒的（幽灵键）
+        } else if (has_block && block.dev() != 0) {
+            why = "BlockId device 位非零";                 // 指向不存在的设备，污染分配器重建（P7 随路由改）
+        } else if (has_block && block.block_idx() >= dc.super_block.block_count) {
+            why = "块号越出数据区";                        // 越界读 / RebuildFromActive 被喂越界块
+        }
+        if (why != nullptr) {
+            CABE_LOG_ERROR("恢复条目校验不过 [%s]: %s — seq/序=%llu key_len=%zu block_idx=%llu/%llu",
+                           origin, why,
+                           static_cast<unsigned long long>(seq),
+                           key.size(),
+                           static_cast<unsigned long long>(block.block_idx()),
+                           static_cast<unsigned long long>(dc.super_block.block_count));
+            return false;
+        }
+        return true;
+    }
+
+    int32_t Engine::ApplyRecoveredEntry(DeviceContext& dc, std::string_view key, const ValueMeta& meta) {
+        if (!ValidateRecoveredMeta(dc, key, meta.block, /*has_block=*/true,
+                                   "快照记录", dc.meta_index.Size())) {
+            return err::kSnapshotCorrupted;
+        }
+        return dc.meta_index.Insert(key, meta);
+    }
+
+    int32_t Engine::ApplyWalEntry(DeviceContext& dc, const WalEntry& e, std::uint64_t seq) {
+        // 语义解释收口（D15）：与正常写路径的索引段逐字对仗；按 seq 序重放后同 key 自然留最后结果。
+        switch (e.type) {
+        case WalEntryType::Put: {
+            if (!ValidateRecoveredMeta(dc, e.key, e.block, /*has_block=*/true, "WAL帧", seq)) {
+                return err::kWalRecoveryCorrupted;
+            }
+            ValueMeta meta{};
+            meta.block     = e.block;
+            meta.timestamp = e.timestamp;   // 还原"当年"，不用恢复时刻（TTL 前提，4.2）
+            meta.crc       = e.value_crc;
+            meta.state     = ValueState::Active;
+            return dc.meta_index.Insert(e.key, meta);
+        }
+        case WalEntryType::Delete: {
+            if (!ValidateRecoveredMeta(dc, e.key, BlockId{}, /*has_block=*/false, "WAL帧", seq)) {
+                return err::kWalRecoveryCorrupted;
+            }
+            const int32_t rc = dc.meta_index.Delete(e.key);
+            if (rc == err::kIndexKeyNotFound) {
+                // 写侧按构造保证墓碑只在键存在时产生；精确复演下必命中——不命中 = 快照、
+                // 帧序、索引三者必有一个在说谎（4.1 两步论证），拒开。
+                CABE_LOG_ERROR("重放遇到\"删不存在的键\"（证据矛盾）: seq=%llu key_len=%zu",
+                               static_cast<unsigned long long>(seq), e.key.size());
+                return err::kWalRecoveryCorrupted;
+            }
+            return rc;
+        }
+        default:
+            // VerifyFrame 不查类型；版本 1 的写入方只产出 Put/Delete——未知类型 = 矛盾（4.3 查①）。
+            CABE_LOG_ERROR("重放遇到未知帧类型（版本 1 只产出 Put/Delete）: type=%u seq=%llu",
+                           static_cast<unsigned>(e.type),
+                           static_cast<unsigned long long>(seq));
+            return err::kWalRecoveryCorrupted;
+        }
+    }
+
+    int32_t Engine::RebuildAllocator(DeviceContext& dc) {
+        std::vector<BlockId> active;
+        active.reserve(dc.meta_index.Size());
+        int32_t rc = dc.meta_index.ForEach([&](std::string_view, const ValueMeta& m) -> int32_t {
+            active.push_back(m.block);
+            return err::kSuccess;
+        });
+        if (rc != err::kSuccess) return rc;
+        rc = dc.block_allocator.RebuildFromActive(0, dc.super_block.block_count, active);
+        if (rc != err::kSuccess) {
+            // 越界/重复活块（P5M6-D18 增补检测）——穿透了上游校验的恢复一致性矛盾，拒开。
+            CABE_LOG_ERROR("空闲块重建失败（活块清单矛盾）: rc=%d, 活块数=%zu", rc, active.size());
+            return rc;
+        }
+        return err::kSuccess;
+    }
+
+    int32_t Engine::VerifyValuesCrc(DeviceContext& dc) {
+        std::byte* buf = dc.pool.Allocate();
+        if (buf == nullptr) return err::kEnginePoolExhausted;
+        std::uint64_t bad = 0;
+        int32_t rc = dc.meta_index.ForEach([&](std::string_view key, const ValueMeta& m) -> int32_t {
+            const int32_t rrc = dc.io.Read(m.block.block_idx(), buf);
+            if (rrc != err::kSuccess) return rrc;   // 读 I/O 错 = 证据不可得 → 拒开（io 段原始码）
+            if (util::CRC32(DataView{buf, kValueSize}) != m.crc) {
+                ++bad;
+                if (bad <= kRecoveryCrcLogCap) {
+                    CABE_LOG_WARN("恢复期 value CRC 不符: key=%.*s... block_idx=%llu"
+                                  "（条目保留，Get 时如实报 kEngineDataCorrupted）",
+                                  static_cast<int>(std::min<std::size_t>(key.size(), 32)), key.data(),
+                                  static_cast<unsigned long long>(m.block.block_idx()));
+                }
+            }
+            return err::kSuccess;
+        });
+        dc.pool.Free(buf);
+        if (rc != err::kSuccess) return rc;
+        if (bad > 0) {
+            CABE_LOG_WARN("恢复期 value CRC 全检: %llu 个键的 value 损坏（级别 3 契约内的正常崩溃"
+                          "形态；条目全部保留，删条目是假装写入没发生过——P5M6-D16）",
+                          static_cast<unsigned long long>(bad));
+        }
+        return err::kSuccess;
+    }
+
     // ---- P5M4：快照触发链 ----
 
     Status Engine::Snapshot() {
         if (!opened_) return Status::Error(err::kEngineNotOpen);
         // 手动触发：同步执行、逐设备各做一份、返回第一个错误。
+        // P5M6：引擎开着 ⇒ 三设备必然全开着（recover 守卫已拆，D20）。
         int32_t first_err = err::kSuccess;
         for (auto& dc : devices_) {
-            // M4 仅 create 模式打开快照设备；recover 模式的快照/恢复编排在 M6——
-            // 明确报"未实现"，而不是落进 Write 的未打开守卫、报误导性的"写快照失败"。
-            // （自动路径 MaybeRequestSnapshot 有同款守卫，两条路保持对称。）
-            if (!dc.snapshot.is_open()) {
-                if (first_err == err::kSuccess) first_err = err::kEngineNotImplemented;
-                continue;
-            }
             int32_t rc = DoSnapshot(dc);
             if (first_err == err::kSuccess) first_err = rc;
         }
@@ -338,8 +502,8 @@ namespace cabe {
     }
 
     void Engine::MaybeRequestSnapshot(DeviceContext& dc) {
-        if (!dc.snapshot.is_open()) return;   // M4 仅 create 模式开了快照设备
         // 距上次"尝试"以来的 WAL 增长（序号差 × 帧大小）达阈值即触发（退避：基准是 last_trigger_seq）。
+        // P5M6：recover 后 last_trigger = covered（盘上真实痕迹）——肥 WAL 恢复后首写自然触发（D4 自愈）。
         const std::uint64_t grown =
             (dc.wal.last_seq() - dc.snapshot.last_trigger_seq()) * kWalFrameSize;
         if (grown >= options_.snapshot_threshold_bytes) {

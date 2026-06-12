@@ -30,7 +30,9 @@ public:
             state.SkipWithMessage("需要 CABE_TEST_DEVICE / CABE_TEST_WAL_DEVICE / CABE_TEST_SNAPSHOT_DEVICE");
             return;
         }
-        // 首次 create 格式化设备组；BM_Put 写满后重开用 recover 仅重置内存 FreeList
+        // 首次 create 格式化设备组；BM_Put 写满后重开同样用 create 重新格式化——
+        // P5M6 起 recover 是真恢复（索引/分配器从盘上重建），写满后 recover 重开会回到
+        // "索引满 + 空闲零"的状态、Put 永远 kEngineNoSpace；重置语义只有 create 提供。
         auto s = engine_.Open(MakeOpts(/*create=*/true));
         if (!s.ok()) {
             state.SkipWithMessage("Engine::Open 失败");
@@ -70,9 +72,9 @@ BENCHMARK_DEFINE_F(EngineBench, BM_Put)(benchmark::State& state) {
         std::string key = "put-" + std::to_string(seq++);
         auto s = engine_.Put(key, cabe::DataView{value});
         if (!s.ok()) {
-            // 写满 → 关闭重开（recover，仅重置内存 FreeList，不重新格式化）
+            // 写满 → 关闭重开（create 重新格式化；P5M6 后 recover 是真恢复、不再有"清索引"语义）
             engine_.Close();
-            engine_.Open(MakeOpts(/*create=*/false));
+            engine_.Open(MakeOpts(/*create=*/true));
             seq = 0;
         }
         benchmark::ClobberMemory();

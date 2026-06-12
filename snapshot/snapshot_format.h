@@ -90,6 +90,17 @@ namespace cabe {
         return r;
     }
 
+    // 把一条记录解码回（key 视图 + ValueMeta）——EncodeSnapshotRecord 的逆（P5M6 加载用）。
+    // key 视图指向 r.key 本体，仅在 r 存续期间有效；调用方须先保证 r.key_len ≤ kSnapshotKeyMax
+    //（内存安全守卫在 Snapshot::Load；语义校验 key_len ∈ [1, kWalKeyMax] 收口在 Engine 统一校验表）。
+    inline void DecodeSnapshotRecord(const SnapshotRecord& r, std::string_view* key, ValueMeta* meta) {
+        meta->block     = BlockId{r.block};
+        meta->crc       = r.value_crc;
+        meta->timestamp = r.timestamp;   // 还原"当年"的写入时间，不用恢复时刻（未来 TTL 前提）
+        meta->state     = static_cast<ValueState>(r.state);
+        *key = std::string_view(reinterpret_cast<const char*>(r.key), r.key_len);
+    }
+
     // 槽头自身 CRC：覆盖 [0, 4092)（整块去掉末尾 4 字节的 header_crc32c 本身）。
     inline std::uint32_t ComputeSlotHeaderCrc(const SnapshotSlotHeader& h) {
         const auto* p = reinterpret_cast<const std::byte*>(&h);

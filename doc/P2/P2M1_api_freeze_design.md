@@ -79,12 +79,21 @@ public:
 > **冻结追加注（P5）**：`SetWalLevel`（P5M3）与 `Snapshot()`（P5M4）为冻结后按 P5-D5
 > "破坏冻结、同步更新文档"约定追加的公开方法。`Snapshot()` 在 recover 模式（M4 未打开
 > 快照设备）返回 `kEngineNotImplemented`（恢复编排在 P5M6）。
+>
+> **冻结追加注（P5M6）**：恢复编排落定后，`Snapshot()` 的 `kEngineNotImplemented` 分支
+> **退场**——recover 模式同样打开三设备、全机制可用，该码从此无人产出（码定义保留，
+> 错误码只增不删）。`Open(create=false)` 的行为自 M6 起为**完整恢复链**（见下表 Open 行）；
+> `verify_value_crc_on_recovery` 字段自 M6 起生效（恢复末尾对终态索引全量读块验 CRC：
+> 不符**不算失败**——记日志、保留条目、Get 时如实报 `kEngineDataCorrupted`；它是诊断器
+> 不是裁判，默认关）。错误码新增 8 个（snapshot 段 -106002/-106003、wal_recovery 段
+> -105010~12、engine 段 -104008/-104009），均可经 `Open` 返回；清单见 `common/error_code.h`
+> 与 P5M6 稿 §11（§4 的分配表保持 P2 时点快照不回写）。
 
 **承诺语义**：
 
 | 方法 | 承诺 |
 |---|---|
-| `Open` | 已 Opened 时返回 `kEngineAlreadyOpen`（幂等防护）；P1 限单 device，未来多 device 时 `opts.devices.size() > 1` 将被支持 |
+| `Open` | 已 Opened 时返回 `kEngineAlreadyOpen`（幂等防护）；P1 限单 device，未来多 device 时 `opts.devices.size() > 1` 将被支持。**P5M6 起 `create=false`（recover）= 完整恢复链**：超级块校验 → 加载最新快照 → 重放 WAL 活帧 → 重建空闲块，启动后数据与崩溃/关闭前一致（级别契约内的丢失除外）；恢复**要么完整成功要么干净失败**（任一环错 → Open 失败、引擎不上线，不交付部分恢复的实例）；Open 成功后 create/recover 两种来路行为无差别 |
 | `Close` | 未 Opened 时返回 `kEngineNotOpen`；释放所有资源 |
 | `Put` | key 非空 + `value.size() == kValueSize`；覆盖写（同 key 最后一次 Put 生效）；**持久化原子性由 WAL 保证（P5+），当前无持久化保证**。P5M5 起可能返回 `kWalFull`（仅 WAL 环空间耗尽且快照救援无效时——失败干净：索引未动、旧值可读；属运维信号） |
 | `Get` | 返回最后一次 Put 的 value；CRC32 校验不匹配返回 `kEngineDataCorrupted` |

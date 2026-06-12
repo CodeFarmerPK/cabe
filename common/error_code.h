@@ -51,8 +51,12 @@ namespace cabe::err {
     inline constexpr int kEngineNoSpace         = InSeg(kEngineBase, 5);  // -104005
     inline constexpr int kEnginePoolExhausted   = InSeg(kEngineBase, 6);  // -104006
     inline constexpr int kEngineDataCorrupted   = InSeg(kEngineBase, 7);  // -104007
+    // P5M6（分配器沿 kEngineNoSpace 先例用 engine 段）：RebuildFromActive 的活块清单矛盾——
+    // 越界/重复都意味着恢复出的索引不可信（穿透了 CRC 的盘上矛盾或上游 bug），拒开级。
+    inline constexpr int kEngineDuplicateBlock  = InSeg(kEngineBase, 8);  // -104008  两个键声称独占同一物理块
+    inline constexpr int kEngineBlockOutOfRange = InSeg(kEngineBase, 9);  // -104009  活块块号越出数据区（原静默跳过，P5M6 升级为报错）
 
-    static_assert(kEngineDataCorrupted > kEngineBase - kSegmentSize);
+    static_assert(kEngineBlockOutOfRange > kEngineBase - kSegmentSize);
 
     // ---- index 段（P1M3 新增）----
     inline constexpr int kIndexKeyNotFound     = InSeg(kIndexBase, 0);  // -102000
@@ -79,13 +83,21 @@ namespace cabe::err {
     inline constexpr int kSuperBlockEntropyFailure     = InSeg(kWalRecoveryBase, 8); // -105008  系统熵源不可用，无法生成 UUID，create 中止
     inline constexpr int kSuperBlockSizeMismatch       = InSeg(kWalRecoveryBase, 9); // -105009  持久 block_count 与当前数据设备实际大小不符（设备被缩容）
 
-    static_assert(kSuperBlockSizeMismatch > kWalRecoveryBase - kSegmentSize);
+    // ---- wal_recovery 段续编（P5M6 新增：崩溃恢复，从 10 号起；按运维动作配码——
+    //      "查设备 / 查数据 / 报 bug" 三类，细节定位归日志三件套（seq + 偏移 + 原因）。----
+    inline constexpr int kWalRecoveryReadFailed = InSeg(kWalRecoveryBase, 10); // -105010  恢复扫描/走读/重灌读 I/O 失败（证据不可得 → 拒开；查设备）
+    inline constexpr int kWalRecoveryCorrupted  = InSeg(kWalRecoveryBase, 11); // -105011  WAL 证据矛盾：历史缺页/碎片越容差/帧语义违例/删不存在键/无帧但 covered>0（查数据）
+    inline constexpr int kWalRecoveryInvariant  = InSeg(kWalRecoveryBase, 12); // -105012  恢复收尾自检不过（扫描/重建代码自身 bug；报 bug）
 
-    // ---- snapshot 段（P5M4 新增：快照写 + 部署期容量校验）----
+    static_assert(kWalRecoveryInvariant > kWalRecoveryBase - kSegmentSize);
+
+    // ---- snapshot 段（P5M4 新增：快照写 + 部署期容量校验；P5M6 增补恢复读侧）----
     inline constexpr int kSnapshotWriteFailed = InSeg(kSnapshotBase, 0); // -106000  写/刷快照设备失败
     inline constexpr int kDeviceTooSmall      = InSeg(kSnapshotBase, 1); // -106001  Open 部署期容量校验不过（设备过小）
+    inline constexpr int kSnapshotReadFailed  = InSeg(kSnapshotBase, 2); // -106002  槽头/记录区读 I/O 失败（证据不可得 → 拒开；查设备）
+    inline constexpr int kSnapshotCorrupted   = InSeg(kSnapshotBase, 3); // -106003  快照证据矛盾：撞代际/双槽数据皆坏/记录违例（查数据）
 
-    static_assert(kDeviceTooSmall > kSnapshotBase - kSegmentSize);
+    static_assert(kSnapshotCorrupted > kSnapshotBase - kSegmentSize);
 
     // io 段的具体码随模块产生时补入。
 } // namespace cabe::err

@@ -6,7 +6,7 @@
 
 ## 状态
 
-🚧 **进行中**（M1~M4 已实装；M5 设计稿完成、待实装；M6/M7 待设计）
+🚧 **进行中**（M1~M5 已实装；M6 设计稿完成、待实装；M7 待设计）
 
 ## 范围摘要
 
@@ -28,8 +28,8 @@
 | M2 | WAL 模块 + 帧格式 + 严格级别 | `P5M2_wal_core_design.md` | ✅ 已实装 |
 | M3 | WAL 分级 2/3/4 + 缓冲区配置 | `P5M3_wal_levels_design.md` | ✅ 已实装 |
 | M4 | MetaIndex 快照（检查点） | `P5M4_snapshot_design.md` | ✅ 已实装 |
-| M5 | WAL 环形队列回收 | `P5M5_wal_ring_design.md` | 设计稿 |
-| M6 | 崩溃恢复 + Engine 集成收尾 | `P5M6_recovery_design.md` | 待设计 |
+| M5 | WAL 环形队列回收 | `P5M5_wal_ring_design.md` | ✅ 已实装 |
+| M6 | 崩溃恢复 + Engine 集成收尾 | `P5M6_recovery_design.md` | 设计稿 |
 | M7 | P5 收敛 | `P5M7_convergence_design.md` | 待设计 |
 
 ## 里程碑依赖
@@ -130,11 +130,13 @@ P5M1 ──► P5M2 ──► P5M3 ──► P5M4 ──► P5M5 ──► P5M6 
 
 ### P5M6（崩溃恢复 + Engine 集成收尾）
 
-- 恢复流程：超级块校验 → 加载快照 → 重放 WAL（帧 CRC + seq 定边界）→ `BlockAllocator::RebuildFromActive`（位图反推）
-- 按**环形** WAL 重放（从头指针绕圈、靠 seq 定有效区间）——排在 M5 之后，避免按线性 WAL 写完再为环形返工
-- recover 模式接入 WAL 重放并续写（M2 的 WAL 追加只在 create 模式；`DeviceContext` 的 `Wal` 成员、级别 1 的 Put/Delete 接线已在 M2 完成）
-- 快照协调（Engine 层）；Options 扩展收尾：恢复时 value CRC 校验开关等
-- 基础恢复测试 + WAL 损坏测试（loop 设备：数据 + WAL + 快照）
+- **九步恢复流水线**（recover 模式 Open）：超级块校验（M1 已有）→ 开数据设备 → 快照双槽裁决（定 covered_seq）→ `Load` 灌索引（基底）→ WAL 两遍扫描（census + 走读，活帧判据 `合法 ∧ seq > covered`）→ 活帧按 seq 序应用（增量压基底）→ 重建 WAL 运行态（重灌留窗 + 锚帧+1 续号）→ `RebuildFromActive`（位图反推；增补越界/重复块报错）→（可选）value CRC 全检
+- **失败语义**：要么完整恢复要么干净失败（拒交付半份索引）；证据裁决期间零写盘，唯一写动作 = 撕裂碎片抹除（有界、幂等、只抹级别契约内可丢的帧）；证据矛盾 = 拒开（缺页/碎片越容差/双槽数据皆坏/删不存在键等），保守方向 = 拒绝服务
+- **坏槽回退**靠 WAL seq 连续性校验兜底（走读单判据"下一槽 = 下一 seq"，一网封死回退/双坏/双槽无效三个静默丢数据口子）；派生红利：快照纯是加速器——环未绕则创世重放不丢数据
+- **终态契约**：Open 之后引擎不再记得自己怎么打开的——recover/create 殊途同归，守卫拆除（`kEngineNotImplemented` 退场）、全机制解禁（阈值触发/手动快照/救援/SetWalLevel 在重建态零新代码成立）
+- Options 收尾：`verify_value_crc_on_recovery` 生效（诊断器不是裁判：CRC 不符记日志保条目、不改恢复成败）；错误码 +8（snapshot/wal_recovery/engine 三段）
+- 基础恢复测试 + 损坏注入测试 27 例（loop 三设备；优雅闭环 / 盘面篡改 / direct 模块构造三手法；新建 `test/engine/recovery_test.cpp`）
+- M6 退出 = P5 退出条件 #1~#6 全满足；**M7 纯文档不碰代码**（钳制条款入稿）
 
 ### P5M7（P5 收敛）
 
@@ -158,8 +160,8 @@ P5M1 ──► P5M2 ──► P5M3 ──► P5M4 ──► P5M5 ──► P5M6 
 2. **WAL 帧不跨 4K 块**：128 字节是 4096 的因数，32 帧正好填满一个 4K 块——避免跨块读写的复杂性。key 上限 84 字节（加入 seq 字段后的精确值），超长 key 在 Put 时拒绝。
 3. **WAL 帧双 CRC 的职责**：帧 CRC32C 校验帧自身完整性（检测不完整写入 + 定恢复边界）；value CRC32C 校验 value 数据（读时校验）。
 4. **环形队列 + TRIM**：WAL 设备空间循环使用；快照截断后对释放区域发 TRIM，避免覆盖写时的擦除开销。（P5M5 对账：TRIM **实施推 P7**——M5 在 `ReclaimUpTo` 内留空桩钉死挂点与范围语义，届时与数据盘 `TrimDeviceBlock` 一起经统一 TRIM 设施落地。）
-5. **快照不持久化 BlockAllocator**：恢复时从 MetaIndex 反推（位图），毫秒级纯内存操作。
-6. **恢复时间不是瓶颈**：PB 级 value 的 WAL 仅 GB 级，十几秒可完成；运行时写入延迟才是优化重点。
+5. **快照不持久化 BlockAllocator**：恢复时从 MetaIndex 反推（位图），毫秒级纯内存操作。（P5M6 兑现：落地为"空闲 = 终态索引的补集"原则——帧持久 = 块有主，帧不存在 = 块归空闲；孤立块六场景全部自然归位。）
+6. **恢复时间不是瓶颈**：PB 级 value 的 WAL 仅 GB 级，十几秒可完成；运行时写入延迟才是优化重点。（P5M6 消费：两遍扫描（全环读两遍）与快照两遍读（验 CRC + 投递）的取舍依据即本条。）
 7. **模糊快照留待 P7**：M4 单线程哈希表"冻结写者"的一致快照（直接遍历写出；触发快照的那次 Put 阻塞，单线程下"冻结"为语义占位、不上真锁）；P7 多线程 + 模糊/无锁一致快照（哈希表用短锁 + 拷贝，B+ 树用 COW/MVCC）消除延迟尖刺。
 8. **WAL 不做抽象层但接口"假装抽象"**：方法语义通用（如 `Append(entry)` / `Sync()`），不暴露裸块设备细节（如 `WriteAt(offset, buf, 4096)`），降低未来引入抽象层的成本。
 
