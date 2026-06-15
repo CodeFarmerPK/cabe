@@ -1,11 +1,19 @@
 #ifndef CABE_WAL_H
 #define CABE_WAL_H
 
-// P5M2/P5M3/P5M5/P5M6：WAL 模块的接口与 Wal 类。
-// 设计依据：doc/P5/P5M5_wal_ring_design.md（环形化）+ P5M6_recovery_design.md §6/§8（恢复）。
-// 级别内化：Wal 现读 Options.wal_level 分支——
-//   级别 1/3（同步）：每帧整块写 + fdatasync；
-//   级别 2/4（攒批）：攒进缓冲，攒满 / Close / 切档收紧才 Flush()。
+// P5M2/P5M3/P5M5/P5M6/P6M1：WAL 模块的接口与 Wal 类。
+// 设计依据：doc/P5/P5M5_wal_ring_design.md（环形化）+ P5M6_recovery_design.md §6/§8（恢复）
+//   + doc/P6/P6M1_commit_group_design.md（提交组）。
+// 级别内化：Wal 现读 Options.wal_level 分支——两档共用一套窗口表示法（P6M1 归一），
+//   差异收窄为 fsync 时机 + 返回时机两个策略：
+//   级别 1/3（同步档）：经提交组（group commit）批量提交——批末一次 fdatasync、
+//     落盘成功才返回；单线程退化为批大小 1，逐调用语义与 P5 等价；
+//   级别 2/4（攒批档）：攒进缓冲，攒满 / Close / 切档收紧才 Flush()。
+// P6M1 提交组：多写者并发 WriteWal（同步档）安全——栈上 WriterNode 经无锁 MPSC 栈
+//   汇聚，"由空变非空"者自任 leader，取批（一次 exchange 全摘）→ 反转复到达序 →
+//   批量编码落盘 → 回填唤醒；卸任三步"让位→复查→条件再任职"封交接缝（四操作
+//   seq_cst）；窗口状态只许在位者碰（钥匙制 I1）。WriteWal 与 Flush/ReclaimUpTo/
+//   Close 的跨操作并发归 P7（P6-D9）。
 // P5M5 环形化：日志区 [ring_start, ring_end) 模环推进、到尾绕回；头尾指针只活内存
 //   （盘上真相 = 帧 + 快照槽头 covered_seq）；快照成功后经 ReclaimUpTo 回收（head 跳跃前进）；
 //   空间不足时 WriteWal 返回 kWalFull（Engine 层做撞墙救援）。四条不变量见设计稿 §11。
@@ -20,6 +28,7 @@
 #include "util/raw_device.h"
 #include "common/structs.h"     // BlockId / kDataRegionOffset
 
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <functional>
@@ -65,6 +74,7 @@ namespace cabe {
         Wal& operator=(const Wal&) = delete;
         Wal(Wal&& other) noexcept;            // DeviceContext 经 std::move 入 vector
         Wal& operator=(Wal&& other) noexcept; // 移动时置空源 buf_/dev_，避免双重释放
+                                              // P6M1：移动仅许在提交组静止期（断言钉死，D5）
 
         // 打开 WAL 设备并持有 Options 指针（现读 wal_level；Open 时读 wal_buffer_size 定缓冲大小）。
         // 两模式公共段：算环几何 + 部署期容量校验 ring_size ≥ max(阈值×2, 缓冲+4K)，不足返回
@@ -72,6 +82,8 @@ namespace cabe {
         // create（opts->create）：分配缓冲 + 空环（head == tail == ring_start），seq=1。
         // recover：到此为止——缓冲不分配（cur_buf_ 空 = 既有写守卫天然拒绝过早写入），
         //          环状态待 Recover() 从盘上重建；Engine 编排保证 Open 后先 Recover 再写。
+        // P6M1：提交组三原子的默认初值（栈空、纪元 0、无人在位）恰为正确静止态——
+        //          Open/Recover 对提交组零动作。
         int32_t Open(const std::string& wal_path, const Options* opts);
 
         // P5M6：恢复（仅 recover 模式、Open 之后调一次）。covered_seq 来自快照裁决（Engine 转手）。
@@ -85,10 +97,14 @@ namespace cabe {
         int32_t Recover(std::uint64_t covered_seq, const WalReplayFn& fn);
 
         // 唯一写入入口：现读 wal_level 分支（同步 / 攒批）。
-        // P5M5：环空间不足返回 kWalFull（被拒帧未编码、seq 未耗——重试即完整重走）；
-        // 满态下惰性重开窗（回收后下一次写自然复活）。
+        // P6M1：同步档走提交组——可多线程并发调用；返回时本帧已持久（批末 fdatasync 先行于
+        //   result 回填，release/acquire 链保证"落盘先行于返回"）；kWalFull 经批处理回填
+        //   （语义不变：被拒帧未编码、seq 未耗、重试即完整重走；时延加一次批处理）。
+        // 攒批档（级别 2/4）：原路径零改动，单线程契约持续（并发化归 P7）。
+        // P5M5：满态下惰性重开窗（回收后下一次写自然复活）。
         int32_t WriteWal(const WalEntry& e);
-        // 刷出攒着、未落盘的帧（攒满 / Close / 切档收紧 / 快照前调用）；同步档或缓冲空时为空操作。
+        // 刷出攒着、未落盘的帧（攒满 / Close / 切档收紧 / 快照前调用）；同步档或缓冲空时为空操作
+        //（P6M1 后同步档欠账恒为零：每批以 fdatasync 收尾，已分配 seq 的帧皆持久）。
         // P5M5 变体 Y："整块推进、半块留窗"——提前刷出不留块尾空洞，半块帧留缓冲头续攒、
         // 下次整块同字节重写（M2 撕裂安全模式）；活区间内帧紧凑连续（不变量③）。
         int32_t Flush();
@@ -113,12 +129,40 @@ namespace cabe {
 
     private:
         struct RecoverCensus;                  // P5M6：census 五标量（定义在 wal.cpp）
-        int32_t Append(const WalEntry& e);     // 编码一帧入缓冲（分配 seq、算 frame_crc）
-        int32_t SyncCurrentBlock();            // 同步档：当前 4K 块整块 WriteAt + fdatasync
+        struct WriterNode;                     // P6M1：提交组写者节点（定义在 wal.cpp）
+
+        // P6M1：提交组共享原子聚合（设计 D5）。整体与 leader 私有窗口状态隔缓存行——
+        // stack_head 是全体生产者高频 CAS 的热点，与 leader 每帧改写的 cur_off_/n_frames_
+        // 同行会互相打飞缓存行（伪共享）；组内不细分（批粒度互扰不值每原子 64B）。
+        struct CommitGroup {
+            std::atomic<WriterNode*>   stack_head{nullptr};  // MPSC 栈顶（生产者 CAS 热点）
+            std::atomic<std::uint64_t> epoch{0};             // 批次纪元——唯一唤醒挂点
+                                                             //（D3：唤醒永不落节点）
+            std::atomic<bool>          leader_active{false}; // 在位标志——窗口状态的"钥匙"（I1），
+                                                             // 兼窗口状态跨任期交接棒（D9）
+        };
+
+        int32_t Append(const WalEntry& e);     // 纯"编码 + 拷贝 + 计数"（P6M1 删块推进分支，
+                                               // 窗口准入统一由调用方在 Append 之前完成）
         bool    sync_level() const noexcept;   // wal_level ∈ {Strict, WalSync}
         // 在 pos（4K 对齐、环内）开窗的容量：min(缓冲, 到环尾, 准入余量)——跨缝截短（D3）+
         // 恒留一块准入（D5/D12）三合一；三个量都是 4K 倍数故结果天然对齐。0 = 环满。
         std::uint64_t WindowAt(std::uint64_t pos) const noexcept;
+
+        // ---- P6M1 窗口写出三件套（Flush 与批路径共用同一套机械；级别 2/4 行为零变化）----
+        int32_t WriteWindowSpan();             // 仅写出窗口已用部分（AlignUp 对齐），不动任何状态
+        void    AdvanceAfterWrite() noexcept;  // 变体 Y 搬运 + 模环推进 + 重开窗（纯内存）
+        int32_t WriteOutWindow();              // = 写出 + 推进，无 fsync（批路径中段/末段用；
+                                               //   写失败状态不动，下一批同字节隐式重试 D25）
+
+        // ---- P6M1 提交组（同步档专用；协议与三不变量证明见 P6M1 稿 §3/§4）----
+        bool        PushWriter(WriterNode* n) noexcept;  // 入栈；返回"由空变非空"（当选判据原料）
+        WriterNode* DrainAll() noexcept;                 // 取批（仅在位者）：一次 exchange 全摘
+        int32_t     WaitResult(WriterNode& n) noexcept;  // 统一出口：防丢失唤醒四步循环（D21）
+        void        LeaderLoop();                        // S2L 在位循环 + S2X 卸任序列（D8/D10）
+        void        ProcessBatch(WriterNode* batch);     // 批处理：准入→编码→段写→条件 fsync
+                                                         // →单一失败出口→统一三步收尾
+
         // P5M6：第一遍普查——线性读全环、逐槽三分类（活/残/无效）、只采五标量不裁决。
         int32_t CensusScan(std::uint64_t covered_seq, RecoverCensus* out);
         // P5M5-D15：TRIM 空桩（回收成功后调；实施归 P7）。
@@ -127,7 +171,7 @@ namespace cabe {
         RawDevice      dev_;                    // 持有 WAL 设备（不走 IoBackend）
         std::byte*     cur_buf_  = nullptr;     // AllocAligned 缓冲，大小 = buf_size_
         std::size_t    buf_size_ = 0;           // 取整后的 wal_buffer_size（Open 定，4K 倍数）
-        std::uint64_t  cur_off_  = 0;           // 写尾 tail：当前窗口/当前块在设备上的起始偏移
+        std::uint64_t  cur_off_  = 0;           // 写尾 tail：当前窗口在设备上的起始偏移
         std::uint32_t  n_frames_ = 0;           // 当前窗口内已写帧数
         std::uint64_t  seq_next_ = 1;           // 下一帧的 seq（绕圈不重置，消歧靠它）
         const Options* opts_     = nullptr;     // 现读 wal_level / wal_buffer_size
@@ -136,6 +180,8 @@ namespace cabe {
         std::uint64_t  ring_end_   = 0;         // 环终点（开区间端点；Open 后只读）
         std::uint64_t  head_off_   = 0;         // 回收头：head 之前（模环）已回收可复用；仅 ReclaimUpTo 动
         std::size_t    window_bytes_ = 0;       // 当前窗口有效容量（开窗时算；0 = 环满，写入惰性重开）
+        // ---- P6M1 提交组共享原子（隔缓存行；窗口状态仅在位者可碰——钥匙制 I1）----
+        alignas(64) CommitGroup commit_;
     };
 
 } // namespace cabe

@@ -71,6 +71,12 @@ add_executable(test_wal wal/wal_test.cpp)
 target_link_libraries(test_wal PRIVATE cabe::engine cabe::wal GTest::gtest_main)
 gtest_discover_tests(test_wal DISCOVERY_TIMEOUT 60)
 
+# P6M1：WAL 提交组并发测试（需 WAL loop 设备；直驱 Wal，多线程 harness——
+# wal_test 守"单线程零退步"，本目标守"并发协议正确"，独立目标便于单独执行与调参）
+add_executable(test_wal_concurrency wal/wal_concurrency_test.cpp)
+target_link_libraries(test_wal_concurrency PRIVATE cabe::wal GTest::gtest_main)
+gtest_discover_tests(test_wal_concurrency DISCOVERY_TIMEOUT 60)
+
 # P5M4：快照测试（格式往返不需设备；端到端 / 触发需 3 个 loop 设备）
 add_executable(test_snapshot snapshot/snapshot_test.cpp)
 target_link_libraries(test_snapshot PRIVATE cabe::engine cabe::snapshot GTest::gtest_main)

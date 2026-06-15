@@ -204,6 +204,12 @@ WriteWal(entry)（级别 1）：
 
 同一个 4K 块在填满前最多被重写 32 次（每多一帧重写一次）。4K 写很便宜（~几十 μs），且 WAL 在独立设备上、与 1 MiB value 写互不抢盘;相对每次 Put 的 1 MiB value 写,WAL 的写放大可忽略。
 
+> **P6M1 起本节流程已超越**：同步档改走提交组——并发写者的帧由轮值 leader 合并成批，
+> 复用攒批档窗口机械段写、**批末一次 fdatasync**；`SyncCurrentBlock`（本节第 4 步的
+> 实现载体）与 `Append` 的块推进分支（第 1 步）退场。**单线程下逐调用语义与盘面字节
+> 等价**（每调用自成一批）；§5.4 的同字节重写撕裂安全论证原样适用于批路径的尾块续写。
+> 详见 `P6M1_commit_group_design.md` §5。
+
 ### 5.4 反复重写为何 torn-write 安全
 
 - 块内**已写过的帧内容不再改变**,每次重写写进旧帧扇区的是**完全相同的字节**;即便这次 4K 写断电撕裂,旧帧扇区要么是原字节、要么没被写到(仍是原字节)——**旧帧不变**。
@@ -275,7 +281,7 @@ namespace cabe {
 > （提前刷出不再留块尾空洞）。详见 `P5M5_wal_ring_design.md` §5~§7。
 
 要点：
-- **公共只有 `Open` / `WriteWal` / `Close` / `Flush`**；`Append`/`Sync` 私有。级别策略封装在 `WriteWal` 内部——M2 即"`Append` + `Sync`"（级别 1）；P5M3 按级别分支（同步档每帧落盘；攒批档只 `Append`、靠攒满/Close/切档收紧触发 `Flush()`，后台刷出推迟 P7）。
+- **公共只有 `Open` / `WriteWal` / `Close` / `Flush`**；`Append`/`Sync` 私有。级别策略封装在 `WriteWal` 内部——M2 即"`Append` + `Sync`"（级别 1）；P5M3 按级别分支（同步档每帧落盘；攒批档只 `Append`、靠攒满/Close/切档收紧触发 `Flush()`，后台刷出推迟 P7）。（P6M1 演进注：同步档分支改提交组路径——push + 当选裁决 + 批量落盘，公共接口与"落盘才返回"承诺不变；并发 `WriteWal` 自此受协议保护。）
 - **职责划分**：调用方给逻辑内容（type/key/block/value_crc/timestamp）；`Wal` 拥有 `seq`、帧 CRC、设备偏移、4K 块缓冲——`Engine` 看不到裸设备（满足 D2）。
 - **移动语义**：`DeviceContext` 会被 `std::move` 进 `devices_`，故 `Wal` 必须可移动且移动时置空源 `dev_`/`cur_buf_`，避免双重 close / 双重 free（与 `RawDevice`/`IoBackend` 同款）。
 - （备注）公共 `Flush()` 在 **P5M3** 新增（攒批档刷出 / 切档收紧 / Close 用）；M4 快照前"强制刷净 WAL 缓冲"复用它;M2 不需要(级别 1 每帧即落盘)。

@@ -23,6 +23,25 @@ namespace cabe {
         constexpr std::uint64_t BlockFloor(std::uint64_t off) noexcept {
             return (off / kWalBlockSize) * kWalBlockSize;
         }
+
+        // P6M1：提交组结果哨兵——正数与错误码空间（≤ 0）零冲突；永不逃出 WriteWal，
+        // 故不进 common/error_code.h（D5）。
+        inline constexpr int32_t kWalResultPending = 1;
+
+        // P6M1：LIFO 链反转成到达序（= 各 push CAS 在栈修改序中的先后，D11）。
+        // 链已被 DrainAll 全摘、离开共享世界（leader 独占），普通指针操作零并发。
+        // 模板化以触达 Wal 的私有嵌套节点类型（调用点在成员函数内，访问检查天然通过）。
+        template <typename Node>
+        Node* ReverseChain(Node* head) noexcept {
+            Node* prev = nullptr;
+            while (head != nullptr) {
+                Node* next = head->next;
+                head->next = prev;
+                prev = head;
+                head = next;
+            }
+            return prev;
+        }
     } // namespace
 
     WalFrame EncodeFrame(const WalEntry& e, std::uint64_t seq) {
@@ -64,6 +83,18 @@ namespace cabe {
         std::uint64_t max_valid_off = 0;
     };
 
+    // P6M1：提交组写者节点——每次 WriteWal（同步档）在调用者栈上构造一个，函数返回即消亡。
+    // 生命周期三期契约（共享期生产者禁返回 / leader 最后触碰 = result 的 release 写 /
+    // 回收期 leader 永不再碰）与 key 有效性三段论见 P6M1 稿 §3.2。
+    // result 兼任完成标志（> 0 哨兵 = 未完成；≤ 0 = 最终结果码），但它**不是** wait/notify
+    // 挂点——挂点是 commit_.epoch（生命周期与 Wal 等长），封死"notify 打在已亡栈帧"的
+    // 未定义行为（D3）。
+    struct Wal::WriterNode {
+        WalEntry              entry;                     // 原料值拷贝（~40B；key 字节仍在调用者内存）
+        WriterNode*           next = nullptr;            // 栈链；可见性由栈顶 CAS 的发布捎带（D4）
+        std::atomic<int32_t>  result{kWalResultPending}; // 结果槽兼完成标志
+    };
+
     Wal::~Wal() {
         if (cur_buf_ != nullptr) {
             RawDevice::FreeAligned(cur_buf_);
@@ -84,6 +115,17 @@ namespace cabe {
         , ring_end_(o.ring_end_)
         , head_off_(o.head_off_)
         , window_bytes_(o.window_bytes_) {
+        // P6M1（D5）：std::atomic 不可移动——手工 relaxed 搬运。合法前提是契约而非运气：
+        // Wal 的移动仅发生在 Open 编排期、提交组静止时（栈空、无人在位、无 waiter），断言钉死。
+        assert(o.commit_.stack_head.load(std::memory_order_relaxed) == nullptr
+               && !o.commit_.leader_active.load(std::memory_order_relaxed)
+               && "Wal 移动必须在提交组静止期（无并发写者）");
+        commit_.stack_head.store(
+            o.commit_.stack_head.load(std::memory_order_relaxed), std::memory_order_relaxed);
+        commit_.epoch.store(
+            o.commit_.epoch.load(std::memory_order_relaxed), std::memory_order_relaxed);
+        commit_.leader_active.store(
+            o.commit_.leader_active.load(std::memory_order_relaxed), std::memory_order_relaxed);
         o.cur_buf_ = nullptr;
     }
 
@@ -101,6 +143,16 @@ namespace cabe {
             ring_end_     = o.ring_end_;
             head_off_     = o.head_off_;
             window_bytes_ = o.window_bytes_;
+            // P6M1（D5）：同移动构造——静止期断言 + relaxed 手工搬运。
+            assert(o.commit_.stack_head.load(std::memory_order_relaxed) == nullptr
+                   && !o.commit_.leader_active.load(std::memory_order_relaxed)
+                   && "Wal 移动必须在提交组静止期（无并发写者）");
+            commit_.stack_head.store(
+                o.commit_.stack_head.load(std::memory_order_relaxed), std::memory_order_relaxed);
+            commit_.epoch.store(
+                o.commit_.epoch.load(std::memory_order_relaxed), std::memory_order_relaxed);
+            commit_.leader_active.store(
+                o.commit_.leader_active.load(std::memory_order_relaxed), std::memory_order_relaxed);
             o.cur_buf_ = nullptr;
         }
         return *this;
@@ -469,28 +521,41 @@ namespace cabe {
     }
 
     int32_t Wal::WriteWal(const WalEntry& e) {
+        // P6M1 入口检查三分（D13）：下面两项是"预检"——纯函数 + 装置态守卫，留在生产者侧、
+        // push 之前（非法请求不进栈）；窗口准入（window_bytes_/WindowAt）已迁入 leader 批内。
         if (e.key.size() > kWalKeyMax) return err::kWalKeyTooLong;
         if (cur_buf_ == nullptr) {
             // WAL 未打开，或 recover 模式下 Recover 尚未执行（P5M6 时序防御：Engine 编排保证
-            // Open → Recover → 写；本守卫兜住编程错误）——拒绝写入，避免空指针解引用。
+            // Open → Recover → 写；本守卫兜住编程错误）。cur_buf_ 装置期定死、运行期只读，
+            // 生产者无同步读取安全（与移动语义同款"静止期"论证，D13）。
             CABE_LOG_ERROR("WAL 缓冲未就绪（未打开或恢复未完成），拒绝写入");
             return err::kWalWriteFailed;
         }
+
+        if (sync_level()) {
+            // 同步档（级别 1/3），P6M1 提交组：入栈 → 当选裁决 → 在位干活或挂起等待。
+            // 多写者并发安全；返回时本帧已持久——批末 fdatasync 程序序先行于 result 回填
+            // （release），调用者 acquire 读到结果即接通"落盘先行于返回"（D23）。
+            WriterNode node{e};                              // 原料值拷贝（D2）
+            if (PushWriter(&node) &&                         // 仅"由空变非空"责任人试当选（D7）
+                !commit_.leader_active.exchange(true, std::memory_order_seq_cst)) {
+                LeaderLoop();
+                // 终值保证（D10）：能当选 ⇒ 前任已回填完毕才让位 ⇒ 此刻自己的结果必为终值。
+                // Debug 钉死；Release 下若被未来改动破坏，表现为 WaitResult 挂起（可排查），
+                // 而非返回垃圾值。
+                assert(node.result.load(std::memory_order_acquire) != kWalResultPending
+                       && "leader 出口结果必须已是终值");
+            }
+            return WaitResult(node);                         // 统一出口（D23）：两角色同道离场
+        }
+
+        // 攒批档（级别 2/4）：原路径零改动（单线程契约持续，并发化归 P7，P6-D7/D9）。
         // P5M5 满态惰性重开窗（D12）：回收之后空间恢复，这里自然通过；仍为 0 才对外报满。
-        // 两档共用：同步档写"当前块"同样要求窗口覆盖——否则推进停在保留块上时会破坏恒留一块。
         if (window_bytes_ == 0) {
             window_bytes_ = static_cast<std::size_t>(WindowAt(cur_off_));
             if (window_bytes_ == 0) return err::kWalFull;
         }
-
-        if (sync_level()) {
-            // 同步档（级别 1/3）：每帧整块落盘，落盘成功才返回。
-            int32_t rc = Append(e);
-            if (rc != err::kSuccess) return rc;
-            return SyncCurrentBlock();
-        }
-
-        // 攒批档（级别 2/4）。先清滞留：上次 Flush 失败时窗口内容原样留存，
+        // 先清滞留：上次 Flush 失败时窗口内容原样留存，
         // 不先刷出就 Append 会越窗写（窗口 < 缓冲时还可能越缓冲）。
         if (static_cast<std::size_t>(n_frames_) * kWalFrameSize >= window_bytes_) {
             int32_t rc = Flush();
@@ -506,66 +571,183 @@ namespace cabe {
         return err::kSuccess;
     }
 
+    // ================================================================
+    // P6M1 提交组（同步档专用）。协议、内存序与 I1/I2/I3 三证明见
+    // doc/P6/P6M1_commit_group_design.md §3/§4；此处注释只标决策号。
+    // ================================================================
+
+    bool Wal::PushWriter(WriterNode* n) noexcept {
+        WriterNode* old = commit_.stack_head.load(std::memory_order_relaxed);
+        do {
+            n->next = old;
+        } while (!commit_.stack_head.compare_exchange_weak(
+                     old, n,
+                     std::memory_order_seq_cst,     // 成功：发布节点内容（蕴含 release）+
+                                                    //   参与全序 S（Dekker 腿 1 的"写"，D9）
+                     std::memory_order_relaxed));   // 失败：只为拿新栈顶重试，不解引用
+        return old == nullptr;   // "由空变非空" = 本轮栈生命周期的唯一当选责任人（D7）
+    }
+
+    Wal::WriterNode* Wal::DrainAll() noexcept {
+        // 破坏性全摘：链整条离栈——消费端无比较故无 ABA；节点归调用者栈所有故无回收问题；
+        // acquire 经 RMW 释放序列与全体 push 的发布同步，链上内容完整可见（D4）。
+        return commit_.stack_head.exchange(nullptr, std::memory_order_acquire);
+    }
+
+    int32_t Wal::WaitResult(WriterNode& node) noexcept {
+        // 防丢失唤醒四步（D21）：查结果 → 拍纪元快照 → 再查（纯性能优化，省一次注定空跑的
+        // futex 往返；非正确性必需）→ wait(e) 条件入睡（纪元已变则拒睡——封死"唤醒先于
+        // 入睡且其后再无唤醒"的卡死时序）。被别批的 notify_all 误醒 = 虚假唤醒，循环消化。
+        for (;;) {
+            int32_t r = node.result.load(std::memory_order_acquire);
+            if (r != kWalResultPending) return r;
+            const std::uint64_t e = commit_.epoch.load(std::memory_order_acquire);
+            r = node.result.load(std::memory_order_acquire);
+            if (r != kWalResultPending) return r;
+            commit_.epoch.wait(e, std::memory_order_acquire);
+        }
+    }
+
+    void Wal::LeaderLoop() {
+        // 进入前提：刚以 exchange 取得在位标志（钥匙，I1）——窗口状态/缓冲/盘面自此独占。
+        // 跨任期的窗口状态可见性由标志捎带：前任卸任 store 的 release 面发布、本任当选
+        // exchange 的 acquire 面承接（D9"交接棒"条款；seq_cst 自含，两操作永不得降级）。
+        for (;;) {
+            for (;;) {   // ---- S2L 在位循环（D10）----
+                WriterNode* batch = DrainAll();
+                if (batch != nullptr) {
+                    ProcessBatch(ReverseChain(batch));
+                }
+                // 空批容忍：自己的节点可能已被前任的连任循环处理（终值保证见 WriteWal 注）。
+                // 连任复查用 acquire（性能口，允许漏看）——漏看只会提前进卸任序列，
+                // 由其 seq_cst 复查兜底（D9 安全网分工）。连任无上限（D12）。
+                if (commit_.stack_head.load(std::memory_order_acquire) == nullptr) break;
+            }
+            // ---- S2X 卸任序列（D8）：让位 → 复查 → 条件再任职；次序不可交换 ----
+            // ②①交换的反例：先复查（空）后让位的缝隙里，新写者完成"push + 当选失败"全套
+            // 而无人知晓 → 永久遗弃。正序下两操作同落一个原子，必有先后，两分支皆有人兜底。
+            commit_.leader_active.store(false, std::memory_order_seq_cst);           // ①
+            if (commit_.stack_head.load(std::memory_order_seq_cst) == nullptr) {     // ②
+                return;   // 无活，离场
+            }
+            if (commit_.leader_active.exchange(true, std::memory_order_seq_cst)) {   // ③
+                return;   // 他人已接班：其 S2L 首动作 = DrainAll 全摘，现存节点必被覆盖，安心离场
+            }
+            // ③ 抢回成功 → 连任，回 S2L（无钥匙不得取批——直接 DrainAll 即双写者，违 I1）
+        }
+    }
+
+    void Wal::ProcessBatch(WriterNode* batch) {
+        // 批处理（仅在位者执行）。控制流 = 逐帧[统一准入 → Append] → 末段写出 → 条件
+        // fdatasync → 单一失败出口 → 统一三步收尾。结果映射矩阵与状态语义见设计稿 §8。
+        bool        wrote   = false;            // 本批是否发生过段写出（条件 fsync，D19）
+        bool        dirty   = false;            // 缓冲中是否有本批新增、尚未写出的帧
+        int32_t     fail_rc = err::kSuccess;    // 首个失败根因（kWalFull / kWalWriteFailed）
+        WriterNode* first_rejected = nullptr;   // 首个未被处理的节点（后缀起点）
+
+        for (WriterNode* n = batch; n != nullptr; n = n->next) {
+            // ---- 统一准入（一帧空间；两条进墙路径必须收在同一处，设计 §5.2）----
+            if (window_bytes_ == 0) {
+                // 路径甲：满态惰性重开（P5M5-D12 语义原样，执行位置迁入 leader，D13）。
+                window_bytes_ = static_cast<std::size_t>(WindowAt(cur_off_));
+                if (window_bytes_ == 0) { fail_rc = err::kWalFull; first_rejected = n; break; }
+            }
+            if (static_cast<std::size_t>(n_frames_) * kWalFrameSize >= window_bytes_) {
+                // 路径乙：窗口攒满 → 中段写出（无 fsync；必为整块，搬运量恒 0，D14）。
+                int32_t rc = WriteOutWindow();
+                if (rc != err::kSuccess) {
+                    // 写失败：状态未动、帧滞留缓冲（下一批同字节隐式重试，D25）；
+                    // 立即停止推进，不带伤继续（D16）。
+                    fail_rc = rc; first_rejected = n; break;
+                }
+                wrote = true;
+                dirty = false;
+                if (window_bytes_ == 0) { fail_rc = err::kWalFull; first_rejected = n; break; }
+            }
+            int32_t rc = Append(n->entry);       // seq 单点分配在此（D13：代码不动，资格改由 I1 保证）
+            if (rc != err::kSuccess) { fail_rc = rc; first_rejected = n; break; }
+            dirty = true;
+        }
+        // 撞墙时 dirty 必为 false（结构性质 D19：撞墙仅现于开窗关口，每个关口前缓冲刚被
+        // 清空或本批尚未产出帧）——故 kWalFull 分支天然没有"末段补写"。
+
+        // ---- 收尾：末段写出 + 条件 fsync → 定前缀/后缀结果 ----
+        int32_t prefix_rc;
+        if (fail_rc != err::kSuccess && fail_rc != err::kWalFull) {
+            prefix_rc = fail_rc;                 // 写失败：根因码给全员、不再碰盘（D24）
+        } else {
+            int32_t rc = err::kSuccess;
+            if (dirty) {
+                rc = WriteOutWindow();           // 末段写出（变体 Y 搬运仅可能在此发生，D14）
+                if (rc == err::kSuccess) wrote = true;
+            }
+            if (rc == err::kSuccess && wrote) {
+                // 批末唯一 fdatasync——覆盖本批全部段写（O_DIRECT ≠ 持久；块设备 Flush
+                // 命令覆盖此前所有已完成写，D16）。零写出批（批首撞墙）无需 fsync。
+                if (dev_.Sync() != err::kSuccess) {
+                    CABE_LOG_ERROR("WAL 批末 fdatasync 失败（整批改判）");
+                    rc = err::kWalWriteFailed;   // 状态保持推进、不回滚——字节已在设备上，
+                                                 // 后续批的成功 fsync 顺带确认（幽灵写口径，D25）
+                }
+            }
+            prefix_rc = (rc == err::kSuccess) ? err::kSuccess : err::kWalWriteFailed;
+        }
+        // 后缀：撞墙批维持 kWalFull 不被前缀的写失败株连（该码对其准确且保留"重试即可"，
+        // D19）；写失败批与前缀同码（根因描述失败本身，不描述节点个体处境，D24）。
+        const int32_t suffix_rc = (fail_rc == err::kWalFull) ? err::kWalFull : prefix_rc;
+
+        // ---- 统一三步收尾（D22；次序即正确性）：回填(release) → 纪元递增(release) → 广播 ----
+        // ①先于②：follower 凭新纪元信任结果为终值的 release 链；②先于③："先改值后通知"
+        // 铁律。最后触碰条款（D3）：store 即 leader 对该节点的最后访问——next 必须先取，
+        // 因为主人可经 WaitResult 第三步轮询到结果、在纪元递增前就离场，节点随之消亡。
+        bool in_suffix = false;
+        for (WriterNode* m = batch; m != nullptr; ) {
+            if (m == first_rejected) in_suffix = true;
+            WriterNode* next = m->next;
+            m->result.store(in_suffix ? suffix_rc : prefix_rc, std::memory_order_release);
+            m = next;
+        }
+        commit_.epoch.fetch_add(1, std::memory_order_release);
+        commit_.epoch.notify_all();   // notify_one 需链式接力被否决；惊群账见设计稿 §9.2（D22）
+    }
+
     int32_t Wal::Append(const WalEntry& e) {
         if (cur_buf_ == nullptr) {
             CABE_LOG_ERROR("WAL 缓冲未就绪，拒绝 Append");
             return err::kWalWriteFailed;
         }
-        if (sync_level() && n_frames_ == kWalFramesPerBlock) {
-            // 同步档块满：模环推进到下一块（D2）。先在【新起点】做空间准入（D12）——
-            // WindowAt == 0 ⇔ 连一块都进不去 ⇔ 环满。失败时帧未编码、seq 未耗，干净拒绝。
-            const std::uint64_t next0 = cur_off_ + kWalBlockSize;
-            assert(next0 <= ring_end_ && "块推进越过环尾——几何不变量被破坏");
-            const std::uint64_t next = (next0 == ring_end_) ? ring_start_ : next0;
-            const std::uint64_t w = WindowAt(next);
-            if (w == 0) return err::kWalFull;
-            cur_off_      = next;
-            window_bytes_ = static_cast<std::size_t>(w);
-            n_frames_     = 0;
-            std::memset(cur_buf_, 0, kWalBlockSize);
-        }
+        // P6M1（D15）：纯"编码 + 拷贝 + 计数"。同步档块推进分支已删——窗口准入统一由
+        // 调用方（攒批档 WriteWal / 提交组 ProcessBatch）在 Append 之前完成；攒批档
+        // 从未走过被删分支，删除对级别 2/4 零影响。
         const WalFrame f = EncodeFrame(e, seq_next_++);
         std::memcpy(cur_buf_ + static_cast<std::size_t>(n_frames_) * kWalFrameSize, &f, kWalFrameSize);
         ++n_frames_;
         return err::kSuccess;
     }
 
-    int32_t Wal::SyncCurrentBlock() {
-        // 同步档：整块写当前 4K 块 + fdatasync。块内已写帧每次以相同字节重写，对不完整写入安全。
-        if (dev_.WriteAt(cur_off_, cur_buf_, kWalBlockSize) != err::kSuccess) {
-            CABE_LOG_ERROR("WAL 写失败: off=%llu", static_cast<unsigned long long>(cur_off_));
-            return err::kWalWriteFailed;
-        }
-        if (dev_.Sync() != err::kSuccess) {
-            CABE_LOG_ERROR("WAL fdatasync 失败: off=%llu", static_cast<unsigned long long>(cur_off_));
+    // ================================================================
+    // P6M1 窗口写出三件套（D14）：Flush 与提交组批路径共用同一套机械——
+    // 两档缓冲表示法归一，差异收窄为 fsync 时机 + 返回时机两个策略（D15）。
+    // ================================================================
+
+    int32_t Wal::WriteWindowSpan() {
+        // 仅写出窗口已用部分（4K 对齐补零），不动任何状态——失败时帧滞留缓冲原样重试。
+        const std::size_t used  = static_cast<std::size_t>(n_frames_) * kWalFrameSize;
+        const std::size_t bytes = util::AlignUp(used, kWalBlockSize);
+        assert(bytes <= ring_end_ - cur_off_ && "刷出越过环尾——窗口不跨缝不变量被破坏");
+        if (dev_.WriteAt(cur_off_, cur_buf_, bytes) != err::kSuccess) {
+            CABE_LOG_ERROR("WAL 窗口写出失败: off=%llu bytes=%zu",
+                           static_cast<unsigned long long>(cur_off_), bytes);
             return err::kWalWriteFailed;
         }
         return err::kSuccess;
     }
 
-    int32_t Wal::Flush() {
-        if (cur_buf_ == nullptr) return err::kSuccess;   // 未打开/恢复未完成：无待刷，空操作
-        if (sync_level())        return err::kSuccess;   // 同步档：每帧已落盘
-        if (n_frames_ == 0)      return err::kSuccess;   // 攒批档但缓冲空
-
-        // 攒批档：把已用部分按 4K 对齐一次性写出 + fdatasync（持久性与 M3 相同）。
-        // 失败不动任何状态——内容滞留缓冲，下次原样重试（WriteWal 入口的清滞留逻辑接手）。
-        const std::size_t used  = static_cast<std::size_t>(n_frames_) * kWalFrameSize;
-        const std::size_t bytes = util::AlignUp(used, kWalBlockSize);
-        assert(bytes <= ring_end_ - cur_off_ && "刷出越过环尾——窗口不跨缝不变量被破坏");
-        if (dev_.WriteAt(cur_off_, cur_buf_, bytes) != err::kSuccess) {
-            CABE_LOG_ERROR("WAL 攒批刷出失败: off=%llu bytes=%zu",
-                           static_cast<unsigned long long>(cur_off_), bytes);
-            return err::kWalWriteFailed;
-        }
-        if (dev_.Sync() != err::kSuccess) {
-            CABE_LOG_ERROR("WAL fdatasync 失败: off=%llu", static_cast<unsigned long long>(cur_off_));
-            return err::kWalWriteFailed;
-        }
-
+    void Wal::AdvanceAfterWrite() noexcept {
         // P5M5 变体 Y（D6）："整块推进、半块留窗"——半块帧挪到缓冲头续攒，下次整块同字节重写
         //   （M2 撕裂安全模式）；提前刷出不再留块尾空洞，活区间内帧紧凑连续（不变量③）。
-        //   攒满刷出时 used 恰为整块（窗口是 4K 倍数）→ partial=0，自动退化为纯推进。
+        //   攒满/中段写出时 used 恰为整块（窗口是 4K 倍数）→ partial=0，自动退化为纯推进。
+        const std::size_t used    = static_cast<std::size_t>(n_frames_) * kWalFrameSize;
         const std::size_t partial = used % kWalBlockSize;   // 留窗字节（< 4K）
         const std::size_t advance = used - partial;         // 整块推进量
         if (advance > 0) {
@@ -578,6 +760,37 @@ namespace cabe {
         // 重开窗（截短 + 准入；可能为 0 = 满——下次写入走惰性重开/报满，D12）。
         window_bytes_ = static_cast<std::size_t>(WindowAt(cur_off_));
         // 注：连续两次快照之间无新帧时，留窗块会被同字节重写一遍——幂等无害，不加脏标记（原型最简）。
+    }
+
+    int32_t Wal::WriteOutWindow() {
+        // P6M1 批路径段写：写出 + 推进，**无 fsync**——持久化由批末统一 fdatasync 覆盖
+        // （D16 覆盖论证：块设备 Flush 命令覆盖此前所有已完成写）。
+        // 写失败不动任何状态——帧滞留缓冲，下一批准入时同偏移同字节隐式重试（D25）。
+        if (n_frames_ == 0) return err::kSuccess;   // 空窗（批末可空；fsync 条件由调用方管）
+        int32_t rc = WriteWindowSpan();
+        if (rc != err::kSuccess) return rc;
+        AdvanceAfterWrite();
+        return err::kSuccess;
+    }
+
+    int32_t Wal::Flush() {
+        if (cur_buf_ == nullptr) return err::kSuccess;   // 未打开/恢复未完成：无待刷，空操作
+        if (sync_level())        return err::kSuccess;   // 同步档：每批已落盘（P6M1 后欠账恒为
+                                                         // 零——已分配 seq 的帧皆持久，留窗帧
+                                                         // 只是盘上字节的副本，见 P5M3 §6.5 注）
+        if (n_frames_ == 0)      return err::kSuccess;   // 攒批档但缓冲空
+
+        // 攒批档语义逐字保持（P5M5）：写出 → fdatasync → **才**推进；任一步失败状态不动、
+        // 内容滞留缓冲、下次原样重试（WriteWal 入口的清滞留逻辑接手）。
+        // 与批路径"推进先于 fsync"的次序不对称是有意的（设计 §8.2 辩护）：攒批档帧主人
+        // 在入缓冲时已被告知成功，Wal 欠其"确认持久才推进"；同步档批路径欠账为零。
+        int32_t rc = WriteWindowSpan();
+        if (rc != err::kSuccess) return rc;
+        if (dev_.Sync() != err::kSuccess) {
+            CABE_LOG_ERROR("WAL fdatasync 失败: off=%llu", static_cast<unsigned long long>(cur_off_));
+            return err::kWalWriteFailed;
+        }
+        AdvanceAfterWrite();
         return err::kSuccess;
     }
 
