@@ -1,7 +1,7 @@
 # Cabe P0-M5 设计：测试与 bench 框架接入 + util/common 覆盖
 
 > 本里程碑接入 GTest（单元测试）与 google-benchmark（微基准），把 M1–M4 的工具库 / schema /
-> 错误码 / 日志的行为用正式用例覆盖（行覆盖率 ≥ 80%），并把一路 smoke 验证过的结论（CRC32C
+> 错误码 / 日志的行为用正式用例覆盖（行覆盖率 ≥ 80%），并把一路冒烟验证过的结论（CRC32C
 > 已知向量、`Hash("")` 基准、`BlockId` 编解码、段位不重叠、日志格式/过滤、hash 分布）固化下来。
 > **本文为详细设计，暂不生成代码**；其中 C++/CMake 片段均为设计示意。
 
@@ -48,7 +48,7 @@
 
 - **M1 已留接入缝**：根 `CMakeLists.txt` 有 `enable_testing()`、`option(CABE_BUILD_TESTS …)`/`CABE_BUILD_BENCH`、以及 `if(CABE_BUILD_TESTS AND EXISTS test/CMakeLists.txt) add_subdirectory(test)` 守卫。M5 只需创建 `test/`、`bench/` 子目录内容，根 CMake **无需改动**（除覆盖率选项）。
 - **依赖已装**：`scripts/setup-dev.sh` 的 `REQUIRED_PKGS` 含 `gtest-devel`、`gmock-devel`、`google-benchmark-devel` → `find_package` 可命中系统库；`FetchContent` 仅作无系统库（如精简 CI）时兜底。
-- **被测对象 + 已有 smoke 结论可固化**：
+- **被测对象 + 已有冒烟结论可固化**：
   | 模块 | 一路验证过、可固化的结论 |
   |---|---|
   | `util/crc32` | CRC32C("123456789")=`0xE3069283`；空输入边界 |
@@ -69,7 +69,7 @@
 | 维度 | 内容 |
 |---|---|
 | 裁决 | 与 ROADMAP 一致：`find_package(GTest)`/`find_package(benchmark)` 优先（系统库，`setup-dev.sh` 已装）；未命中则 `FetchContent` 拉取**钉死 tag**（建议 GTest `v1.15.2`、benchmark `v1.9.x`） |
-| 与 M4 vendored 的区别 | 测试/基准工具**不影响产品正确性与冻结**，故用系统库 + 兜底即可，不必 vendoring；与 hash（必须冻结）的取舍不同 |
+| 与 M4 内嵌的区别 | 测试/基准工具**不影响产品正确性与冻结**，故用系统库 + 兜底即可，不必内嵌；与 hash（必须冻结）的取舍不同 |
 | 状态 | 建议采纳（ROADMAP 指定；仅 FetchContent tag 待定） |
 
 ### 决策-2（核心）：为可测性给 crc32 / logger 开「测试钩子」
@@ -168,12 +168,12 @@ bench/
 | `util/crc32_test` | 已知向量 `CRC32C("123456789")==0xE3069283`；空 buffer（`size()==0`）；**软/硬一致性**：随机 buffer 上 `detail::Software==detail::Hardware`（仅当 `cpu::HasSSE42()`，否则跳过硬件，见 §7） |
 | `util/hash_test` | 冻结基线 `Hash("")==0x2D06800538D394C2` 等若干钉死值；`Hash(DataView)==Hash(string_view)` 一致；100K 随机 key 分布卡方 < 临界；`RouteToDevice` 值域 `[0,N)` |
 | `util/util_test` | `GetMonotonicTimeNs` 单调不减；`GetWallTimeNs`/`GetMonotonicTimeNs` 语义（两次调用差为正、量级合理） |
-| `util/cpu_features_test` | smoke：`GetArch()` 返回非崩溃值；`HasSSE42/HasAVX2/HasARMCRC` 可调用且自洽（x86 上多次调用一致） |
+| `util/cpu_features_test` | 冒烟：`GetArch()` 返回非崩溃值；`HasSSE42/HasAVX2/HasARMCRC` 可调用且自洽（x86 上多次调用一致） |
 | `common/structs_test` | `BlockId::Make(d,i)` 往返 `dev()==d`/`block_idx()==i`/`logical_byte_offset()==i*kValueSize`（安全区 i）；`sizeof(BlockId)==8`、`sizeof(ValueMeta)==24`、`alignof==8`（运行时再确认）；`ValueMeta{}` 全零、`reserved` 为 0；`ValueState` 取值；`<=>` 比较 |
 | `common/error_code_test` | 段基址数值、相邻段不重叠（运行时验证 `static_assert` 同款关系）；memory 段取值 `kMemNullPointer==-100000`… |
 | `common/logger_test` | 捕获 stderr 验格式 `^\[WARN\]\[\d+\]\[logger_test.cpp:\d+\] …$`；**级别过滤**：注入阈值后 DEBUG 被过滤、ERROR 输出（依赖 §7 钩子）；非变参与变参两种调用 |
 
-> 用例把"现状盘点"里所有 smoke 结论变成可回归的断言，尤其 `Hash("")` 与 CRC32C 向量是**冻结守护**（防 M4 vendored 升级 / crc32 改动悄悄改变输出）。
+> 用例把"现状盘点"里所有冒烟结论变成可回归的断言，尤其 `Hash("")` 与 CRC32C 向量是**冻结守护**（防 M4 内嵌升级 / crc32 改动悄悄改变输出）。
 
 ---
 
@@ -216,11 +216,11 @@ bench/
 
 | # | 决策 | 备选 | 理由 | 状态 |
 |---|---|---|---|---|
-| M5-D1 | GTest/benchmark：`find_package` 优先 + `FetchContent` 兜底（钉死 tag） | 仅系统库 / 仅 FetchContent / vendoring | 与 ROADMAP 一致；测试工具不需冻结，无需 vendoring | 建议采纳 |
+| M5-D1 | GTest/benchmark：`find_package` 优先 + `FetchContent` 兜底（钉死 tag） | 仅系统库 / 仅 FetchContent / 内嵌 | 与 ROADMAP 一致；测试工具不需冻结，无需内嵌 | 建议采纳 |
 | M5-D2 | 为 crc32/logger 开 `detail` 测试钩子 | `#include .cpp` / 子进程 / 不测 | 触达被封装内部以覆盖 ROADMAP 明列项；钩子限 `detail`、外溢最小 | **待终审**（§3 决策-2） |
 | M5-D3 | 覆盖率双轨（gcov/llvm-cov）+ `CABE_COVERAGE` 选项 + ≥80% | 单工具链 / 不设门槛 | 双工具链对称；选项隔离插桩；ROADMAP 定 80% | 锁定 |
 | M5-D4 | 每模块一个测试可执行 + `gtest_discover_tests` | 单一大可执行 | 隔离、并行、定位清晰；`ctest` 自动注册 | 锁定 |
-| M5-D5 | 冻结值（`Hash("")`、CRC32C 向量）写成断言常量 | 不固化 | 守护 D6 冻结 / 防 vendored 升级悄改输出 | 锁定 |
+| M5-D5 | 冻结值（`Hash("")`、CRC32C 向量）写成断言常量 | 不固化 | 守护 D6 冻结 / 防内嵌升级悄改输出 | 锁定 |
 | M5-D6 | `test/`、`bench/` 分 `util`/`common` 子目录 | 平铺 | 与 ROADMAP 目录约定一致 | 锁定 |
 
 ---
@@ -234,7 +234,7 @@ bench/
 | crc32：已知向量 / 软硬一致 / 空边界 | §6 / §7.1 | ✅（软硬一致依赖 M5-D2） |
 | hash：已知向量 / 分布 / 跨平台稳定 | §6（冻结基线 + 卡方） | ✅ |
 | util：时间戳单调 / 语义 | §6 | ✅ |
-| cpu_features：smoke | §6 | ✅ |
+| cpu_features：冒烟 | §6 | ✅ |
 | structs：BlockId 往返 / ValueMeta 对齐 / enum | §6 | ✅ |
 | error_code：段位不重叠 | §6 | ✅ |
 | logger：级别过滤 / 格式 | §6 / §7.2 | ✅（级别过滤依赖 M5-D2） |
@@ -255,7 +255,7 @@ bench/
 
 ---
 
-## 12. 退出条件（DoD）与验证步骤
+## 12. 退出条件与验证步骤
 
 1. `-DCABE_BUILD_TESTS=ON` 下，GCC 15 / Clang 20 双工具链构建出全部测试可执行；`ctest` **全绿**。
 2. `-DCABE_BUILD_BENCH=ON` 下，bench 可执行可构建并运行（数值不作门槛，归档在 M7）。

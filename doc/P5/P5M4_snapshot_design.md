@@ -34,7 +34,7 @@
 4. **写一份快照**：遍历内存索引（`ForEach`）→ 过一块临时缓冲流式写非活跃槽 → 写槽头 → 一次 `fdatasync`。
 5. **双缓冲选新 + 崩溃安全**：写非恢复槽、保好覆坏；靠**代际号 + 双 CRC** 做原子切换，任一崩溃点旧快照完好。
 6. **与 WAL 衔接**：每份快照记录 `covered_seq`（覆盖到的最大 WAL `seq`），作为 M5/M6 的唯一契约。
-7. **触发**：手动 `Engine::Snapshot()`（同步、返回结果）+ 大小阈值（自动、fire-and-forget）；汇总到一个 `RequestSnapshot()` 入口。
+7. **触发**：手动 `Engine::Snapshot()`（同步、返回结果）+ 大小阈值（自动、发后不管）；汇总到一个 `RequestSnapshot()` 入口。
 8. **部署期容量约束**：Open 时校验快照设备 / WAL 设备容量；不足拒绝打开。
 
 ### 1.2 交付范围
@@ -96,7 +96,7 @@
 | **P5M4-D9** | 落盘机制 | 每次快照**临时 `AllocAligned`** 一块 `snapshot_buffer_size`（默认 1 MiB、Options 可改、**不进池**、4K 对齐），攒满整块写、末尾补零到 4K、**全程一次 `fdatasync`** |
 | **P5M4-D10** | `covered_seq` | M4 = `wal.last_seq()`（单线程下"已分配 = 已提交"）；**绝不报大**；`DoSnapshot` 顺序 **先 `Flush()` → 取 `covered_seq` → 写快照**；P7 须换"已提交水位" |
 | **P5M4-D11** | 模块 + 接口 | 新建 `snapshot/`（平级 `wal`/`io`）；`Snapshot` 类持设备句柄，**回调解耦**（不认识索引后端）；`MetaIndex` concept **收窄**：删 `WriteSnapshot`/`LoadSnapshot`，`ForEach` 改返回 `int32_t` 可中止 |
-| **P5M4-D12** | 触发 | 手动 `Engine::Snapshot()`（**同步、返回结果**）+ 大小阈值（**自动、fire-and-forget**：不连累 Put、出错记日志）；汇总入口 `RequestSnapshot()`；失败退避（`last_trigger_seq`）；**定时 → P7** |
+| **P5M4-D12** | 触发 | 手动 `Engine::Snapshot()`（**同步、返回结果**）+ 大小阈值（**自动、发后不管**：不连累 Put、出错记日志）；汇总入口 `RequestSnapshot()`；失败退避（`last_trigger_seq`）；**定时 → P7** |
 | **P5M4-D13** | 容量约束 | **部署 Open 时校验、运行期不查**；快照设备 `slot_size ≥ 槽头 + ⌈block_count×128⌉₄ₖ`，WAL 设备 `≥ 阈值×2`；不足返回 `kDeviceTooSmall`。（P5M5 细化：WAL 侧落地为 `ring_size ≥ max(阈值×2, wal_buffer_size + 4K)`，见 §11 注） |
 | **P5M4-D14** | 一致性模型 | M4 = **冻结写者的一致快照**（单线程下"冻结"为语义占位、不上真锁）；模糊/无锁一致快照 → P7 + B+树（结构相关、下沉后端） |
 | **P5M4-D15** | 改动面 | 新建 `snapshot/`（3 文件）+ `test/snapshot/` + `test/common/test_env.h`；改 9 处现有文件（含 `util/crc32` 流式 CRC、`util/util.h` 缓冲规整）+ 3 个测试文件收敛 `GetEnv`；新增 2 个错误码（实装对账后的最终口径，见 §1.2/§12） |
@@ -380,10 +380,10 @@ private:
 | 触发源 | 里程碑 | 契约 |
 |---|---|---|
 | **手动 `Engine::Snapshot()`** | M4 | **语义 + 实现都同步**——做完返回成败（测试 + 手动刷用）；不走自动入口。recover 模式（M4 未打开快照设备）返回 `kEngineNotImplemented`（恢复编排在 M6），与自动路径的 `is_open` 守卫对称 |
-| **大小阈值**（`snapshot_threshold_bytes`） | M4 | **语义 = fire-and-forget**（不返回结果、不让 Put 因快照失败而失败、出错记日志）；实现 = 同步内联（M4 限制） |
+| **大小阈值**（`snapshot_threshold_bytes`） | M4 | **语义 = 发后不管**（不返回结果、不让 Put 因快照失败而失败、出错记日志）；实现 = 同步内联（M4 限制） |
 | **定时**（`snapshot_interval_sec`） | **P7** | 定时要后台线程；P7 后台快照的一部分 |
 
-**汇总入口 `RequestSnapshot()`**：三个触发源（手动除外，手动直调）都汇到这一个内部入口。M4 里它**同步执行** `DoSnapshot`、出错记日志（fire-and-forget）；P7 只改它内部为"唤醒快照线程"。**抽象（入口）现在立好，机器（线程、并发合并）留 P7**，不造死代码。P7 加定时，就是给这个入口多接一个调用方。
+**汇总入口 `RequestSnapshot()`**：三个触发源（手动除外，手动直调）都汇到这一个内部入口。M4 里它**同步执行** `DoSnapshot`、出错记日志（发后不管）；P7 只改它内部为"唤醒快照线程"。**抽象（入口）现在立好，机器（线程、并发合并）留 P7**，不造死代码。P7 加定时，就是给这个入口多接一个调用方。
 
 ### 10.2 大小阈值的度量与触发点
 
@@ -391,7 +391,7 @@ private:
 - **触发点**：在 `Put`/`Delete` **成功收尾处**（`return Ok` 前，只成功路径，二者都查），抽成 `MaybeRequestSnapshot(dc)`，每次写按设备同步查（检查仅两整数相减一比较，极便宜）。
 - **三层调用链**：
   ```
-  MaybeRequestSnapshot(dc)  →  RequestSnapshot(dc)[自动 fire-and-forget]  →  DoSnapshot(dc)[真活，共用]
+  MaybeRequestSnapshot(dc)  →  RequestSnapshot(dc)[自动发后不管]  →  DoSnapshot(dc)[真活，共用]
   Engine::Snapshot()  ─────────────────────────────────────────────────→  DoSnapshot(dc)[手动，返回结果]
   ```
 - **`covered_seq` = 触发它那次写的 `seq`**（单线程下从检查到取序号无别的写插入）。
@@ -500,7 +500,7 @@ WAL 设备   部署建议：   SizeBytes ≥ snapshot_threshold_bytes × 2~3
 2. 快照设备布局：8K 双份超级块 + 对半切 A/B 两槽；Open 算 A/B 布局常驻 + 容量校验（不足 `kDeviceTooSmall`）。
 3. 写流程：遍历索引 → 1 MiB 临时缓冲流式写非活跃槽 → 数据→槽头→一次 `fdatasync`；`covered_seq` 记入槽头（先 `Flush()` 再取 `last_seq()`）。
 4. 双缓冲：代际号取号/续号；写非恢复槽、保好覆坏；读时选槽 + 回退逻辑（灌索引留 M6）。
-5. 触发：手动 `Engine::Snapshot()`（同步返结果）+ 大小阈值（自动 fire-and-forget、退避）汇到 `RequestSnapshot`；定时留 P7。
+5. 触发：手动 `Engine::Snapshot()`（同步返结果）+ 大小阈值（自动发后不管、退避）汇到 `RequestSnapshot`；定时留 P7。
 6. `MetaIndex` 收窄：移除 `WriteSnapshot`/`LoadSnapshot`，`ForEach` 改 `int32_t` 可中止；契约测试随之更新。
 7. `Wal::last_seq()`、`DeviceContext.snapshot`、`Engine` 三处编排、`snapshot_buffer_size`、两个错误码到位。
 8. `test_snapshot` 新增用例（§13）全绿；已有测试保持绿色。

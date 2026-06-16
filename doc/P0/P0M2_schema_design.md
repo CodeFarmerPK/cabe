@@ -391,7 +391,7 @@ static_assert(std::is_standard_layout_v<ValueMeta>);
 
 ---
 
-## 11. 退出条件（DoD）与验证步骤
+## 11. 退出条件与验证步骤
 
 1. `common/structs.h` 在 GCC 15 / Clang 20 下编译通过（扩展关闭、`-Wall -Wextra -Wpedantic`）。
 2. 全部 `static_assert` 通过：`sizeof(BlockId)==8`、`sizeof(ValueMeta)==24`、

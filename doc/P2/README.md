@@ -15,7 +15,7 @@
 - 公开类型 ABI 承诺范围：结构体布局 / 枚举值 / 函数签名分别承诺到什么程度
 - API 承诺语义：Put 部分写 / Engine 析构 / Open 幂等等的行为承诺
 - 输出一份**公开 API 符号清单 + 冻结声明**文档
-- **不做 PoC**：reactor / 多 device / 零拷贝 / recovery 的验证推迟到各自功能实装后
+- **不做概念验证**：reactor / 多 device / 零拷贝 / recovery 的验证推迟到各自功能实装后
 
 ## 里程碑文档清单
 
@@ -35,7 +35,7 @@ P2M1 ──► P2M2
 ## 启动条件
 
 1. ✅ P1 全部完成（P1M5 收敛通过）
-2. ✅ P2-D1 里程碑划分锁定（2 个里程碑，无 PoC）
+2. ✅ P2-D1 里程碑划分锁定（2 个里程碑，无概念验证）
 3. ⏳ 用 `/grill-with-docs P2M1` 开第一个里程碑的文档设计
 
 ## 已知决策点（按里程碑分配）
@@ -53,9 +53,9 @@ P2M1 ──► P2M2
 
 | 决策 | 推迟到 | 原因 |
 |---|---|---|
-| Forward-compat PoC 形态 | 各自阶段 | reactor / 多 device / 零拷贝 / recovery 尚未实装 |
+| 前向兼容概念验证形态 | 各自阶段 | reactor / 多 device / 零拷贝 / recovery 尚未实装 |
 | 零拷贝 BufferHandle 接口 | P8 | P8 实装时再定 |
-| 多 device PoC | P3+ | 多 device 路由在 P3 IoBackend 抽象后更合适 |
+| 多 device 概念验证 | P3+ | 多 device 路由在 P3 IoBackend 抽象后更合适 |
 
 ## P2 退出条件概要
 

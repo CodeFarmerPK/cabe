@@ -42,7 +42,7 @@ namespace cabe {
 
         // P5M4：快照触发链。
         //   DoSnapshot         —— 真活：刷 WAL → 取 covered_seq → snapshot.Write 驱动 ForEach。
-        //   RequestSnapshot    —— 自动触发汇总入口（fire-and-forget：出错记日志，不返回、不连累 Put）。
+        //   RequestSnapshot    —— 自动触发汇总入口（发后不管：出错记日志，不返回、不连累 Put）。
         //                         M4 同步执行；P7 改为唤醒后台快照线程。
         //   MaybeRequestSnapshot —— Put/Delete 成功收尾处查大小阈值，到了就 RequestSnapshot。
         int32_t DoSnapshot(DeviceContext& dc);

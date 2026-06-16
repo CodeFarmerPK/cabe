@@ -175,7 +175,7 @@ scripts/run-tests.sh --release
 
 1. **依赖自检**：
    - `--compiler=g++`（默认）：`command -v gcovr` 失败 → 报错 + 提示 `sudo dnf install gcovr`（M6-D8 顺手把 `gcovr` 装到 `setup-dev.sh`，正常环境下不会触发）。
-   - `--compiler=clang++`：自检 `llvm-cov` + `llvm-profdata`，缺失则 `exit 3` + 提示 `sudo dnf install llvm`。**`llvm` 刻意未加入 `setup-dev.sh` 的 `REQUIRED_PKGS`**：M6 默认覆盖率工具链是 g++（已覆盖 §10 DoD），clang 路径属于可选；用户主动选 clang 时按自检提示装即可（保持 §6 "破 setup-dev 边界仅 `gcovr` 一次"精神）。
+   - `--compiler=clang++`：自检 `llvm-cov` + `llvm-profdata`，缺失则 `exit 3` + 提示 `sudo dnf install llvm`。**`llvm` 刻意未加入 `setup-dev.sh` 的 `REQUIRED_PKGS`**：M6 默认覆盖率工具链是 g++（已覆盖 §10 退出条件），clang 路径属于可选；用户主动选 clang 时按自检提示装即可（保持 §6 "破 setup-dev 边界仅 `gcovr` 一次"精神）。
 2. **配置 + 构建 + 跑测试**（单格）：
    ```bash
    cmake -S "$ROOT" -B "build-coverage" -G Ninja \
@@ -244,7 +244,7 @@ REQUIRED_PKGS=(
 
 > 本里程碑**破"不动 setup-dev"边界一次**，理由：`gcovr` 直接关系 M6 自己交付的脚本（`run-coverage.sh`）能否开箱跑。其他 `setup-dev` 相关调整（如 README 依赖列表同步）仍归 **M7** 收敛。
 >
-> **特别说明**：`llvm`（提供 `llvm-cov` / `llvm-profdata`，clang 覆盖率路径所需）**未**加入 `REQUIRED_PKGS`。默认覆盖率工具链是 g++（§10 DoD 已用 g++ 路径验过 98.3%），clang 路径属于可选；用户用 `--compiler=clang++` 时由脚本的依赖自检（§5.2-1）按设计 `exit 3` 并提示安装。若后续决策要把 clang 覆盖率纳入默认强制路径，再补 setup-dev（不在 M6 范围）。
+> **特别说明**：`llvm`（提供 `llvm-cov` / `llvm-profdata`，clang 覆盖率路径所需）**未**加入 `REQUIRED_PKGS`。默认覆盖率工具链是 g++（§10 退出条件已用 g++ 路径验过 98.3%），clang 路径属于可选；用户用 `--compiler=clang++` 时由脚本的依赖自检（§5.2-1）按设计 `exit 3` 并提示安装。若后续决策要把 clang 覆盖率纳入默认强制路径，再补 setup-dev（不在 M6 范围）。
 
 ---
 
@@ -289,7 +289,7 @@ REQUIRED_PKGS=(
 
 ---
 
-## 10. 退出条件（DoD）与验证步骤
+## 10. 退出条件与验证步骤
 
 1. **四档逐一调用全绿**：`scripts/run-tests.sh --asan && scripts/run-tests.sh --tsan && scripts/run-tests.sh --ubsan && scripts/run-tests.sh --release`，四次调用均退出码 0。
 2. **单次调用 + 用例过滤**：`scripts/run-tests.sh --asan --filter CRC32` 只跑匹配用例，PASS，退出码 0；`build-asan/` 保留。

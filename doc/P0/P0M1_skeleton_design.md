@@ -31,7 +31,7 @@
 现代 CMake 工程：
 
 1. 现有 `util/` 与 `common/` 纳入构建，产出可被后续阶段链接的库目标。
-2. 平台 / 工具链 / C++ 标准三道**强校验**前置，错误环境在配置期即快速失败（fail-fast）。
+2. 平台 / 工具链 / C++ 标准三道**强校验**前置，错误环境在配置期即快速失败（快速失败）。
 3. 预留 `CABE_IO_BACKEND` / `CABE_META_INDEX` / `CABE_SANITIZER` 三个 CMake 选项。
 4. 建立清晰的现代 CMake 目标拓扑（接口属性库 + 静态库 + 头库），
    为 M2–M7 提供稳定的接入点。
@@ -86,7 +86,7 @@
 - `cpu_features.cpp` 使用 `<cpuid.h>` / `__get_cpuid`（x86）或 `<sys/auxv.h>`（ARM 占位）。
 
 **既有平台兜底**：`common/structs.h` 顶部已有 `#if !defined(__linux__) #error`。
-M1 在 CMake 层再加一道（配置期 fail-fast），与源码级兜底互补。
+M1 在 CMake 层再加一道（配置期快速失败），与源码级兜底互补。
 
 **环境基线（README + `scripts/setup-dev.sh` 已声明，M1 须与之一致）**：
 - CMake 3.30+、GCC 15 / Clang 20、C++20、Ninja、默认 Release。
@@ -116,7 +116,7 @@ M1 在 CMake 层再加一道（配置期 fail-fast），与源码级兜底互补
 |---|---|
 | 路线图字面 | P0/M1 列了"子目录 CMake（`common/` / `util/` / `test/` / `bench/`）" |
 | 本设计裁决 | **采纳推迟**：M1 只做 `enable_testing()` + `CABE_BUILD_TESTS/BENCH` 选项 + `EXISTS` 守卫的 `add_subdirectory`；`test/` `bench/` 内容到 M5 |
-| 理由 | 二者实际内容（`find_package(GTest)` / google-benchmark）属 M5 范畴，M1 无任何测试源码；M1 退出条件只要求生产代码可构建。先建空 placeholder 目录无意义，反而引入"空壳 CMake" |
+| 理由 | 二者实际内容（`find_package(GTest)` / google-benchmark）属 M5 范畴，M1 无任何测试源码；M1 退出条件只要求生产代码可构建。先建空占位目录无意义，反而引入"空壳 CMake" |
 | 回退代价 | 低：若终审要求 M1 即建占位目录，新增两个仅含注释的 `CMakeLists.txt` 即可，§6.8 的守卫逻辑无需改动 |
 
 > 这两处一旦终审反转，受影响章节为 §1.2 / §1.3、§4 文件清单、§6.7、§6.8、§8 决策表、§9 一致性核对、§11 验证清单。
@@ -145,7 +145,7 @@ M1 在 CMake 层再加一道（配置期 fail-fast），与源码级兜底互补
             cabe_flags  (INTERFACE)
             ├─ cxx_std_20 (EXTENSIONS OFF)
             ├─ 警告: -Wall -Wextra -Wpedantic [可选 -Werror]
-            └─ sanitizer 编译/链接开关  (按 CABE_SANITIZER)
+            └─ 检测器编译/链接开关  (按 CABE_SANITIZER)
                   ▲  cabe_common 以 INTERFACE 方式链接
                   │
             cabe_common (INTERFACE)
@@ -159,7 +159,7 @@ M1 在 CMake 层再加一道（配置期 fail-fast），与源码级兜底互补
 
 链接关系自下而上、且严格匹配目标类型：
 - `cabe_common` 是 INTERFACE 库，只能 INTERFACE 链接 `cabe_flags`；
-- `cabe_util` 是 STATIC 库，以 PUBLIC 链接 `cabe_common`，从而把"include 根 + 标准/警告/sanitizer"
+- `cabe_util` 是 STATIC 库，以 PUBLIC 链接 `cabe_common`，从而把"include 根 + 标准/警告/检测器"
   整条传递性属性向上游消费者继承。
 
 任何未来消费者（P1 的 engine 等）只需 `target_link_libraries(xxx PRIVATE cabe::util)`
@@ -169,7 +169,7 @@ M1 在 CMake 层再加一道（配置期 fail-fast），与源码级兜底互补
 
 | 目标 | 类型 | 职责 | 传递给消费者 |
 |---|---|---|---|
-| `cabe_flags` | INTERFACE | 统一编译契约：C++ 标准、警告、sanitizer | 编译/链接开关 |
+| `cabe_flags` | INTERFACE | 统一编译契约：C++ 标准、警告、检测器 | 编译/链接开关 |
 | `cabe_common` | INTERFACE | 头库 + 单一 include 根 | `-I${PROJECT_SOURCE_DIR}` + flags |
 | `cabe_util` | STATIC | CRC32C / CPU 特性检测的实现 | 链接库 + common/flags |
 
@@ -334,8 +334,8 @@ endif()
   `[[maybe_unused]]` 或局部 `(void)` 处理更精准。
 - 所有警告/错误开关一律施加在 `cabe_flags`（INTERFACE target）上，**只作用于本项目 target**，
   不会污染 `FetchContent` 引入的第三方代码（GTest / google-benchmark）。
-- **sanitizer 附带 `-g`**：报告符号化（`源文件:行号`）依赖调试信息，默认 Release 不含 `-g`，故显式补上；
-  并打 `STATUS` 提示 sanitizer 构建配 `Debug` / `RelWithDebInfo` 获得最佳栈回溯（见 §8 M1-D1）。
+- **检测器附带 `-g`**：报告符号化（`源文件:行号`）依赖调试信息，默认 Release 不含 `-g`，故显式补上；
+  并打 `STATUS` 提示检测器构建配 `Debug` / `RelWithDebInfo` 获得最佳栈回溯（见 §8 M1-D1）。
 
 ### 6.8 add_subdirectory 顺序
 
@@ -456,7 +456,7 @@ compile_commands.json
 
 ---
 
-## 11. 退出条件（DoD）与验证步骤
+## 11. 退出条件与验证步骤
 
 **配置 + 构建（两套工具链）**：
 ```bash
@@ -482,7 +482,7 @@ cmake --build build-clang
 
 **不含**：单元测试（M5）、本地组合矩阵（M6）。M1 验证为人工本地双工具链跑通。
 
-> 可选：M1 期间可临时加一个不安装的 `cabe_smoke` 可执行（调用 `cabe::util::CRC32`
+> 可选：M1 期间可临时加一个不安装的 `cabe_冒烟` 可执行（调用 `cabe::util::CRC32`
 > 与 `cpu::HasSSE42()`）以证明链接闭环，验证后即移除，**不计入交付物**。
 
 ---
@@ -495,7 +495,7 @@ cmake --build build-clang
 | M3 | `error_code.h` / `logger.h` 仍为头；M3 若新增 `logger.cpp`，复用 `util/CMakeLists` 的库写法，或并入 `cabe_common` → 可编译库 |
 | M4 | `util/CMakeLists.txt` 已留 `hash.cpp` 加入点注释（§6.9） |
 | M5 | `enable_testing()` 已就绪；`CABE_BUILD_TESTS/BENCH` 选项与 `EXISTS` 守卫已在位，M5 只需放入 `test/` `bench/` 的 CMake 与源码 |
-| M6 | sanitizer 编译开关已就位（M1-D1），M6 只加 `run-tests.sh` + `run-coverage.sh` + 本地组合矩阵（CI 推迟） |
+| M6 | 检测器编译开关已就位（M1-D1），M6 只加 `run-tests.sh` + `run-coverage.sh` + 本地组合矩阵（CI 推迟） |
 
 ---
 

@@ -59,24 +59,24 @@
 
 ## 3. 关键决策（owner 已裁决）
 
-### 决策-1（核心，ROADMAP 点名 M4 拍板）：xxhash 引入方式 —— 内嵌 single-header vs 系统库
+### 决策-1（核心，ROADMAP 点名 M4 拍板）：xxhash 引入方式 —— 内嵌单头文件 vs 系统库
 
-| 维度 | 内嵌 single-header（**已采纳**） | 系统库（`xxhash-devel`，未采纳） |
+| 维度 | 内嵌单头文件（**已采纳**） | 系统库（`xxhash-devel`，未采纳） |
 |---|---|---|
 | 与 D6「冻结」 | ✅ 版本钉死在仓库，输出天然冻结 | ⚠️ 版本随发行版浮动，与"冻结"有张力 |
 | 路由正确性 | ✅ 跨环境/跨版本同一 key 必同一 device | ⚠️ 库升级若改实现 → 路由漂移 → **数据找不到** |
 | 系统依赖 | ✅ 无（`setup-dev.sh` 不改） | 需补 `xxhash-devel` + `find_package`/`pkg_check_modules` |
 | 仓库体积 | ⚠️ +1 个 `xxhash.h`（约 270 KB 单头） | ✅ 不入库 |
 | 内联优化 | ✅ `XXH_INLINE_ALL` 可整体内联进 `hash.cpp` | 一般动态/静态链接 |
-| 安全更新 | 手动升级 vendored 版本 | ✅ 跟随发行版 |
+| 安全更新 | 手动升级内嵌版本 | ✅ 跟随发行版 |
 
-**已采纳（owner 终审通过）：内嵌 single-header（vendored `xxhash.h`，钉死版本，如 v0.8.x）。**
+**已采纳（owner 终审通过）：内嵌单头文件（`xxhash.h`，钉死版本，如 v0.8.x）。**
 - 决定性理由：**路由 hash 的稳定性是正确性要求**——`hash(key) % N` 决定一个 key 的数据落在哪个 device，
   若 hash 输出因环境/版本变化，同一 key 会路由到不同 device，**已写入的数据将再也读不到**。D6 因此要求"冻结"。
-  vendored 固定版本是对"冻结"最直接、最可靠的保证；系统库的版本浮动与此目标相悖。
-- XXH3 自 xxHash v0.8.0 起算法已正式 frozen，但 vendored 仍更稳妥（连"依赖发行版恰好 ≥ 0.8.0 且不回退"
+  内嵌固定版本是对"冻结"最直接、最可靠的保证；系统库的版本浮动与此目标相悖。
+- XXH3 自 xxHash v0.8.0 起算法已正式 frozen，但内嵌仍更稳妥（连"依赖发行版恰好 ≥ 0.8.0 且不回退"
   这一假设都不必依赖）。
-- 代价（仓库 +1 单头、手动升级）可接受，且 hash 是算法型依赖（非 liburing 那种运行时库），最适合 vendoring。
+- 代价（仓库 +1 单头、手动升级）可接受，且 hash 是算法型依赖（非 liburing 那种运行时库），最适合内嵌。
 
 > 若 owner 倾向系统库：需 ① `setup-dev.sh` 加 `xxhash-devel`；② CMake `pkg_check_modules(libxxhash)`；
 > ③ 文档显式声明"依赖 xxHash ≥ 0.8.0"并承担版本漂移风险评估。
@@ -85,13 +85,13 @@
 
 | 维度 | 内容 |
 |---|---|
-| vendored 头位置 | **`third_party/xxhash/xxhash.h`**（工程根下新增 `third_party/`；含来源 URL + 版本 + LICENSE 说明） |
+| 内嵌头位置 | **`third_party/xxhash/xxhash.h`**（工程根下新增 `third_party/`；含来源 URL + 版本 + LICENSE 说明） |
 | 接口命名空间 | `cabe::util`（与 `crc32`/`cpu_features` 一致；延续命名空间约定） |
 | 头暴露 | `hash.h` **只声明** `Hash`/`RouteToDevice`，**不** `#include xxhash.h`；xxhash 仅在 `hash.cpp` 内可见，避免污染所有下游 TU |
 
 ---
 
-## 4. 依赖选型细节（采用内嵌 single-header）
+## 4. 依赖选型细节（采用内嵌单头文件）
 
 - `third_party/xxhash/xxhash.h`：从 xxHash 官方仓库取 `xxhash.h` 单头，固定到某 release tag（如 `v0.8.2`），
   顶部注释记录来源、版本、commit、BSD-2 许可。
@@ -192,12 +192,12 @@ add_library(cabe::util ALIAS cabe_util)
 
 | # | 决策 | 备选 | 理由 | 状态 |
 |---|---|---|---|---|
-| M4-D1 | xxhash 用**内嵌 single-header**（vendored，钉死版本） | 系统库 `xxhash-devel` | 路由 hash 必须跨环境/版本冻结（D6），否则数据路由漂移丢数据；vendored 是最可靠保证 | **锁定（owner 已终审）**（§3 决策-1） |
+| M4-D1 | xxhash 用**内嵌单头文件**（钉死版本） | 系统库 `xxhash-devel` | 路由 hash 必须跨环境/版本冻结（D6），否则数据路由漂移丢数据；内嵌是最可靠保证 | **锁定（owner 已终审）**（§3 决策-1） |
 | M4-D2 | `Hash` = XXH3 64-bit，**固定 seed 0** | 带 seed / 128-bit | 路由只需 64-bit；固定 seed 保证冻结 | 锁定 |
 | M4-D3 | `hash.h` 不暴露 xxhash 头；xxhash 仅在 `hash.cpp` | 头里 `#include xxhash` | 避免 270KB 单头污染所有下游 TU | 锁定 |
 | M4-D4 | xxh3 仅路由、CRC32C 仅完整性，互不混用 | 统一一个 hash | D14 明确分工；路由要快、完整性要抗突发错误，诉求不同 | 锁定 |
 | M4-D5 | `RouteToDevice` 对 `n_devices` 加 `assert([1,256])` | 不校验 | 防除零 / 越 `DeviceId` 上限（Debug 防线，Release 零成本） | 锁定 |
-| M4-D6 | vendored 头置于 `third_party/xxhash/`，命名空间 `cabe::util` | 放 util/ 下 | 第三方与自有代码分目录；命名空间与 util 一致 | 锁定 |
+| M4-D6 | 内嵌头置于 `third_party/xxhash/`，命名空间 `cabe::util` | 放 util/ 下 | 第三方与自有代码分目录；命名空间与 util 一致 | 锁定 |
 
 ---
 
@@ -205,10 +205,10 @@ add_library(cabe::util ALIAS cabe_util)
 
 | ROADMAP M4 / D 决策 | 本设计 | 状态 |
 |---|---|---|
-| 决策子项：系统库 vs 内嵌 single-header（M4 拍板，写入 design） | §3 决策-1 内嵌（已采纳） | ✅ |
+| 决策子项：系统库 vs 内嵌单头文件（M4 拍板，写入 design） | §3 决策-1 内嵌（已采纳） | ✅ |
 | 接口 `Hash(DataView)` / `Hash(string_view)` | §5 | ✅ |
 | 路由 `RouteToDevice(key, n_devices)`（D7 入口） | §5 / §6 | ✅ |
-| D6：路由 hash = xxh3，冻结 | §6 固定 XXH3 + seed 0 + vendored | ✅ |
+| D6：路由 hash = xxh3，冻结 | §6 固定 XXH3 + seed 0 + 内嵌 | ✅ |
 | D14：xxh3 仅路由，CRC32C 管完整性 | §6 职责边界（M4-D4） | ✅ |
 | 退出：已知向量 + 100K 分布卡方 | §11 | ✅（M5 固化） |
 
@@ -218,23 +218,23 @@ add_library(cabe::util ALIAS cabe_util)
 
 | 风险 | 说明 | 缓解 |
 |---|---|---|
-| 路由漂移导致数据丢失 | hash 输出若跨环境变化，key→device 改变 | M4-D1 vendored 钉死版本 + 固定 seed/算法；M5 跨平台稳定性测试 |
-| vendored 头维护 | 安全更新需手动升级 | 头顶注明版本/来源；升级走 review，且需确认 XXH3 输出不变 |
+| 路由漂移导致数据丢失 | hash 输出若跨环境变化，key→device 改变 | M4-D1 内嵌钉死版本 + 固定 seed/算法；M5 跨平台稳定性测试 |
+| 内嵌头维护 | 安全更新需手动升级 | 头顶注明版本/来源；升级走 review，且需确认 XXH3 输出不变 |
 | `DeviceId` 上限 256 | N > 256 时 `RouteToDevice` 截断 | D5 已限定 device_id 8 位（N ≤ 256）；`assert` 兜底 |
 | 分布偏斜 | 真实 key 分布下负载不均 | M5 卡方检验；P11 真实 key 分布负载偏斜测量 |
 | `XXH3_64bits` 对空输入 | `Hash("")` 合法（XXH3 有定义） | 空 key 是否允许属 API 语义（P2）；M4 不拒绝，按算法定义返回 |
 
 ---
 
-## 11. 退出条件（DoD）与验证步骤
+## 11. 退出条件与验证步骤
 
 1. `util/hash.{h,cpp}` 在 GCC 15 / Clang 20 下编译通过（扩展关闭、`-Wall -Wextra -Wpedantic`、零警告）；`cabe_util` 双工具链构建通过。
-2. **已知向量**：`Hash` 对 xxHash 官方测试向量（含空串、定长串）输出与官方一致（证明 vendored 接入正确、未被改写）。
+2. **已知向量**：`Hash` 对 xxHash 官方测试向量（含空串、定长串）输出与官方一致（证明内嵌接入正确、未被改写）。
 3. **分布卡方**：100K 随机 key 经 `RouteToDevice(key, N)`（如 N=4/8），各桶计数的卡方统计量在自由度 N-1 的合理显著性水平内（分布近似均匀）。
 4. **冻结自证**：固定若干 key 的 `Hash` 值写入测试常量，跨工具链/重复构建恒定（守护 D6）。
 5. 职责边界：`hash.*` 不出现 CRC 相关调用；`crc32.*` 不出现路由调用（人工/grep 核对）。
 
-> 上述 2–4 的正式用例在 **M5** 固化；M4 阶段可用临时 smoke 自证已知向量与分布，验证后移除。
+> 上述 2–4 的正式用例在 **M5** 固化；M4 阶段可用临时冒烟自证已知向量与分布，验证后移除。
 
 ---
 

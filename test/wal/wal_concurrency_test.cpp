@@ -1,8 +1,8 @@
-// P6M1：WAL 提交组多线程 harness（设计稿 doc/P6/P6M1_commit_group_design.md §11）。
+// P6M1：WAL 提交组多线程并发测试驱动（设计稿 doc/P6/P6M1_commit_group_design.md §11）。
 // 断言手段 = key 编码（"t<线程>-i<序号>"）+ 恢复重放对账——盘面自己作证，不开观测后门。
 // 编排两种：屏障组（std::barrier 每轮对齐提交，强制组队）+ 自由跑（全速随机交错）。
 // 活性断言（用例 G）：全部线程正常 join；任何死锁/丢失唤醒表现为 ctest 超时而非误绿。
-// 注意：harness 直打 Wal、无 Engine 无快照无回收——总帧数必须远小于环容量（撞墙用例
+// 注意：并发测试驱动直打 Wal、无 Engine 无快照无回收——总帧数必须远小于环容量（撞墙用例
 // 反向操作，故意填满）；每个场景先 ZeroWalRing 清环，避免上一场景残帧干扰恢复扫描。
 
 #include "wal/wal.h"

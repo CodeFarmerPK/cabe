@@ -574,6 +574,14 @@ namespace cabe {
     // ================================================================
     // P6M1 提交组（同步档专用）。协议、内存序与 I1/I2/I3 三证明见
     // doc/P6/P6M1_commit_group_design.md §3/§4；此处注释只标决策号。
+    //
+    // 【运行时故障处理边界】（P6M2 §3）cabe 假定软硬件不发生运行时故障（项目级假定，
+    // 见 ROADMAP「关键约束（贯穿全期）」）。活写路径的 WriteAt / Sync 失败已防御性返回
+    // kWalWriteFailed、帧滞留缓冲待下一批同字节重试（失败后状态语义见 P6M2 §4），但这些
+    // 故障路径**未经故障注入测试**（loop 设备无注入手段），完整性仅靠代码审查保证。下面
+    // 三处运行时故障返回点以「运行时故障未测」标出：① ProcessBatch 批末 fdatasync；
+    // ② WriteWindowSpan 的 WriteAt；③ Flush 的 fdatasync。明显故障（设备打开 / 内存分配 /
+    // 参数非法）另作健壮判断、不在此列；kWalFull 是资源状态非故障、照常真测。
     // ================================================================
 
     bool Wal::PushWriter(WriterNode* n) noexcept {
@@ -684,6 +692,7 @@ namespace cabe {
             if (rc == err::kSuccess && wrote) {
                 // 批末唯一 fdatasync——覆盖本批全部段写（O_DIRECT ≠ 持久；块设备 Flush
                 // 命令覆盖此前所有已完成写，D16）。零写出批（批首撞墙）无需 fsync。
+                // 运行时故障未测（见提交组区段「运行时故障处理边界」注，P6M2 §3）
                 if (dev_.Sync() != err::kSuccess) {
                     CABE_LOG_ERROR("WAL 批末 fdatasync 失败（整批改判）");
                     rc = err::kWalWriteFailed;   // 状态保持推进、不回滚——字节已在设备上，
@@ -735,6 +744,7 @@ namespace cabe {
         const std::size_t used  = static_cast<std::size_t>(n_frames_) * kWalFrameSize;
         const std::size_t bytes = util::AlignUp(used, kWalBlockSize);
         assert(bytes <= ring_end_ - cur_off_ && "刷出越过环尾——窗口不跨缝不变量被破坏");
+        // 运行时故障未测（见提交组区段「运行时故障处理边界」注，P6M2 §3）
         if (dev_.WriteAt(cur_off_, cur_buf_, bytes) != err::kSuccess) {
             CABE_LOG_ERROR("WAL 窗口写出失败: off=%llu bytes=%zu",
                            static_cast<unsigned long long>(cur_off_), bytes);
@@ -786,6 +796,7 @@ namespace cabe {
         // 在入缓冲时已被告知成功，Wal 欠其"确认持久才推进"；同步档批路径欠账为零。
         int32_t rc = WriteWindowSpan();
         if (rc != err::kSuccess) return rc;
+        // 运行时故障未测（见提交组区段「运行时故障处理边界」注，P6M2 §3）
         if (dev_.Sync() != err::kSuccess) {
             CABE_LOG_ERROR("WAL fdatasync 失败: off=%llu", static_cast<unsigned long long>(cur_off_));
             return err::kWalWriteFailed;

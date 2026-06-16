@@ -2,7 +2,7 @@
 # ============================================================
 # Cabe —— 覆盖率脚本（P0-M6；P4-M1 扩展 --backend / --index）
 # 与 run-tests.sh 分离：覆盖率插桩开关 (-DCABE_COVERAGE=ON) 与
-# sanitizer 同开会污染报告，故独立 build dir、独立流程。
+# 检测器同开会污染报告，故独立 build dir、独立流程。
 # 设计依据：doc/P0/P0M6_test_scripts_design.md §5
 # ============================================================
 set -uo pipefail

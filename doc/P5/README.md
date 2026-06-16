@@ -113,7 +113,7 @@ P5M1 ──► P5M2 ──► P5M3 ──► P5M4 ──► P5M5 ──► P5M6 
 - HashMetaIndex 单线程版快照：`ForEach` 遍历写出（M4 为"冻结写者"的一致快照，无锁/模糊留 P7）
 - 快照设备布局：超级块 + 对半切 A/B 双缓冲两槽（每槽 [槽头 4K + 记录数据区]）；槽头记 `generation` + `covered_seq`（覆盖到的 WAL seq）
 - 落盘：临时 `snapshot_buffer_size`（默认 1 MiB）缓冲流式写、全程一次 `fdatasync`；快照前 `Wal::Flush()` 刷净 → 取 `covered_seq`
-- 触发：大小阈值（主，`snapshot_threshold_bytes`）+ 手动 `Engine::Snapshot()`（辅，同步返结果）；自动触发 fire-and-forget；定时（`snapshot_interval_sec`）→ P7
+- 触发：大小阈值（主，`snapshot_threshold_bytes`）+ 手动 `Engine::Snapshot()`（辅，同步返结果）；自动触发发后不管；定时（`snapshot_interval_sec`）→ P7
 - 原子替换 + 崩溃安全：写非活跃槽、保好覆坏；靠代际号 + 双 CRC 原子切换，任一崩溃点旧快照完好
 - 部署期容量约束：Open 时校验**快照设备**容量，不足拒开（`kDeviceTooSmall`）；WAL 设备容量校验设计已定（阈值 × 2~3）、实装推迟 M5（见 P5M4 §11 实装注）
 - 注：M4 只做**写流程**；加载快照 + 恢复 → M6；WAL 回收 → M5
@@ -146,7 +146,7 @@ P5M1 ──► P5M2 ──► P5M3 ──► P5M4 ──► P5M5 ──► P5M6 
 ## P5 退出条件概要
 
 > **全部核销 ✅**——逐条证据见 [P5M7_convergence_design.md](P5M7_convergence_design.md) §10；
-> 收口验证（四档 sanitizer × sync 152/152、io_uring 162/162、覆盖率 86.1%）见其 §8。
+> 收口验证（四档检测器 × sync 152/152、io_uring 162/162、覆盖率 86.1%）见其 §8。
 
 1. 三设备超级块格式 + create/recover 启动模式 + 校验逻辑
 2. WAL 模块实装，128 字节帧，4 级持久化全部生效，默认级别 3

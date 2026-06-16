@@ -173,7 +173,7 @@ namespace cabe {
             TrimDeviceBlock(dc, old_meta.block);
         }
 
-        // P5M4：写已提交，查大小阈值，到了就（自动、fire-and-forget）触发一份快照。
+        // P5M4：写已提交，查大小阈值，到了就（自动、发后不管）触发一份快照。
         MaybeRequestSnapshot(dc);
         return Status::Ok();
     }
@@ -493,7 +493,7 @@ namespace cabe {
     }
 
     void Engine::RequestSnapshot(DeviceContext& dc) {
-        // 自动触发汇总入口：fire-and-forget。M4 同步执行；P7 改为唤醒后台快照线程。
+        // 自动触发汇总入口：发后不管。M4 同步执行；P7 改为唤醒后台快照线程。
         // 快照失败不连累本次写，只记日志（退避基准已在 DoSnapshot 入口推进）。
         int32_t rc = DoSnapshot(dc);
         if (rc != err::kSuccess) {

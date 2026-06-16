@@ -158,7 +158,7 @@
 - **路由函数**：`RouteToDevice(key, n_devices) -> DeviceId`；公式 `Hash(key) % n_devices`（D7）。
 - **接收范围**：`n_devices ∈ [1, 256]`；Debug 由 `assert` 拦截，Release 由 `if (n_devices == 0) std::abort();`
   兜底（评审 #1 在 M6 已修复）。
-- **库形态**：单文件 vendored `third_party/xxhash/xxhash.h`（v0.8.2），`XXH_INLINE_ALL` 仅在
+- **库形态**：单文件内嵌 `third_party/xxhash/xxhash.h`（v0.8.2），`XXH_INLINE_ALL` 仅在
   `util/hash.cpp` 这一个 TU 内展开。
 
 ### 4.5 工程骨架与 CMake 选项（详 [P0M1_skeleton_design.md](P0M1_skeleton_design.md)）
@@ -220,7 +220,7 @@
 | **XXH3** | 路由 hash 算法（64-bit），固定 seed 0 |
 | **路由 hash / 路由函数** | 按 key 选 device 的函数 `RouteToDevice` |
 | **本地组合矩阵 / 四档** | 单次调用跑一个配置（asan / tsan / ubsan / release），四档逐一验证 |
-| **检测器** | sanitizer 中译；具体三种以缩写形式出现（ASAN / TSAN / UBSAN）|
+| **检测器** | 检测器中译；具体三种以缩写形式出现（ASAN / TSAN / UBSAN）|
 | **微基准** | google-benchmark 框架跑出的单函数性能数 |
 | **行覆盖率** | gcov / llvm-cov 算出的"被执行行数 / 总可执行行数" |
 | **覆盖率门槛** | 80%，cabe P0 退出条件第 3 条 |
@@ -232,7 +232,7 @@
 | **Reactor** | 并发模型（P7+ 引入），无锁多线程 |
 | **TU**（Translation Unit）| C++ 编译单元，一个 `.cpp` 文件加全部 `#include` 后的结果 |
 | **SIOF**（Static Init Order Fiasco）| 跨 TU 静态对象初始化顺序未定义问题；cabe 用函数内 static 规避 |
-| **vendored** | 第三方库以源码内嵌方式纳入（如 `third_party/xxhash/xxhash.h`），不走系统包管理 |
+| **内嵌** | 第三方库以源码内嵌方式纳入（如 `third_party/xxhash/xxhash.h`），不走系统包管理 |
 
 ---
 
@@ -386,7 +386,7 @@ clang++ RELEASE  : OK
 | **#10** | `scripts/run-coverage.sh` line 163 | `llvm-cov export` 的 JSON 解析改用 `jq -r '.data[0].totals.lines.percent'`；`run-coverage.sh` 自检段加 `jq` 依赖（缺失则提示 `sudo dnf install jq`） | `--compiler=clang++ --strict` 实际跑通（前提是手装 `llvm` + `jq`） |
 | **#11** | `scripts/run-coverage.sh` line 78 | `[[ ... ]] && ... \|\| ...` 三元改 if-then-else 显式分支 | `--compiler=g++ --strict` 仍 98.4% 通过；`bash -n` 通过 |
 | **#12** | `bench/CMakeLists.txt` | `bench_crc32` / `bench_hash` 各 `target_link_libraries` 显式加 `cabe::common` | `cmake -B build-bench -DCABE_BUILD_BENCH=ON && cmake --build build-bench` 通过 |
-| **#13** | `test/CMakeLists.txt` + `bench/CMakeLists.txt` | `find_package(GTest 1.14 REQUIRED CONFIG)` 与 `find_package(benchmark 1.8 REQUIRED CONFIG)` 加版本下限 | 配置阶段无 warning；老版本系统库会 fail-fast 触发 `FetchContent` 兜底 |
+| **#13** | `test/CMakeLists.txt` + `bench/CMakeLists.txt` | `find_package(GTest 1.14 REQUIRED CONFIG)` 与 `find_package(benchmark 1.8 REQUIRED CONFIG)` 加版本下限 | 配置阶段无 warning；老版本系统库会快速失败触发 `FetchContent` 兜底 |
 | **#14** | `scripts/setup-dev.sh` line 35 | `major="${VERSION_ID%%.*}"; (( ${major:-0} < 43 ))` —— 算术展开前剥小数点 | 手造 `VERSION_ID="43.1"` 跑，不报 syntax error |
 | **#15** | `scripts/setup-dev.sh` line 89-126 | io_uring 段（pkg-config 版本检查 + sysctl 检查 + RLIMIT 检查）外层包 `if [[ "$CI_MODE" == "false" ]]`；`--ci` 模式跳过整段 | `bash -n` 通过；`--ci` 模式在无 `liburing-devel` 容器中不再 exit 1 |
 
@@ -427,13 +427,13 @@ clang++ RELEASE  : OK
 
 1. **状态**：🚧 未启动（待 P1 完成）。
 2. **阶段目标**（摘 ROADMAP §"P2 — 公开 API 契约冻结 + Forward-compat 论证"）：把 P1 的公开
-   API 锁定 + 写 Forward-compat 论证 PoC。
+   API 锁定 + 写 Forward-compat 论证概念验证。
 3. **范围摘要**：5–8 行 bullet（API 冻结点、forward-compat 论证方法、API 版本号机制等）。
 4. **里程碑文档清单**：占位"待决策梳理划分 P2M1–Mn"。
 5. **启动条件**：P1 阶段所有里程碑完成 + owner 确认。
 6. **已知决策点候选**：
    - API 版本号方案：语义化（major.minor.patch）还是单调整数？
-   - Forward-compat 论证 PoC 形态：写一个未来场景的"假设 client"代码？
+   - Forward-compat 论证概念验证形态：写一个未来场景的"假设 client"代码？
    - 错误码 ABI 是否一并冻结？
    - 公开类型的 ABI 兼容承诺范围（结构体布局 / 枚举值 / 函数签名）？
 7. **命名与目录约定**：链回 `doc/P0/README.md`。
