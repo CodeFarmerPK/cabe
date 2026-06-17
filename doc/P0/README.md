@@ -48,3 +48,4 @@ M7 在 M6 完成后定稿，收敛全部 P0 决策。
 4. [P0M7_convergence_design.md](P0M7_convergence_design.md) 审阅通过，锁定本阶段所有 schema 决策
 5. README 与 ROADMAP 同步
 6. `bench/baselines/p0_utilities.json` 归档（crc32 / hash 双工具链 Release 中位数）
+   （**P6 起作废**：该早期基线在设计思路未定型时所做，已删除；性能基线一律以 P6 为唯一锚点，见 ROADMAP §六「性能基线策略注」。bench 工具代码保留。）

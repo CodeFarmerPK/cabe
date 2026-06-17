@@ -37,7 +37,7 @@ Cabe 是一个面向单机部署的 KV 存储引擎:
 | P4 | io_uring 后端 | ✅ 完成 |
 | P4.5 | 块分配器改造 | ✅ 完成 |
 | P5 | WAL + Recovery + Snapshot | ✅ 完成 |
-| P6 | Group Commit | ⏳ |
+| P6 | Group Commit | ✅ 完成(M4 附加基准待补) |
 | P7 | Reactor + 无锁 MT + 多 device 端到端 | ⏳ |
 | P8 | 零拷贝主路径 | ⏳ |
 | P9 | B+ 树索引(学习路径) | ⏳ |
@@ -50,7 +50,7 @@ Cabe 是一个面向单机部署的 KV 存储引擎:
 1. **专一**:做一件事 —— 定长 value KV,做到极致
 2. **简单**:每一层抽象都有具体功能驱动,不为未来留"装饰性接口"
 3. **诚实**:不为内核 bug / 设备掉线做应用层兜底;不承诺做不到的事
-4. **可观测**:每阶段含明文性能红线;bench 数据归档可追溯
+4. **可观测**:性能基线以 P6 为锚点、归档可追溯(后续优化阶段相对前一基线对比,见 ROADMAP §六)
 5. **学习与生产并存**:生产路径走最优工程选择;学习路径(如 B+ 树)隔离在 abstraction 之下
 
 ## 环境要求
@@ -74,28 +74,31 @@ Cabe 是一个面向单机部署的 KV 存储引擎:
 # 初次环境装配(仅 Fedora 43+)
 ./scripts/setup-dev.sh
 
-# 配置 + 构建(默认 Release + SyncIoBackend + HashMetaIndex)
-cmake -S . -B build -G Ninja
+# 配置 + 构建(Release + HashMetaIndex;自 P6 起 I/O 后端必填、无默认)
+cmake -S . -B build -G Ninja -DCABE_IO_BACKEND=io_uring   # 主线后端(P6 起)
 cmake --build build
 
-# Sanitizer 矩阵
-cmake -S . -B build-asan  -G Ninja -DCABE_SANITIZER=address
-cmake -S . -B build-tsan  -G Ninja -DCABE_SANITIZER=thread
-cmake -S . -B build-ubsan -G Ninja -DCABE_SANITIZER=undefined
+# Sanitizer 矩阵(后端必填;TSAN 与 io_uring 不兼容,TSAN 用 sync)
+cmake -S . -B build-asan  -G Ninja -DCABE_IO_BACKEND=io_uring -DCABE_SANITIZER=address
+cmake -S . -B build-tsan  -G Ninja -DCABE_IO_BACKEND=sync     -DCABE_SANITIZER=thread
+cmake -S . -B build-ubsan -G Ninja -DCABE_IO_BACKEND=io_uring -DCABE_SANITIZER=undefined
 ```
 
 编译期可替换组件(P3+ 起生效):
 
 ```bash
-# 切换 I/O 后端
-cmake -S . -B build -DCABE_IO_BACKEND=sync       # 默认,P3
-cmake -S . -B build -DCABE_IO_BACKEND=io_uring   # P4+
+# 切换 I/O 后端(必填,自 P6 起无默认;见 ROADMAP P6 段「后端策略」/ doc/P6/README.md D10)
+cmake -S . -B build -DCABE_IO_BACKEND=io_uring   # 主线后端 + 性能锚点(P4+)
+cmake -S . -B build -DCABE_IO_BACKEND=sync       # 仅正确性回归(开发/性能基准已冻结于 P6)
 cmake -S . -B build -DCABE_IO_BACKEND=spdk       # P10+
 
-# 切换索引实现
-cmake -S . -B build -DCABE_META_INDEX=hashmap    # 默认,P3
-cmake -S . -B build -DCABE_META_INDEX=bplustree  # P9+
+# 切换索引实现(后端仍必填)
+cmake -S . -B build -DCABE_IO_BACKEND=io_uring -DCABE_META_INDEX=hashmap    # 默认索引,P3
+cmake -S . -B build -DCABE_IO_BACKEND=io_uring -DCABE_META_INDEX=bplustree  # P9+
 ```
+
+> 提示:日常测试 / 覆盖率 / 基准走脚本(`scripts/run-tests.sh` / `run-coverage.sh` /
+> `run-bench.sh`),均需 `--backend=sync|io_uring`,脚本会转成 `-DCABE_IO_BACKEND`。
 
 ## 仓库结构
 
@@ -120,7 +123,7 @@ cabe/
 ├── reactor/              # Reactor 与无锁队列(P7 起)
 ├── doc/                  # 阶段设计稿（doc/PN/PNMn_<主题>_design.md 风格）
 ├── bench/
-│   └── baselines/        # 各阶段 bench 归档
+│   └── baselines/        # 性能基线归档(P6 为锚点;见 bench/baselines/README.md)
 ├── scripts/              # 装机与运维脚本
 └── test/                 # 单元与集成测试
 ```

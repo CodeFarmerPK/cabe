@@ -93,7 +93,7 @@ namespace cabe {
             return err::kIoBase;
         }
         const std::uint64_t offset = kDataRegionOffset + block_idx * kValueSize;
-        // EINTR 重试 + 部分写累加（见 util/io_retry.h；sync 是默认后端，信号下也需健壮）
+        // EINTR 重试 + 部分写累加（见 util/io_retry.h；sync 后端在信号下也需健壮）
         if (!io_util::WriteExact(fd_, buf, kValueSize, offset)) {
             CABE_LOG_ERROR("pwrite 失败: fd=%d block_idx=%llu",
                            fd_, static_cast<unsigned long long>(block_idx));

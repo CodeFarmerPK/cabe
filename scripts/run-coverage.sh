@@ -16,7 +16,8 @@ usage() {
 选项:
   --compiler=NAME   工具链（g++ / clang++，默认 g++）
                     覆盖率工具自动对应：g++ → gcovr；clang++ → llvm-cov
-  --backend=NAME    IoBackend 选择: sync（默认）| io_uring | spdk
+  --backend=NAME    IoBackend 选择（必填）: sync | io_uring | spdk
+                    自 P6 起取消默认后端、必须显式指定（见 doc/P6/README.md D10）
   --index=NAME      MetaIndex 选择: hashmap（默认）| bplustree
   --device=PATH           数据设备路径（如 /dev/loop0）
   --wal-device=PATH       WAL 设备路径（如 /dev/loop1）
@@ -41,7 +42,7 @@ EOF
 
 # ---------- 默认 ----------
 COMPILER=g++
-BACKEND=sync
+BACKEND=""          # P6M3-D16：无默认后端，必须经 --backend 显式传入
 INDEX=hashmap
 DEVICE=""
 WAL_DEVICE=""
@@ -87,6 +88,14 @@ while [[ $# -gt 0 ]]; do
     esac
     shift
 done
+
+# ---------- 后端必填校验（P6M3-D16：自 P6 起取消默认后端） ----------
+if [[ -z "$BACKEND" ]]; then
+    echo "Error: --backend 为必填项（自 P6 起取消默认后端，见 doc/P6/README.md D10）。" >&2
+    echo "  指定其一: --backend=sync | --backend=io_uring" >&2
+    echo "  例: ./scripts/run-coverage.sh --backend=sync --device=... --wal-device=... --snapshot-device=... --strict" >&2
+    exit 2
+fi
 
 # ---------- 颜色 ----------
 if [[ -t 1 ]]; then
@@ -169,6 +178,10 @@ case "$COMPILER" in
         # --filter 限定 util/ + common/ + engine/ + io/ + index/
         # --exclude 把 *_test.cpp 兜底排除
         # --exclude logger.h：纯头宏最简实现
+        # --gcov-ignore-parse-errors=negative_hits.warn_once_per_file：
+        #   gcov 15.x 对头文件里的 inline constexpr（如 options.h 的 IsWalSyncLevel）
+        #   偶发负计数（GCC bug #68080：多 TU .gcda 合并下溢）。gcovr 默认把负计数当致命错、
+        #   一处就废掉整份报告；此选项降级为「按字面值收下、每文件警告一次」，不阻断报告。
         report=$(gcovr -r "$ROOT" \
             --filter "${ROOT}/util/" \
             --filter "${ROOT}/common/" \
@@ -177,6 +190,7 @@ case "$COMPILER" in
             --filter "${ROOT}/index/" \
             --exclude '.*_test\.cpp' \
             --exclude '.*logger\.h' \
+            --gcov-ignore-parse-errors=negative_hits.warn_once_per_file \
             --print-summary \
             "$BUILD_DIR" 2>&1) || { echo "Error: gcovr 失败" >&2; echo "$report" >&2; exit 4; }
         echo "$report"

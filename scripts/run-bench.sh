@@ -14,11 +14,27 @@ usage() {
 用法: scripts/run-bench.sh [选项]
 
 工具链选项:
-  --compiler=NAME   只在指定工具链上跑（g++ / clang++ / all，默认 all）
+  --compiler=NAME   工具链: g++ / clang++ / all（默认 g++；clang++ 需显式指定 clang++ 或 all）
+
+后端（必填）:
+  --backend=NAME    IoBackend 选择: sync | io_uring | spdk
+                    自 P6 起取消默认后端、必须显式指定（见 doc/P6/README.md D10）；
+                    P6 性能锚点采集用 --backend=io_uring（P6M3-D15）
+
+设备（bench_engine 需三块，bench_wal_concurrency 只用 WAL；不传则需设备的 bench 跳过）:
+  --device=PATH           数据设备（导出为 CABE_TEST_DEVICE）
+  --wal-device=PATH       WAL 设备（导出为 CABE_TEST_WAL_DEVICE）
+  --snapshot-device=PATH  快照设备（导出为 CABE_TEST_SNAPSHOT_DEVICE）
+                          建议用 ./scripts/mkloop.sh create-bench 的大设备
 
 归档选项:
   --baseline=PATH   把跑出的中位数结果写到 JSON 文件（按 P0M7 §5.2 schema）
                     不传则仅 stdout 打印 google-benchmark 原始报告
+
+查看:
+  --show=PATH       解析已有 bench JSON（google-benchmark 格式），打印
+                    中位数 / 吞吐 / cv 表格后退出——不跑测试、不需 --backend。
+                    例: --show=build-bench/gcc-io_uring-release/bench_engine.json
 
 冗余度:
   -v, --verbose     输出每格完整 cmake / build / 微基准日志
@@ -35,9 +51,14 @@ EOF
 }
 
 # ---------- 默认 ----------
-RUN_COMPILERS=(g++ clang++)
+RUN_COMPILERS=(g++)   # 默认只跑 g++；clang++ 需显式 --compiler=clang++ 或 --compiler=all
 VERBOSE=false
 BASELINE_FILE=""
+BACKEND=""          # P6M3-D16：无默认后端，必须经 --backend 显式传入
+DEVICE=""           # 三块设备：导出为 CABE_TEST_* 给 bench 程序读
+WAL_DEVICE=""
+SNAPSHOT_DEVICE=""
+SHOW_JSON=""        # --show=PATH：仅解析已有 bench JSON 并打印表格，不跑测试
 
 # ---------- 参数解析 ----------
 while [[ $# -gt 0 ]]; do
@@ -51,6 +72,21 @@ while [[ $# -gt 0 ]]; do
                 *) echo "Error: --compiler= 仅接受 g++ / clang++ / all（got: $v）" >&2; exit 2 ;;
             esac
             ;;
+        --backend=*)
+            v="${1#*=}"
+            case "$v" in
+                sync|io_uring|spdk) BACKEND="$v" ;;
+                *) echo "Error: --backend= 仅接受 sync / io_uring / spdk（got: $v）" >&2; exit 2 ;;
+            esac
+            ;;
+        --device=*)          DEVICE="${1#*=}" ;;
+        --device)            DEVICE="$2"; shift ;;
+        --wal-device=*)      WAL_DEVICE="${1#*=}" ;;
+        --wal-device)        WAL_DEVICE="$2"; shift ;;
+        --snapshot-device=*) SNAPSHOT_DEVICE="${1#*=}" ;;
+        --snapshot-device)   SNAPSHOT_DEVICE="$2"; shift ;;
+        --show=*)     SHOW_JSON="${1#*=}" ;;
+        --show)       SHOW_JSON="$2"; shift ;;
         --baseline=*) BASELINE_FILE="${1#*=}" ;;
         -v|--verbose) VERBOSE=true ;;
         -h|--help)    usage; exit 0 ;;
@@ -58,6 +94,46 @@ while [[ $# -gt 0 ]]; do
     esac
     shift
 done
+
+# ---------- --show：仅解析已有 bench JSON 并打印表格，不跑测试 ----------
+# 提取每个 benchmark 的中位数(real_time + 吞吐)与变异系数 cv（repetitions≥2 时 JSON 自带聚合行）。
+if [[ -n "$SHOW_JSON" ]]; then
+    command -v jq >/dev/null 2>&1 || { echo "Error: --show 需要 jq。安装: sudo dnf install jq" >&2; exit 3; }
+    [[ -f "$SHOW_JSON" ]] || { echo "Error: 找不到 JSON 文件: $SHOW_JSON" >&2; exit 2; }
+    echo ">>> 解析 $SHOW_JSON" >&2
+    rows=$(jq -r '
+      (reduce .benchmarks[] as $b ({};
+         if ($b.name|endswith("_cv")) then .[$b.name|rtrimstr("_cv")] = $b.real_time else . end)) as $cv
+      | .benchmarks[]
+      | select(.name|endswith("_median"))
+      | (.name|rtrimstr("_median")) as $base
+      | [ ($base|sub("/real_time$";"")),
+          ((.real_time*1000|round)/1000|tostring) + .time_unit,
+          ( if .bytes_per_second   then ((.bytes_per_second/1048576*10|round)/10|tostring)+" MiB/s"
+            elif .items_per_second then ((.items_per_second*10|round)/10|tostring)+" items/s"
+            else "-" end),
+          ((((($cv[$base])//0)*1000|round)/10)|tostring)+"%"
+        ] | @tsv
+    ' "$SHOW_JSON") || { echo "Error: 解析失败（JSON 格式不符？需 google-benchmark JSON）" >&2; exit 2; }
+    if [[ -z "$rows" ]]; then
+        echo "Error: 未找到聚合(_median)数据——该 JSON 可能是 repetitions=1（无聚合行）" >&2; exit 2
+    fi
+    { printf 'Benchmark\tmedian\tthroughput\tcv\n'; echo "$rows"; } \
+        | { command -v column >/dev/null 2>&1 && column -t -s $'\t' || cat; }
+    exit 0
+fi
+
+# ---------- 后端必填校验（P6M3-D16：自 P6 起取消默认后端） ----------
+if [[ -z "$BACKEND" ]]; then
+    echo "Error: --backend 为必填项（自 P6 起取消默认后端，见 doc/P6/README.md D10）。" >&2
+    echo "  指定其一: --backend=sync | --backend=io_uring（P6 性能锚点用 io_uring，P6M3-D15）" >&2
+    exit 2
+fi
+
+# ---------- 设备环境变量（bench 程序读 CABE_TEST_*；与 run-tests.sh 同名同法） ----------
+[[ -n "$DEVICE" ]]          && export CABE_TEST_DEVICE="$DEVICE"
+[[ -n "$WAL_DEVICE" ]]      && export CABE_TEST_WAL_DEVICE="$WAL_DEVICE"
+[[ -n "$SNAPSHOT_DEVICE" ]] && export CABE_TEST_SNAPSHOT_DEVICE="$SNAPSHOT_DEVICE"
 
 # ---------- 颜色 ----------
 if [[ -t 2 ]]; then
@@ -89,7 +165,7 @@ run_one() {
         g++)     compiler_short=gcc   ;;
         clang++) compiler_short=clang ;;
     esac
-    build_dir="$ROOT/build-bench/${compiler_short}-release"
+    build_dir="$ROOT/build-bench/${compiler_short}-${BACKEND}-release"
     log="$build_dir/run.log"
 
     # M6-D4 风格：跑前清空、跑完不清。失败硬卡，避免脏目录上跑出虚假数。
@@ -110,6 +186,7 @@ run_one() {
         -DCMAKE_CXX_COMPILER="$compiler"
         -DCMAKE_BUILD_TYPE=Release
         -DCABE_BUILD_BENCH=ON
+        -DCABE_IO_BACKEND="$BACKEND"
     )
 
     if $VERBOSE; then
@@ -178,7 +255,8 @@ run_one() {
 # ---------- 主体 ----------
 RESULTS=()
 total=${#RUN_COMPILERS[@]}
-echo ">>> 跑 $total 格: compilers=[${RUN_COMPILERS[*]}]  root=$ROOT" >&2
+echo ">>> 跑 $total 格: compilers=[${RUN_COMPILERS[*]}]  backend=$BACKEND  root=$ROOT" >&2
+echo "    设备: data=${DEVICE:-（未指定→需设备的 bench 跳过）} wal=${WAL_DEVICE:-（未指定）} snapshot=${SNAPSHOT_DEVICE:-（未指定）}" >&2
 idx=0
 for c in "${RUN_COMPILERS[@]}"; do
     idx=$((idx + 1))
@@ -235,7 +313,7 @@ if [[ -n "$BASELINE_FILE" ]]; then
             g++)     compiler_short=gcc   ;;
             clang++) compiler_short=clang ;;
         esac
-        build_dir="$ROOT/build-bench/${compiler_short}-release"
+        build_dir="$ROOT/build-bench/${compiler_short}-${BACKEND}-release"
 
         shopt -s nullglob
         local -a json_files=("$build_dir"/bench_*.json)
@@ -272,6 +350,7 @@ if [[ -n "$BASELINE_FILE" ]]; then
         --argjson cpu_features "$cpu_features" \
         --arg gcc_ver   "$gcc_ver" \
         --arg clang_ver "$clang_ver" \
+        --arg backend   "$BACKEND" \
         '{
             schema_version: "1.0",
             milestone: "P0M7",
@@ -284,7 +363,8 @@ if [[ -n "$BASELINE_FILE" ]]; then
             },
             build: {
                 type: "Release",
-                cmake_flags: ["-DCABE_BUILD_BENCH=ON"],
+                backend: $backend,
+                cmake_flags: ["-DCABE_BUILD_BENCH=ON", "-DCABE_IO_BACKEND=\($backend)"],
                 compiler_specific: {
                     "g++": $gcc_ver,
                     "clang++": $clang_ver

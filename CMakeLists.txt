@@ -44,8 +44,14 @@ set_property(CACHE CMAKE_BUILD_TYPE PROPERTY STRINGS Debug Release RelWithDebInf
 # CABE_SANITIZER 在 M1 即应用编译开关（见设计 §3 偏差-1）。
 set(CABE_SANITIZER "none" CACHE STRING "Sanitizer: none|address|thread|undefined")
 set_property(CACHE CABE_SANITIZER PROPERTY STRINGS none address thread undefined)
-# 以下两项 M1 仅声明 + 校验，真实编译期分派在 P3（IO）/ P3·P9（索引）。
-set(CABE_IO_BACKEND "sync" CACHE STRING "I/O backend: sync|io_uring|spdk")
+# 以下 META_INDEX 项 M1 仅声明 + 校验，真实编译期分派在 P3·P9。
+# CABE_IO_BACKEND：自 P6 起取消默认后端、改为必填（P6M3-D16；见 ROADMAP P6 段「后端策略」/
+#   doc/P6/README.md D10）。检查须在 set(... CACHE ...) 之前——-D 传入时 CMake 已先建缓存项、
+#   DEFINED 为真；未传则此处未定义、直接 fail-fast。脚本经 --backend 传入。
+if(NOT DEFINED CABE_IO_BACKEND)
+    message(FATAL_ERROR "必须显式指定 I/O 后端：-DCABE_IO_BACKEND=sync|io_uring|spdk（自 P6 起取消默认后端，见 ROADMAP P6 段「后端策略」/ doc/P6/README.md D10；脚本用 --backend 传入）")
+endif()
+set(CABE_IO_BACKEND "${CABE_IO_BACKEND}" CACHE STRING "I/O backend: sync|io_uring|spdk（必填，无默认）")
 set_property(CACHE CABE_IO_BACKEND PROPERTY STRINGS sync io_uring spdk)
 set(CABE_META_INDEX "hashmap" CACHE STRING "Meta index: hashmap|bplustree")
 set_property(CACHE CABE_META_INDEX PROPERTY STRINGS hashmap bplustree)

@@ -23,9 +23,10 @@ usage() {
   --ubsan             启用 UndefinedBehaviorSanitizer
                       不传则不开检测器
 
-后端（P3+ 生效）:
-  --backend=NAME      IoBackend 选择: sync（默认）| io_uring | spdk
-                      P1-P2 阶段仅 sync 可用；其他值 CMake 会报错
+后端（必填）:
+  --backend=NAME      IoBackend 选择: sync | io_uring | spdk
+                      自 P6 起取消默认后端、必须显式指定（见 ROADMAP P6 段
+                      「后端策略」/ doc/P6/README.md D10）；非法值 CMake 会报错
 
 工具链（可选）:
   --compiler=NAME     指定编译器: g++（默认）/ clang++
@@ -79,7 +80,7 @@ SANITIZER="none"
 SAN_SUFFIX=""
 COMPILER="g++"
 COMPILER_SUFFIX=""
-BACKEND="sync"
+BACKEND=""          # P6M3-D16：无默认后端，必须经 --backend 显式传入
 BACKEND_SUFFIX=""
 CLEAN=false
 DEVICE=""
@@ -123,6 +124,14 @@ case "$COMPILER" in
     *) echo "Error: --compiler= 仅接受 g++ / clang++（got: $COMPILER）" >&2; exit 2 ;;
 esac
 [[ "$COMPILER" != "g++" ]] && COMPILER_SUFFIX="-clang"
+
+# ---------- 后端必填校验（P6M3-D16：自 P6 起取消默认后端） ----------
+if [[ -z "$BACKEND" ]]; then
+    echo "Error: --backend 为必填项（自 P6 起取消默认后端，见 ROADMAP P6 段「后端策略」/ doc/P6/README.md D10）。" >&2
+    echo "  指定其一: --backend=sync | --backend=io_uring" >&2
+    echo "  例: ./scripts/run-tests.sh --backend=sync --device=... --wal-device=... --snapshot-device=..." >&2
+    exit 2
+fi
 
 # ---------- TSAN + io_uring 不兼容前置拒绝（P4 D19 预留） ----------
 if [[ "$BACKEND" == "io_uring" && "$SAN_SUFFIX" == "-tsan" ]]; then

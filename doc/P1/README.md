@@ -20,7 +20,7 @@
 - 单层 MetaIndex（直接 `std::unordered_map<std::string, ValueMeta>`，**不引入抽象层**）
 - 单 Put / Get / Delete 完整路径
 - 严格 `value.size() == kValueSize` 校验
-- 单元测试 + 微基准基线归档到 `bench/baselines/p1_single_thread.json`
+- 单元测试 + 微基准基线归档到 `bench/baselines/p1_single_thread.json`（**P6 起作废**：早期基线已删除，性能基线一律以 P6 为唯一锚点，见 ROADMAP §六）
 
 ## 里程碑文档清单
 
