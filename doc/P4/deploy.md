@@ -82,7 +82,7 @@ io_uring 后端**不支持** TSAN（线程检测器）测试。
 
 ```bash
 # TSAN 测试（sync 后端）
-./scripts/run-tests.sh --tsan --device=/dev/loop0
+./scripts/run-tests.sh --backend=sync --tsan --device=/dev/loop0
 
 # io_uring 测试（ASAN / UBSAN 可用）
 ./scripts/run-tests.sh --backend=io_uring --asan --device=/dev/loop0

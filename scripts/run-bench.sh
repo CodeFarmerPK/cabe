@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # ============================================================
-# Cabe —— 微基准运行脚本（P0-M7）
-# 跑 {g++, clang++} × Release 的 google-benchmark；可选 --baseline 归档
-# 设计依据：doc/P0/P0M7_convergence_design.md §5
+# Cabe —— 微基准运行脚本（P0-M7 起；P6 起：--backend 必填、默认编译器 g++、加 --device/--show）
+# 跑 google-benchmark（默认仅 g++ × Release；clang++ 需 --compiler=clang++/all）
+# 设计依据：doc/P0/P0M7_convergence_design.md §5；P6 调整见 doc/P6/P6M3 §6.5 / bench/baselines/README.md
 # ============================================================
 # set -e 不开：单格失败要继续跑剩余格子并在末尾汇总
 set -uo pipefail
@@ -27,10 +27,6 @@ usage() {
   --snapshot-device=PATH  快照设备（导出为 CABE_TEST_SNAPSHOT_DEVICE）
                           建议用 ./scripts/mkloop.sh create-bench 的大设备
 
-归档选项:
-  --baseline=PATH   把跑出的中位数结果写到 JSON 文件（按 P0M7 §5.2 schema）
-                    不传则仅 stdout 打印 google-benchmark 原始报告
-
 查看:
   --show=PATH       解析已有 bench JSON（google-benchmark 格式），打印
                     中位数 / 吞吐 / cv 表格后退出——不跑测试、不需 --backend。
@@ -44,8 +40,8 @@ usage() {
   -h, --help        输出本用法
 
 退出码:
-  0  全部 OK；若传 --baseline 则 JSON 写入成功
-  1  任一格 FAIL；或 --baseline 写入失败
+  0  全部 OK
+  1  任一格 FAIL
   2  参数错误
 EOF
 }
@@ -53,7 +49,6 @@ EOF
 # ---------- 默认 ----------
 RUN_COMPILERS=(g++)   # 默认只跑 g++；clang++ 需显式 --compiler=clang++ 或 --compiler=all
 VERBOSE=false
-BASELINE_FILE=""
 BACKEND=""          # P6M3-D16：无默认后端，必须经 --backend 显式传入
 DEVICE=""           # 三块设备：导出为 CABE_TEST_* 给 bench 程序读
 WAL_DEVICE=""
@@ -87,7 +82,6 @@ while [[ $# -gt 0 ]]; do
         --snapshot-device)   SNAPSHOT_DEVICE="$2"; shift ;;
         --show=*)     SHOW_JSON="${1#*=}" ;;
         --show)       SHOW_JSON="$2"; shift ;;
-        --baseline=*) BASELINE_FILE="${1#*=}" ;;
         -v|--verbose) VERBOSE=true ;;
         -h|--help)    usage; exit 0 ;;
         *) echo "Error: 未知参数: $1" >&2; usage >&2; exit 2 ;;
@@ -145,14 +139,6 @@ if [[ -t 1 ]]; then
     S_GREEN=$'\033[32m'; S_RED=$'\033[31m'; S_RST=$'\033[0m'
 else
     S_GREEN=""; S_RED=""; S_RST=""
-fi
-
-# ---------- baseline 前置依赖自检（jq 在归档环节用） ----------
-if [[ -n "$BASELINE_FILE" ]]; then
-    if ! command -v jq >/dev/null 2>&1; then
-        echo "Error: --baseline 需要 'jq'。安装：sudo dnf install jq" >&2
-        exit 1
-    fi
 fi
 
 # ---------- 单格执行 ----------
@@ -287,110 +273,6 @@ if (( fail_count == 0 )); then
 else
     printf '%s%d / %d 失败%s\n' "$S_RED" "$fail_count" "$total" "$S_RST"
     exit 1
-fi
-
-# ---------- 若传 --baseline，合并 JSON 落入 ----------
-if [[ -n "$BASELINE_FILE" ]]; then
-    echo
-    echo ">>> 归档基线: $BASELINE_FILE"
-    mkdir -p "$(dirname "$BASELINE_FILE")"
-
-    # 元数据
-    git_commit=$(git -C "$ROOT" rev-parse --short HEAD 2>/dev/null || echo "unknown")
-    captured_at=$(date +%Y-%m-%d)
-    kernel=$(uname -r)
-    cpu_model=$(grep -m1 'model name' /proc/cpuinfo | sed 's/^[^:]*:\s*//' || echo "unknown")
-    gcc_ver=$(g++ --version 2>/dev/null | head -n1 || echo "n/a")
-    clang_ver=$(clang++ --version 2>/dev/null | head -n1 || echo "n/a")
-    has_sse42="false"
-    grep -q sse4_2 /proc/cpuinfo && has_sse42="true"
-    cpu_features=$(jq -n --argjson sse "$has_sse42" '[if $sse then "sse4.2" else empty end]')
-
-    # 收集各工具链的 results（自动发现所有 bench_*.json）
-    results_json='{}'
-    for c in "${RUN_COMPILERS[@]}"; do
-        case "$c" in
-            g++)     compiler_short=gcc   ;;
-            clang++) compiler_short=clang ;;
-        esac
-        build_dir="$ROOT/build-bench/${compiler_short}-${BACKEND}-release"
-
-        shopt -s nullglob
-        local -a json_files=("$build_dir"/bench_*.json)
-        shopt -u nullglob
-        if (( ${#json_files[@]} == 0 )); then
-            echo "Warning: $c 无 bench JSON 文件，跳过" >&2
-            continue
-        fi
-
-        # 合并所有 bench_*.json 的 benchmarks 数组，取 median 聚合
-        compiler_results=$(jq -s '
-            [.[].benchmarks[]]
-            | map(select(.run_type == "aggregate" and .aggregate_name == "median"))
-            | map({
-                key: ("bench_" + (.name | sub("_median$"; "") | sub("^BM_"; "") | sub("^EngineBench/BM_"; "engine/BM_") | ascii_downcase)),
-                value: {
-                    items_per_second: (.items_per_second // null),
-                    bytes_per_second: (.bytes_per_second // null),
-                    cpu_time_ns: (.cpu_time // null)
-                }
-            })
-            | from_entries
-        ' "${json_files[@]}") || { echo "Error: jq 解析 $c 失败" >&2; exit 1; }
-        results_json=$(echo "$results_json" | jq --arg c "$c" --argjson r "$compiler_results" '. + {($c): $r}')
-    done
-
-    # 拼接最终 JSON
-    if ! jq -n \
-        --argjson results "$results_json" \
-        --arg captured_at "$captured_at" \
-        --arg git_commit  "$git_commit" \
-        --arg kernel      "$kernel" \
-        --arg cpu_model   "$cpu_model" \
-        --argjson cpu_features "$cpu_features" \
-        --arg gcc_ver   "$gcc_ver" \
-        --arg clang_ver "$clang_ver" \
-        --arg backend   "$BACKEND" \
-        '{
-            schema_version: "1.0",
-            milestone: "P0M7",
-            captured_at: $captured_at,
-            git_commit: $git_commit,
-            env: {
-                kernel: $kernel,
-                cpu_model: $cpu_model,
-                cpu_features_relevant: $cpu_features
-            },
-            build: {
-                type: "Release",
-                backend: $backend,
-                cmake_flags: ["-DCABE_BUILD_BENCH=ON", "-DCABE_IO_BACKEND=\($backend)"],
-                compiler_specific: {
-                    "g++": $gcc_ver,
-                    "clang++": $clang_ver
-                }
-            },
-            method: {
-                tool: "google-benchmark",
-                repetitions: 5,
-                aggregate: "median",
-                rationale: "5 次重复取中位数：抑制单次波动 + 比均值更稳健于离群"
-            },
-            results: $results,
-            notes: "P0 收敛基线；P1+ 不强制不退步——仅作回归参考。完整方法见 doc/P0/P0M7_convergence_design.md §5。"
-        }' > "$BASELINE_FILE"
-    then
-        echo "Error: baseline JSON 写入失败" >&2
-        exit 1
-    fi
-
-    # 再校验 jq 一次（输出 JSON 是否合法）
-    if ! jq -e . "$BASELINE_FILE" >/dev/null; then
-        echo "Error: 写出的 baseline JSON 不合法" >&2
-        exit 1
-    fi
-
-    echo "基线已写入: $BASELINE_FILE"
 fi
 
 exit 0

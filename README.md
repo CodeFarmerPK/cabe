@@ -26,7 +26,7 @@ Cabe 是一个面向单机部署的 KV 存储引擎:
 
 ## 项目状态
 
-当前处于 **P4.5(块分配器改造)阶段**。完整路线见 [ROADMAP.md](ROADMAP.md)。
+当前 **P6(Group Commit)已收尾**,准备进入 **P7(Reactor 并发模型)**。完整路线见 [ROADMAP.md](ROADMAP.md)。
 
 | 阶段 | 内容 | 状态 |
 |---|---|---|
@@ -37,7 +37,7 @@ Cabe 是一个面向单机部署的 KV 存储引擎:
 | P4 | io_uring 后端 | ✅ 完成 |
 | P4.5 | 块分配器改造 | ✅ 完成 |
 | P5 | WAL + Recovery + Snapshot | ✅ 完成 |
-| P6 | Group Commit | ✅ 完成(M4 附加基准待补) |
+| P6 | Group Commit | ✅ 完成 |
 | P7 | Reactor + 无锁 MT + 多 device 端到端 | ⏳ |
 | P8 | 零拷贝主路径 | ⏳ |
 | P9 | B+ 树索引(学习路径) | ⏳ |
