@@ -5,6 +5,7 @@
 #include "util/util.h"
 
 #include <cstring>
+#include <memory>
 #include <vector>
 
 namespace cabe {
@@ -16,18 +17,29 @@ namespace cabe {
     } // namespace
 
     Engine::~Engine() {
-        if (opened_) {
+        if (opened_.load(std::memory_order_acquire)) {
             CABE_LOG_WARN("Engine 析构时仍处于 Opened 状态，自动 Close");
             Close();
         }
     }
 
     Status Engine::Open(const Options& opts) {
-        if (opened_) return Status::Error(err::kEngineAlreadyOpen);
+        if (opened_.load(std::memory_order_acquire)) return Status::Error(err::kEngineAlreadyOpen);
         if (opts.devices.empty()) return Status::Error(err::kEngineInvalidOpts);
         if (opts.devices.size() > 1) return Status::Error(err::kEngineInvalidOpts);
 
-        options_ = opts;   // P5M3：常驻；组件持 &options_ 现读 wal_level
+        options_ = opts;   // P5M3：常驻；组件持 &options_ 现读 wal_level（M1 只读）
+
+        // ---- 阶段一：逐设备 create/recover 进临时 holder（reactor 线程尚未起，单线程，P7-D11）----
+        std::vector<DeviceContext> recovered;
+        recovered.reserve(opts.devices.size());
+
+        auto fail_phase1 = [&](DeviceContext& dc, int32_t rc) -> Status {
+            AbortOpen(dc);
+            for (auto& d : recovered) AbortOpen(d);
+            recovered.clear();
+            return Status::Error(rc);
+        };
 
         for (std::size_t i = 0; i < opts.devices.size(); ++i) {
             const auto& cfg = opts.devices[i];
@@ -37,62 +49,57 @@ namespace cabe {
             int32_t rc = opts.create
                 ? CreateDeviceGroup(cfg, i, &dc.super_block)
                 : RecoverDeviceGroup(cfg, i, &dc.super_block);
-            if (rc != err::kSuccess) {
-                AbortOpen(dc);
-                return Status::Error(rc);
-            }
+            if (rc != err::kSuccess) return fail_phase1(dc, rc);
 
             // 打开数据设备的 IoBackend——流水线 ②
             rc = dc.io.Open(cfg.data_path, &options_);
-            if (rc != err::kSuccess) {
-                AbortOpen(dc);
-                return Status::Error(rc);
-            }
+            if (rc != err::kSuccess) return fail_phase1(dc, rc);
 
-            // 兜底：超级块持久 block_count 不应超过 IoBackend 实测可寻址块数（recover 已核对，
-            // 此处再防御任何绕过 RecoverDeviceGroup 的路径或现算/持久值漂移）。
+            // 兜底：超级块持久 block_count 不应超过 IoBackend 实测可寻址块数。
             if (dc.super_block.block_count > dc.io.BlockCount()) {
                 CABE_LOG_ERROR("block_count 不一致: 超级块=%llu > 设备=%llu",
                                static_cast<unsigned long long>(dc.super_block.block_count),
                                static_cast<unsigned long long>(dc.io.BlockCount()));
-                AbortOpen(dc);
-                return Status::Error(err::kSuperBlockSizeMismatch);
+                return fail_phase1(dc, err::kSuperBlockSizeMismatch);
             }
 
             dc.pool = BufferPool(kDefaultPoolBlocks);
-            // 用超级块记录的 block_count（数据区块数，权威值）；逻辑 block 从 0，
-            // 物理偏移由 IoBackend 加 kDataRegionOffset
-            // TODO(P7/多设备): BlockId 的 device 位此处硬编码为 0，而 super_block.device_id=i；
-            //   多设备启用后应改为 static_cast<DeviceId>(i) 并与 RouteKey 路由对齐。
+            // TODO(P7/多设备 M4): BlockId device 位此处仍硬编码 0；M4 改 static_cast<DeviceId>(i)
+            //   并与 RouteKey 路由对齐。M1 是 N=1，device 位无歧义。
             dc.block_allocator.Init(0, dc.super_block.block_count);
 
             if (opts.create) {
                 // create：开 WAL + 快照设备（空环 / 清槽），索引从空开始。
                 rc = dc.wal.Open(cfg.wal_path, &options_);
-                if (rc != err::kSuccess) {
-                    AbortOpen(dc);
-                    return Status::Error(rc);
-                }
-
+                if (rc != err::kSuccess) return fail_phase1(dc, rc);
                 rc = dc.snapshot.Open(cfg.snapshot_path, &options_, dc.super_block);
-                if (rc != err::kSuccess) {
-                    AbortOpen(dc);
-                    return Status::Error(rc);
-                }
+                if (rc != err::kSuccess) return fail_phase1(dc, rc);
             } else {
-                // P5M6 recover：完整恢复链（流水线 ③~⑨）。要么完整恢复要么干净失败（D3）——
-                // 任一环错走 AbortOpen + 原始码上抛，绝不交付半份索引。
+                // P5M6 recover：完整恢复链（流水线 ③~⑨）。要么完整恢复要么干净失败（D3）。
                 rc = RecoverDevice(cfg, dc);
-                if (rc != err::kSuccess) {
-                    AbortOpen(dc);
-                    return Status::Error(rc);
-                }
+                if (rc != err::kSuccess) return fail_phase1(dc, rc);
             }
 
-            devices_.push_back(std::move(dc));
+            recovered.push_back(std::move(dc));
         }
 
-        opened_ = true;
+        // ---- 阶段二：全部 recover 成功 → 逐个 move 进 Reactor + Start（P7-D4/D11）----
+        for (std::size_t i = 0; i < recovered.size(); ++i) {
+            auto r = std::make_unique<Reactor>(std::move(recovered[i]));
+            int32_t rc = r->Start();
+            if (rc != err::kSuccess) {
+                // Start 失败（明显故障：线程/资源创建）：停掉已起的 reactor；
+                // recovered[i] 的 dc 已 move 进 r，r 析构会关它；recovered[i+1..] 未 wrap，AbortOpen
+                // 逐个关（已 move 出的是安全空操作）。
+                CABE_LOG_ERROR("reactor 启动失败: rc=%d", rc);
+                reactors_.clear();
+                for (auto& d : recovered) AbortOpen(d);
+                return Status::Error(rc);
+            }
+            reactors_.push_back(std::move(r));
+        }
+
+        opened_.store(true, std::memory_order_release);
         CABE_LOG_INFO("Engine::Open 成功: %zu 个设备 (%s)", opts.devices.size(),
                       opts.create ? "create" : "recover");
         return Status::Ok();
@@ -100,181 +107,74 @@ namespace cabe {
     }
 
     Status Engine::Close() {
-        if (!opened_) return Status::Error(err::kEngineNotOpen);
+        if (!opened_.load(std::memory_order_acquire)) return Status::Error(err::kEngineNotOpen);
+        opened_.store(false, std::memory_order_release);   // 尽力挡新调用；竞态由 reactor 的 drain-then-close 兜
 
-        // 关闭每个设备：先 wal（含攒批档收尾 Flush）再 io；记下第一个错误并向上传播，
-        // 但仍关完所有设备（避免 fd 泄漏）。级别 2/4 收尾刷盘失败必须让调用方知道。
+        // 逐 reactor：投 Stop op + join（drain-then-close，关 snapshot→wal→io）+ 取关闭首错。
         int32_t first_err = err::kSuccess;
-        for (auto& dc : devices_) {
-            int32_t src = dc.snapshot.Close();
-            int32_t wrc = dc.wal.Close();
-            int32_t irc = dc.io.Close();
-            if (first_err == err::kSuccess)
-                first_err = (src != err::kSuccess) ? src : (wrc != err::kSuccess) ? wrc : irc;
+        for (auto& r : reactors_) {
+            int32_t rc = r->Stop();
+            if (first_err == err::kSuccess) first_err = rc;
         }
-        devices_.clear();
-        opened_ = false;
+        reactors_.clear();   // 线程已 join、dc 已关；析构是干净的
         CABE_LOG_INFO("Engine::Close 完成");
         return first_err != err::kSuccess ? Status::Error(first_err) : Status::Ok();
     }
 
-    Status Engine::Put(std::string_view key, DataView value) {
-        if (!opened_) return Status::Error(err::kEngineNotOpen);
-        if (key.empty()) return Status::Error(err::kMemEmptyKey);
-        if (value.size() != kValueSize) return Status::Error(err::kEngineInvalidValue);
+    // ---- P7M1：写路径与运营口暂返 not-implemented（M2 入 reactor）。参数不命名以避 -Wunused-parameter ----
 
-        if (key.size() > kWalKeyMax) return Status::Error(err::kWalKeyTooLong);
-
-        auto& dc = devices_[RouteKey(key)];
-
-        // 申请新块（不先回收旧块——旧块在提交成功后才回收，覆盖安全；见 P5M2 §7.3）
-        BlockId block_id{};
-        int32_t rc = dc.block_allocator.Acquire(&block_id);
-        if (rc != err::kSuccess) return Status::Error(rc);
-
-        std::byte* buf = dc.pool.Allocate();
-        if (!buf) {
-            dc.block_allocator.Recycle(block_id);
-            return Status::Error(err::kEnginePoolExhausted);
-        }
-        std::memcpy(buf, value.data(), kValueSize);
-        const std::uint32_t value_crc = util::CRC32(value);
-        const std::uint64_t now = util::GetWallTimeNs();
-
-        // 按级别（io.Write 现读 wal_level）：1/2 value FUA、3/4 异步；写在 WAL 之前
-        rc = dc.io.Write(block_id.block_idx(), buf);
-        dc.pool.Free(buf);
-        if (rc != err::kSuccess) {
-            dc.block_allocator.Recycle(block_id);
-            return Status::Error(rc);
-        }
-
-        // 按级别（wal.WriteWal 现读 wal_level）：1/3 同步落盘、2/4 攒批；预写日志，写在内存索引之前。
-        // P5M5：经撞墙救援包装——环满时强制快照腾空间再重试一次。
-        rc = WriteWalRescuing(dc, WalEntry{WalEntryType::Put, key, block_id, value_crc, now});
-        if (rc != err::kSuccess) {
-            dc.block_allocator.Recycle(block_id);
-            return Status::Error(rc);
-        }
-
-        // 提交到内存索引（WAL 落盘成功之后）
-        ValueMeta old_meta{};
-        const bool had_old = (dc.meta_index.Lookup(key, &old_meta) == err::kSuccess);
-        ValueMeta meta{};
-        meta.block     = block_id;
-        meta.timestamp = now;
-        meta.crc       = value_crc;
-        meta.state     = ValueState::Active;
-        dc.meta_index.Insert(key, meta);
-
-        // 提交成功后回收旧块（覆盖写时的前一份 value）
-        if (had_old) {
-            dc.block_allocator.Recycle(old_meta.block);
-            TrimDeviceBlock(dc, old_meta.block);
-        }
-
-        // P5M4：写已提交，查大小阈值，到了就（自动、发后不管）触发一份快照。
-        MaybeRequestSnapshot(dc);
-        return Status::Ok();
+    Status Engine::Put(std::string_view, DataView) {
+        if (!opened_.load(std::memory_order_acquire)) return Status::Error(err::kEngineNotOpen);
+        return Status::Error(err::kEngineNotImplemented);   // P7M2：Put 写路径入 reactor
     }
 
     Status Engine::Get(std::string_view key, DataBuffer value) {
-        if (!opened_) return Status::Error(err::kEngineNotOpen);
+        if (!opened_.load(std::memory_order_acquire)) return Status::Error(err::kEngineNotOpen);
         if (key.empty()) return Status::Error(err::kMemEmptyKey);
         if (value.size() != kValueSize) return Status::Error(err::kEngineInvalidValue);
 
-        auto& dc = devices_[RouteKey(key)];
-
-        ValueMeta meta{};
-        int32_t rc = dc.meta_index.Lookup(key, &meta);
-        if (rc != err::kSuccess) return Status::Error(rc);
-
-        std::byte* buf = dc.pool.Allocate();
-        if (!buf) return Status::Error(err::kEnginePoolExhausted);
-
-        rc = dc.io.Read(meta.block.block_idx(), buf);
-        if (rc != err::kSuccess) {
-            dc.pool.Free(buf);
-            return Status::Error(rc);
-        }
-
-        std::uint32_t crc_check = util::CRC32(DataView{buf, kValueSize});
-        if (crc_check != meta.crc) {
-            CABE_LOG_ERROR("CRC32 不匹配: 存储=0x%08X 读出=0x%08X", meta.crc, crc_check);
-            dc.pool.Free(buf);
-            return Status::Error(err::kEngineDataCorrupted);
-        }
-
-        std::memcpy(value.data(), buf, kValueSize);
-        dc.pool.Free(buf);
-        return Status::Ok();
+        // 算路由 → 栈上建 op（零堆分配）→ 投递 reactor 并挂起 → 醒来取结果码 → 翻译 Status。
+        OpNode op{OpType::Get, key, value};   // result/next/wake 用默认初始化
+        const int32_t rc = SubmitAndWait(*reactors_[RouteKey(key)], op);
+        return rc == err::kSuccess ? Status::Ok() : Status::Error(rc);
     }
 
-    Status Engine::Delete(std::string_view key) {
-        if (!opened_) return Status::Error(err::kEngineNotOpen);
-        if (key.empty()) return Status::Error(err::kMemEmptyKey);
-
-        auto& dc = devices_[RouteKey(key)];
-
-        ValueMeta meta{};
-        int32_t rc = dc.meta_index.Lookup(key, &meta);
-        if (rc != err::kSuccess) return Status::Error(rc);   // 不存在 → 不写 WAL
-
-        // 按级别：1/3 同步落盘、2/4 攒批；墓碑帧写在内存改动之前（预写日志）。
-        // P5M5：经撞墙救援包装（同 Put）。
-        rc = WriteWalRescuing(dc, WalEntry{WalEntryType::Delete, key, BlockId{}, 0, util::GetWallTimeNs()});
-        if (rc != err::kSuccess) return Status::Error(rc);   // WAL 失败 → 不动内存
-
-        dc.meta_index.Delete(key);
-        dc.block_allocator.Recycle(meta.block);
-        TrimDeviceBlock(dc, meta.block);
-
-        // P5M4：墓碑写已提交，查大小阈值（Delete 也让 WAL 增长）。
-        MaybeRequestSnapshot(dc);
-        return Status::Ok();
+    Status Engine::Delete(std::string_view) {
+        if (!opened_.load(std::memory_order_acquire)) return Status::Error(err::kEngineNotOpen);
+        return Status::Error(err::kEngineNotImplemented);   // P7M2：Delete 写路径入 reactor
     }
 
-    Status Engine::SetWalLevel(WalLevel new_level) {
-        if (!opened_) return Status::Error(err::kEngineNotOpen);
-        if (!IsValidWalLevel(new_level)) return Status::Error(err::kEngineInvalidOpts);
-        const WalLevel old = options_.wal_level;
-        // 收紧 WAL（攒批档 2/4 → 同步档 1/3）：先把各设备攒批缓冲刷净，新保证才从此刻成立。
-        const bool tighten_wal = !IsWalSyncLevel(old) && IsWalSyncLevel(new_level);
-        if (tighten_wal) {
-            for (auto& dc : devices_) {
-                int32_t rc = dc.wal.Flush();
-                if (rc != err::kSuccess) return Status::Error(rc);
-            }
-        }
-        options_.wal_level = new_level;   // 组件下次操作自然现读到
-        return Status::Ok();
+    Status Engine::SetWalLevel(WalLevel) {
+        if (!opened_.load(std::memory_order_acquire)) return Status::Error(err::kEngineNotOpen);
+        return Status::Error(err::kEngineNotImplemented);   // P7M2：运营口入 reactor（wal_level 转 per-reactor）
     }
 
-    bool Engine::is_open() const noexcept { return opened_; }
+    Status Engine::Snapshot() {
+        if (!opened_.load(std::memory_order_acquire)) return Status::Error(err::kEngineNotOpen);
+        return Status::Error(err::kEngineNotImplemented);   // P7M2：运营口 fan-out 入 reactor
+    }
+
+    bool Engine::is_open() const noexcept { return opened_.load(std::memory_order_acquire); }
 
     std::size_t Engine::RouteKey(std::string_view key) const noexcept {
         (void)key;
-        return 0;
+        return 0;   // P7M1：N=1，单 reactor；M4 改 hash(key)%N（P7-D7）
     }
 
     void Engine::TrimDeviceBlock(DeviceContext& dc, BlockId id) {
-        // TODO(P7): 通过待 TRIM 队列异步批量发送 BLKDISCARD
+        // TODO(P7): 通过待 TRIM 队列异步批量发送 BLKDISCARD（P7 首轮不做，留性能轮）
         (void)dc;
         (void)id;
     }
 
     void Engine::AbortOpen(DeviceContext& dc) {
-        // Open 失败路径统一清理：先关当前还未入列的局部 dc（已打开的句柄不留给析构兜底），
-        // 再关已入列设备、清空列表。各 Close 对未打开句柄都是安全空操作；
-        // 错误码不在此收集——Open 向上返回的是原始失败码。
+        // 关一个裸 dc 的三设备句柄。各 Close 对未打开 / moved-from 句柄都是安全空操作。
         dc.snapshot.Close();
         dc.wal.Close();
         dc.io.Close();
-        for (auto& d : devices_) { d.snapshot.Close(); d.wal.Close(); d.io.Close(); }
-        devices_.clear();
     }
 
-    // ---- P5M6：恢复编排（流水线 ③~⑨，设计稿 §4）----
+    // ---- P5M6：恢复编排（流水线 ③~⑨，设计稿 §4；Open 阶段一在裸 dc 上跑）----
 
     int32_t Engine::RecoverDevice(const DeviceConfig& cfg, DeviceContext& dc) {
         // ③ 快照设备：开 + 双槽裁决 + 状态重建（last_trigger_seq = covered 也在其内落位）。
@@ -433,31 +333,16 @@ namespace cabe {
         return err::kSuccess;
     }
 
-    // ---- P5M4：快照触发链 ----
-
-    Status Engine::Snapshot() {
-        if (!opened_) return Status::Error(err::kEngineNotOpen);
-        // 手动触发：同步执行、逐设备各做一份、返回第一个错误。
-        // P5M6：引擎开着 ⇒ 三设备必然全开着（recover 守卫已拆，D20）。
-        int32_t first_err = err::kSuccess;
-        for (auto& dc : devices_) {
-            int32_t rc = DoSnapshot(dc);
-            if (first_err == err::kSuccess) first_err = rc;
-        }
-        return first_err != err::kSuccess ? Status::Error(first_err) : Status::Ok();
-    }
+    // ---- P5M4/M5：快照触发链 + 撞墙救援（P7M1 暂不调用，dead；M2 写路径入 reactor 时启用/迁入）----
 
     int32_t Engine::DoSnapshot(DeviceContext& dc) {
-        // 一次快照尝试从这里开始：先推进退避基准（成败都算，设计 §10.3）。记账放在尝试的
-        // 起点而非 Snapshot::Write 内，保证"还没到 Write 就失败"的路径（如下面刷 WAL 失败）
-        // 也被记账——否则攒批档（2/4）+ WAL 设备故障时，每次写都会重试一遍注定失败的刷盘。
+        // 一次快照尝试从这里开始：先推进退避基准（成败都算，设计 §10.3）。
         dc.snapshot.NoteTriggerAttempt(dc.wal.last_seq());
         // 先刷 WAL（默认级别 3 是空操作）→ 定格时刻成对捕获 → 驱动遍历写快照。
         int32_t rc = dc.wal.Flush();
         if (rc != err::kSuccess) return rc;
 
         // P5M5：与 covered_seq 同刻捕获回收边界（covered_seq 的物理孪生，设计 §6.2）。
-        // 必须在 Flush 之后——变体 Y 下此时的窗口起点才是"已持久且永不再被重写"的边界。
         const std::uint64_t covered_seq = dc.wal.last_seq();
         const std::uint64_t boundary    = dc.wal.reclaim_boundary();
 
@@ -466,9 +351,7 @@ namespace cabe {
         });
         if (rc != err::kSuccess) return rc;    // 快照失败 → 不回收，boundary 随栈丢弃（铁律）
 
-        // P5M5：快照已落地 → 回收（head 跳到边界，铁律的落点）。回收失败只记日志、不上抛——
-        // 快照确实持久了（对调用方报失败是说谎）；失败是保守方向（空间暂不复用、正确性零损），
-        // 且下次快照会捕获新边界自然再收（自愈）。Wal 侧已记 FATAL。
+        // P5M5：快照已落地 → 回收（head 跳到边界）。回收失败只记日志、不上抛（自愈）。
         const int32_t rrc = dc.wal.ReclaimUpTo(boundary);
         if (rrc != err::kSuccess) {
             CABE_LOG_ERROR("WAL 回收失败（快照本身已成功，空间暂不复用）: rc=%d", rrc);
@@ -480,11 +363,7 @@ namespace cabe {
         int32_t rc = dc.wal.WriteWal(e);
         if (rc != err::kWalFull) return rc;    // 正常路径零开销：就一个比较
 
-        // 撞墙救援（P5M5 §8.2）：环满 → 强制快照腾空间。直调 DoSnapshot、绕过增长闸门——
-        // 撞墙后写入失败、WAL 不再增长，闸门若拦它会卡死且设备恢复后无法自愈。
-        // 语义自洽：本次 key 尚未入索引 → 快照不含本次写；被拒帧 seq 未分配 → covered_seq
-        // 不含它；重试的新帧 seq > covered_seq → 活帧。双故障（环满 + 快照坏）下每次写会做
-        // 一次注定失败的尝试——系统本就在持续报错，吵闹换自愈（设计 D13 如实认账）。
+        // 撞墙救援（P5M5 §8.2）：环满 → 强制快照腾空间。直调 DoSnapshot、绕过增长闸门。
         CABE_LOG_WARN("WAL 环已满，强制快照腾空间");
         rc = DoSnapshot(dc);
         if (rc != err::kSuccess) return err::kWalFull;   // 救不了 → 对外就是"满"（运维信号）
@@ -493,8 +372,7 @@ namespace cabe {
     }
 
     void Engine::RequestSnapshot(DeviceContext& dc) {
-        // 自动触发汇总入口：发后不管。M4 同步执行；P7 改为唤醒后台快照线程。
-        // 快照失败不连累本次写，只记日志（退避基准已在 DoSnapshot 入口推进）。
+        // 自动触发汇总入口：发后不管。快照失败不连累本次写，只记日志。
         int32_t rc = DoSnapshot(dc);
         if (rc != err::kSuccess) {
             CABE_LOG_ERROR("自动触发的快照失败: rc=%d（不影响本次写，后续按退避重试）", rc);
@@ -503,7 +381,6 @@ namespace cabe {
 
     void Engine::MaybeRequestSnapshot(DeviceContext& dc) {
         // 距上次"尝试"以来的 WAL 增长（序号差 × 帧大小）达阈值即触发（退避：基准是 last_trigger_seq）。
-        // P5M6：recover 后 last_trigger = covered（盘上真实痕迹）——肥 WAL 恢复后首写自然触发（D4 自愈）。
         const std::uint64_t grown =
             (dc.wal.last_seq() - dc.snapshot.last_trigger_seq()) * kWalFrameSize;
         if (grown >= options_.snapshot_threshold_bytes) {

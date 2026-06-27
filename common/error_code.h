@@ -55,8 +55,10 @@ namespace cabe::err {
     // 越界/重复都意味着恢复出的索引不可信（穿透了 CRC 的盘上矛盾或上游 bug），拒开级。
     inline constexpr int kEngineDuplicateBlock  = InSeg(kEngineBase, 8);  // -104008  两个键声称独占同一物理块
     inline constexpr int kEngineBlockOutOfRange = InSeg(kEngineBase, 9);  // -104009  活块块号越出数据区（原静默跳过，P5M6 升级为报错）
+    // ---- engine 段续编（P7M1）----
+    inline constexpr int kEngineReactorStartFailed = InSeg(kEngineBase, 10); // -104010  reactor 工作线程创建失败（明显故障，简单判断）
 
-    static_assert(kEngineBlockOutOfRange > kEngineBase - kSegmentSize);
+    static_assert(kEngineReactorStartFailed > kEngineBase - kSegmentSize);
 
     // ---- index 段（P1M3 新增）----
     inline constexpr int kIndexKeyNotFound     = InSeg(kIndexBase, 0);  // -102000

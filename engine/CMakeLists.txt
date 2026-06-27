@@ -2,6 +2,7 @@
 # 设计依据：doc/P4.5/P4.5M2_engine_switch_design.md
 add_library(cabe_engine STATIC
     engine.cpp
+    reactor.cpp
     buffer_pool.cpp
     super_block.cpp
 )
