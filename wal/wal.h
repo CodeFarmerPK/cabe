@@ -86,6 +86,9 @@ namespace cabe {
         //          Open/Recover 对提交组零动作。
         int32_t Open(const std::string& wal_path, const Options* opts);
 
+        // P7M2：dc move 进 reactor 后，把 opts 指针重指到该 reactor 的 Options 副本（per-reactor wal_level）。
+        void RebindOptions(const Options* opts) noexcept { opts_ = opts; }
+
         // P5M6：恢复（仅 recover 模式、Open 之后调一次）。covered_seq 来自快照裁决（Engine 转手）。
         //   census 全环普查（O(1) 内存）→ 门槛裁决（min_live == covered+1，历史无缺页）
         //   → 走读按 seq 序投递活帧（"下一槽 = 下一 seq"单判据，同时盘上验收不变量③④）

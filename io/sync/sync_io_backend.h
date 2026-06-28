@@ -22,6 +22,8 @@ namespace cabe {
         SyncIoBackend& operator=(SyncIoBackend&& other) noexcept;
 
         int32_t Open(const std::string& path, const Options* opts = nullptr);
+        // P7M2：dc move 进 reactor 后重指 opts 到该 reactor 的 Options 副本（per-reactor wal_level → FUA 判定）。
+        void RebindOptions(const Options* opts) noexcept { opts_ = opts; }
         int32_t Close();
         std::uint64_t BlockCount() const noexcept;
         int32_t Write(std::uint64_t block_idx, const std::byte* buf);

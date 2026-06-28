@@ -43,14 +43,8 @@ namespace cabe {
 
     private:
         std::size_t RouteKey(std::string_view key) const noexcept;
-        void TrimDeviceBlock(DeviceContext& dc, BlockId id);
-
-        // P5M4 快照触发链 / P5M5 撞墙救援。P7M1 暂不调用（Put/Delete 返 not-implemented）；
-        //   M2 写路径入 reactor 时由 reactor 执行体调用（届时大概率随之迁入 reactor）。
-        int32_t DoSnapshot(DeviceContext& dc);
-        void RequestSnapshot(DeviceContext& dc);
-        void MaybeRequestSnapshot(DeviceContext& dc);
-        int32_t WriteWalRescuing(DeviceContext& dc, const WalEntry& e);
+        // P7M2：写路径辅助（DoSnapshot/WriteWalRescuing/RequestSnapshot/MaybeRequestSnapshot/
+        //   TrimDeviceBlock）已迁入 Reactor（以 dc_/options_ 为隐式对象，share-nothing）。
 
         // ---- P5M6：恢复编排（Open 阶段一在裸 dc 上跑，reactor 线程尚未起；签名不变）----
         int32_t RecoverDevice(const DeviceConfig& cfg, DeviceContext& dc);

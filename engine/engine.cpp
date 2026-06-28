@@ -85,7 +85,7 @@ namespace cabe {
 
         // ---- 阶段二：全部 recover 成功 → 逐个 move 进 Reactor + Start（P7-D4/D11）----
         for (std::size_t i = 0; i < recovered.size(); ++i) {
-            auto r = std::make_unique<Reactor>(std::move(recovered[i]));
+            auto r = std::make_unique<Reactor>(std::move(recovered[i]), options_);
             int32_t rc = r->Start();
             if (rc != err::kSuccess) {
                 // Start 失败（明显故障：线程/资源创建）：停掉已起的 reactor；
@@ -123,9 +123,18 @@ namespace cabe {
 
     // ---- P7M1：写路径与运营口暂返 not-implemented（M2 入 reactor）。参数不命名以避 -Wunused-parameter ----
 
-    Status Engine::Put(std::string_view, DataView) {
+    Status Engine::Put(std::string_view key, DataView value) {
         if (!opened_.load(std::memory_order_acquire)) return Status::Error(err::kEngineNotOpen);
-        return Status::Error(err::kEngineNotImplemented);   // P7M2：Put 写路径入 reactor
+        if (key.empty()) return Status::Error(err::kMemEmptyKey);
+        if (value.size() != kValueSize) return Status::Error(err::kEngineInvalidValue);
+        if (key.size() > kWalKeyMax) return Status::Error(err::kWalKeyTooLong);
+        // 校验上移调用线程 fail-fast（A3）→ 栈上建写 op → 路由到单 reactor → 投递并挂起。
+        OpNode op{};
+        op.type  = OpType::Put;
+        op.key   = key;
+        op.value = value;
+        const int32_t rc = SubmitAndWait(*reactors_[RouteKey(key)], op);
+        return rc == err::kSuccess ? Status::Ok() : Status::Error(rc);
     }
 
     Status Engine::Get(std::string_view key, DataBuffer value) {
@@ -134,24 +143,50 @@ namespace cabe {
         if (value.size() != kValueSize) return Status::Error(err::kEngineInvalidValue);
 
         // 算路由 → 栈上建 op（零堆分配）→ 投递 reactor 并挂起 → 醒来取结果码 → 翻译 Status。
-        OpNode op{OpType::Get, key, value};   // result/next/wake 用默认初始化
+        OpNode op{};
+        op.type = OpType::Get;
+        op.key  = key;
+        op.out  = value;
         const int32_t rc = SubmitAndWait(*reactors_[RouteKey(key)], op);
         return rc == err::kSuccess ? Status::Ok() : Status::Error(rc);
     }
 
-    Status Engine::Delete(std::string_view) {
+    Status Engine::Delete(std::string_view key) {
         if (!opened_.load(std::memory_order_acquire)) return Status::Error(err::kEngineNotOpen);
-        return Status::Error(err::kEngineNotImplemented);   // P7M2：Delete 写路径入 reactor
+        if (key.empty()) return Status::Error(err::kMemEmptyKey);
+        OpNode op{};
+        op.type = OpType::Delete;
+        op.key  = key;
+        const int32_t rc = SubmitAndWait(*reactors_[RouteKey(key)], op);
+        return rc == err::kSuccess ? Status::Ok() : Status::Error(rc);
     }
 
-    Status Engine::SetWalLevel(WalLevel) {
+    Status Engine::SetWalLevel(WalLevel level) {
         if (!opened_.load(std::memory_order_acquire)) return Status::Error(err::kEngineNotOpen);
-        return Status::Error(err::kEngineNotImplemented);   // P7M2：运营口入 reactor（wal_level 转 per-reactor）
+        if (!IsValidWalLevel(level)) return Status::Error(err::kEngineInvalidOpts);
+        // 广播到所有 reactor（N=1 即一圈）+ 取首错；每轮一个栈 OpNode 复用 SubmitAndWait。
+        int32_t first_err = err::kSuccess;
+        for (auto& r : reactors_) {
+            OpNode op{};
+            op.type      = OpType::SetWalLevel;
+            op.new_level = level;
+            const int32_t rc = SubmitAndWait(*r, op);
+            if (rc != err::kSuccess && first_err == err::kSuccess) first_err = rc;
+        }
+        return first_err != err::kSuccess ? Status::Error(first_err) : Status::Ok();
     }
 
     Status Engine::Snapshot() {
         if (!opened_.load(std::memory_order_acquire)) return Status::Error(err::kEngineNotOpen);
-        return Status::Error(err::kEngineNotImplemented);   // P7M2：运营口 fan-out 入 reactor
+        // 广播到所有 reactor（N=1 即一圈）+ 取首错。
+        int32_t first_err = err::kSuccess;
+        for (auto& r : reactors_) {
+            OpNode op{};
+            op.type = OpType::Snapshot;
+            const int32_t rc = SubmitAndWait(*r, op);
+            if (rc != err::kSuccess && first_err == err::kSuccess) first_err = rc;
+        }
+        return first_err != err::kSuccess ? Status::Error(first_err) : Status::Ok();
     }
 
     bool Engine::is_open() const noexcept { return opened_.load(std::memory_order_acquire); }
@@ -159,12 +194,6 @@ namespace cabe {
     std::size_t Engine::RouteKey(std::string_view key) const noexcept {
         (void)key;
         return 0;   // P7M1：N=1，单 reactor；M4 改 hash(key)%N（P7-D7）
-    }
-
-    void Engine::TrimDeviceBlock(DeviceContext& dc, BlockId id) {
-        // TODO(P7): 通过待 TRIM 队列异步批量发送 BLKDISCARD（P7 首轮不做，留性能轮）
-        (void)dc;
-        (void)id;
     }
 
     void Engine::AbortOpen(DeviceContext& dc) {
@@ -331,61 +360,6 @@ namespace cabe {
                           static_cast<unsigned long long>(bad));
         }
         return err::kSuccess;
-    }
-
-    // ---- P5M4/M5：快照触发链 + 撞墙救援（P7M1 暂不调用，dead；M2 写路径入 reactor 时启用/迁入）----
-
-    int32_t Engine::DoSnapshot(DeviceContext& dc) {
-        // 一次快照尝试从这里开始：先推进退避基准（成败都算，设计 §10.3）。
-        dc.snapshot.NoteTriggerAttempt(dc.wal.last_seq());
-        // 先刷 WAL（默认级别 3 是空操作）→ 定格时刻成对捕获 → 驱动遍历写快照。
-        int32_t rc = dc.wal.Flush();
-        if (rc != err::kSuccess) return rc;
-
-        // P5M5：与 covered_seq 同刻捕获回收边界（covered_seq 的物理孪生，设计 §6.2）。
-        const std::uint64_t covered_seq = dc.wal.last_seq();
-        const std::uint64_t boundary    = dc.wal.reclaim_boundary();
-
-        rc = dc.snapshot.Write(covered_seq, [&](const MetaIndexVisitor& v) {
-            return dc.meta_index.ForEach(v);   // 回调驱动一致扫描；可中止错误一路传出
-        });
-        if (rc != err::kSuccess) return rc;    // 快照失败 → 不回收，boundary 随栈丢弃（铁律）
-
-        // P5M5：快照已落地 → 回收（head 跳到边界）。回收失败只记日志、不上抛（自愈）。
-        const int32_t rrc = dc.wal.ReclaimUpTo(boundary);
-        if (rrc != err::kSuccess) {
-            CABE_LOG_ERROR("WAL 回收失败（快照本身已成功，空间暂不复用）: rc=%d", rrc);
-        }
-        return err::kSuccess;                  // 快照成败 = Write 成败（D11）
-    }
-
-    int32_t Engine::WriteWalRescuing(DeviceContext& dc, const WalEntry& e) {
-        int32_t rc = dc.wal.WriteWal(e);
-        if (rc != err::kWalFull) return rc;    // 正常路径零开销：就一个比较
-
-        // 撞墙救援（P5M5 §8.2）：环满 → 强制快照腾空间。直调 DoSnapshot、绕过增长闸门。
-        CABE_LOG_WARN("WAL 环已满，强制快照腾空间");
-        rc = DoSnapshot(dc);
-        if (rc != err::kSuccess) return err::kWalFull;   // 救不了 → 对外就是"满"（运维信号）
-
-        return dc.wal.WriteWal(e);   // 重试恰一次：快照成功 + ring ≥ 缓冲+4K（Open 校验）⇒ 必成
-    }
-
-    void Engine::RequestSnapshot(DeviceContext& dc) {
-        // 自动触发汇总入口：发后不管。快照失败不连累本次写，只记日志。
-        int32_t rc = DoSnapshot(dc);
-        if (rc != err::kSuccess) {
-            CABE_LOG_ERROR("自动触发的快照失败: rc=%d（不影响本次写，后续按退避重试）", rc);
-        }
-    }
-
-    void Engine::MaybeRequestSnapshot(DeviceContext& dc) {
-        // 距上次"尝试"以来的 WAL 增长（序号差 × 帧大小）达阈值即触发（退避：基准是 last_trigger_seq）。
-        const std::uint64_t grown =
-            (dc.wal.last_seq() - dc.snapshot.last_trigger_seq()) * kWalFrameSize;
-        if (grown >= options_.snapshot_threshold_bytes) {
-            RequestSnapshot(dc);
-        }
     }
 
 } // namespace cabe

@@ -1,6 +1,7 @@
-// P7M1：reactor 机制测试。全走公开 API、无伪造、无 Put——只验异步机制（投递/事件循环/
-// 执行体派发/唤醒/等待 + drain-then-close + 前置校验 + not-implemented）。取值正确性与
-// recover 带数据后 Get 随 M2 的 Put-Get 联动测。设计依据：doc/P7/P7M1_reactor_skeleton_design.md §8
+// P7M1/M2：reactor 机制测试。全走公开 API、无伪造。M1 验异步机制（投递/事件循环/执行体派发/
+// 唤醒/等待 + drain-then-close + 前置校验）；M2 加写路径：Put-Get 命中（首次跑通 ExecuteGet
+// 取数路径）+ 多轮 Put→Get→Delete 压测（TSAN 下验写交接 race-free）。
+// 设计依据：doc/P7/P7M1_reactor_skeleton_design.md §8、doc/P7/P7M2_write_path_design.md §9
 //
 // liveness：死锁/丢唤醒表现为 ctest 超时（不是假绿）。TSAN（sync 后端）下跑本组用例验
 // caller↔reactor 交接 race-free——单 caller 也是 caller + reactor 两线程。
@@ -92,14 +93,30 @@ TEST_F(ReactorTest, RecoverEmptyThenGetMiss) {
     EXPECT_EQ(engine_.Get("absent", cabe::DataBuffer{out}).code, cabe::err::kIndexKeyNotFound);
 }
 
-// —— M1 范围：写类公开方法返 not-implemented ——
-TEST_F(ReactorTest, WriteOpsNotImplemented) {
+// —— M2：Put-Get 命中，首次跑通 ExecuteGet 完整取数路径（pool→io.Read→CRC→memcpy）——
+TEST_F(ReactorTest, PutGetHitThroughReactor) {
     ASSERT_TRUE(engine_.Open(CreateOpts()).ok());
-    std::vector<std::byte> val(cabe::kValueSize);
-    EXPECT_EQ(engine_.Put("k", cabe::DataView{val}).code, cabe::err::kEngineNotImplemented);
-    EXPECT_EQ(engine_.Delete("k").code, cabe::err::kEngineNotImplemented);
-    EXPECT_EQ(engine_.SetWalLevel(cabe::WalLevel::Strict).code, cabe::err::kEngineNotImplemented);
-    EXPECT_EQ(engine_.Snapshot().code, cabe::err::kEngineNotImplemented);
+    std::vector<std::byte> val(cabe::kValueSize, std::byte{0x42});
+    ASSERT_EQ(engine_.Put("k", cabe::DataView{val}).code, cabe::err::kSuccess);
+    std::vector<std::byte> out(cabe::kValueSize, std::byte{0});
+    ASSERT_EQ(engine_.Get("k", cabe::DataBuffer{out}).code, cabe::err::kSuccess);
+    EXPECT_EQ(out, val);
+}
+
+// —— M2：写路径压测/活性。多轮 Put→Get(命中)→Delete→Get(miss)，验正确 + 不挂（挂 = ctest 超时）。
+//    TSAN（sync 后端）下是写交接 race-free 的最硬证据。——
+TEST_F(ReactorTest, WritePathStress) {
+    ASSERT_TRUE(engine_.Open(CreateOpts()).ok());
+    std::vector<std::byte> out(cabe::kValueSize);
+    for (int i = 0; i < 300; ++i) {
+        const std::string key = "wk" + std::to_string(i);
+        std::vector<std::byte> val(cabe::kValueSize, static_cast<std::byte>(i & 0xFF));
+        ASSERT_EQ(engine_.Put(key, cabe::DataView{val}).code, cabe::err::kSuccess);
+        ASSERT_EQ(engine_.Get(key, cabe::DataBuffer{out}).code, cabe::err::kSuccess);
+        EXPECT_EQ(out, val);
+        ASSERT_EQ(engine_.Delete(key).code, cabe::err::kSuccess);
+        EXPECT_EQ(engine_.Get(key, cabe::DataBuffer{out}).code, cabe::err::kIndexKeyNotFound);
+    }
 }
 
 // —— Get 前置校验（开着引擎）——

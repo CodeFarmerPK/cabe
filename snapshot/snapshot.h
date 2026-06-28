@@ -41,6 +41,9 @@ namespace cabe {
         // data_sb：所属数据设备的超级块（取 block_count 做容量校验、engine_uuid 盖槽头/比对）。
         int32_t Open(const std::string& path, const Options* opts, const SuperBlock& data_sb);
 
+        // P7M2：dc move 进 reactor 后重指 opts 到该 reactor 的 Options 副本（统一"只读自己那份"）。
+        void RebindOptions(const Options* opts) noexcept { opts_ = opts; }
+
         // 写一份新快照到非活跃槽：流式遍历编码 → 末尾补零 → 写槽头 → 一次 fdatasync。
         // 成功才更新内存缓存（active_slot/next_gen/last_covered_seq）。
         int32_t Write(std::uint64_t covered_seq, const SnapshotScanFn& scan);

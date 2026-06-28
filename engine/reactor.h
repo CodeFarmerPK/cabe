@@ -7,6 +7,7 @@
 // 放 engine/（非可插拔数据组件，且独立成库会与 device_context.h 撞循环依赖，见 P7-D3）。
 
 #include "engine/device_context.h"
+#include "engine/options.h"
 #include "common/structs.h"
 
 #include <atomic>
@@ -17,7 +18,9 @@
 namespace cabe {
 
     // op 种类。M1 只 Get/Stop；M2 加 Put/Delete/SetWalLevel/Snapshot。
-    enum class OpType : std::uint8_t { Get = 1, Stop = 2 };
+    enum class OpType : std::uint8_t {
+        Get = 1, Stop = 2, Put = 3, Delete = 4, SetWalLevel = 5, Snapshot = 6,
+    };
 
     // result 兼完成标志的正数哨兵——和 ≤0 的错误码不撞，不进 error_code.h（reactor 内部约定）。
     inline constexpr std::int32_t kOpPending = 1;
@@ -27,8 +30,10 @@ namespace cabe {
     // 分离，避"最后触碰"UB（reactor 在 result.store 之后绝不再碰 OpNode，notify 打在长寿字上）。
     struct OpNode {
         OpType type;                                   // 由投递方设定
-        std::string_view key;                          // Get 输入
+        std::string_view key;                          // Get/Put/Delete 输入
+        DataView value;                                // Put 输入（P7M2；caller DataView，视图不拷贝）
         DataBuffer out;                                // Get 输出（caller 的 buffer）
+        WalLevel new_level = WalLevel::WalSync;        // SetWalLevel 输入（P7M2）
         std::atomic<std::int32_t> result{kOpPending};  // 结果槽 + 完成标志
         OpNode* next = nullptr;                        // MPSC 侵入式链
         std::atomic<std::uint32_t>* wake = nullptr;    // → caller 的 thread_local 唤醒字
@@ -38,7 +43,7 @@ namespace cabe {
     // → Engine 用 vector<unique_ptr<Reactor>> 持有。
     class Reactor {
     public:
-        explicit Reactor(DeviceContext&& dc);
+        Reactor(DeviceContext&& dc, const Options& opts);   // P7M2：多收一份 Options 拷贝（per-reactor）
         ~Reactor();
 
         Reactor(const Reactor&) = delete;
@@ -53,6 +58,16 @@ namespace cabe {
     private:
         void Run();                                    // 事件循环
         std::int32_t ExecuteGet(OpNode* op);           // Get 执行体（作用在 dc_ 上）
+        std::int32_t ExecutePut(OpNode* op);           // P7M2：Put 执行体
+        std::int32_t ExecuteDelete(OpNode* op);        // P7M2：Delete 执行体
+        std::int32_t ExecuteSetWalLevel(OpNode* op);   // P7M2：改本 reactor 的 wal_level（收紧先刷）
+        std::int32_t ExecuteSnapshot(OpNode* op);      // P7M2：手动快照（→ DoSnapshot）
+        // P7M2：写路径辅助（从 Engine 迁入，以 dc_/options_ 为隐式对象）
+        std::int32_t DoSnapshot();
+        std::int32_t WriteWalRescuing(const WalEntry& e);
+        void RequestSnapshot();
+        void MaybeRequestSnapshot();
+        void TrimDeviceBlock(BlockId id);              // 仍空（P7 不做 TRIM）
         void Finalize(OpNode* op, std::int32_t rc) noexcept;  // 回填 result(release) + 唤醒（扣 last-touch）
         void FailWakeChain(OpNode* head) noexcept;     // 掉队 op 全部回 kEngineNotOpen
         void CloseDc() noexcept;                       // 关 snapshot→wal→io，记首错入 close_result_
@@ -61,6 +76,7 @@ namespace cabe {
 
         std::atomic<OpNode*> inbox_{nullptr};          // 栈顶，兼 reactor 空闲时的 futex 字
         std::thread thread_;
+        Options options_;                              // P7M2：per-reactor 配置拷贝（声明在 dc_ 之前 → 后析构，dc_ 内 opts_ 指针全程有效）
         DeviceContext dc_;
         std::int32_t close_result_ = 0;                // Run 退出前写，Stop join 后读（0 = kSuccess）
         bool dc_closed_ = false;                       // RAII 防双关

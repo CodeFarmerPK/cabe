@@ -2,6 +2,7 @@
 #include "common/error_code.h"
 #include "common/logger.h"
 #include "util/crc32.h"
+#include "util/util.h"          // P7M2：GetWallTimeNs
 
 #include <cstring>
 #include <utility>
@@ -14,7 +15,14 @@ namespace cabe {
         thread_local std::atomic<std::uint32_t> g_wake_gen{0};
     } // namespace
 
-    Reactor::Reactor(DeviceContext&& dc) : dc_(std::move(dc)) {}
+    Reactor::Reactor(DeviceContext&& dc, const Options& opts)
+        : options_(opts), dc_(std::move(dc)) {
+        // dc move 进来后，三个组件的 opts_ 还指向 Engine::options_；重指到本 reactor 的副本，
+        // 此后 wal_level 改写/现读全在本 reactor 线程、读写本副本（per-reactor，无 race）。
+        dc_.io.RebindOptions(&options_);
+        dc_.wal.RebindOptions(&options_);
+        dc_.snapshot.RebindOptions(&options_);
+    }
 
     Reactor::~Reactor() {
         if (thread_.joinable()) Stop();   // 兜底：正常应已 Stop 过（thread 不再 joinable）
@@ -32,7 +40,8 @@ namespace cabe {
 
     std::int32_t Reactor::Stop() {
         if (!thread_.joinable()) return close_result_;   // 已停过 / 没起过（幂等）
-        OpNode stop{OpType::Stop, {}, {}};               // 栈上；join 即同步，Stop op 不需要 wake
+        OpNode stop{};                                   // 栈上；join 即同步，Stop op 不需要 wake
+        stop.type = OpType::Stop;
         Submit(&stop);
         thread_.join();
         return close_result_;
@@ -103,7 +112,15 @@ namespace cabe {
                     FailWakeChain(Reverse(DrainAll()));   // 关闭期间新 push 进来的
                     return;                               // 线程结束
                 }
-                const std::int32_t rc = ExecuteGet(op);
+                std::int32_t rc;
+                switch (op->type) {
+                    case OpType::Get:         rc = ExecuteGet(op);         break;
+                    case OpType::Put:         rc = ExecutePut(op);         break;
+                    case OpType::Delete:      rc = ExecuteDelete(op);      break;
+                    case OpType::SetWalLevel: rc = ExecuteSetWalLevel(op); break;
+                    case OpType::Snapshot:    rc = ExecuteSnapshot(op);    break;
+                    default:                  rc = err::kEngineNotImplemented; break;
+                }
                 Finalize(op, rc);
                 op = next;
             }
@@ -136,6 +153,124 @@ namespace cabe {
         std::memcpy(op->out.data(), buf, kValueSize);    // 写到 caller buffer（同步阻塞中，全程有效）
         dc_.pool.Free(buf);
         return err::kSuccess;
+    }
+
+    // ---- P7M2：写执行体（逐字照搬 P6M4 Engine::Put/Delete，改 devices_[i]→dc_、入参来自 op）----
+
+    std::int32_t Reactor::ExecutePut(OpNode* op) {
+        BlockId block_id{};
+        std::int32_t rc = dc_.block_allocator.Acquire(&block_id);
+        if (rc != err::kSuccess) return rc;                                  // kEngineNoSpace
+        std::byte* buf = dc_.pool.Allocate();
+        if (buf == nullptr) {
+            dc_.block_allocator.Recycle(block_id);
+            return err::kEnginePoolExhausted;
+        }
+        std::memcpy(buf, op->value.data(), kValueSize);
+        const std::uint32_t value_crc = util::CRC32(op->value);
+        const std::uint64_t now       = util::GetWallTimeNs();
+        rc = dc_.io.Write(block_id.block_idx(), buf);                        // FUA 由 io 读 opts_->wal_level 定
+        dc_.pool.Free(buf);
+        if (rc != err::kSuccess) {
+            dc_.block_allocator.Recycle(block_id);
+            return rc;
+        }
+        rc = WriteWalRescuing(WalEntry{WalEntryType::Put, op->key, block_id, value_crc, now});
+        if (rc != err::kSuccess) {
+            dc_.block_allocator.Recycle(block_id);
+            return rc;
+        }
+        ValueMeta old_meta{};
+        const bool had_old = (dc_.meta_index.Lookup(op->key, &old_meta) == err::kSuccess);
+        ValueMeta meta{};
+        meta.block     = block_id;
+        meta.timestamp = now;
+        meta.crc       = value_crc;
+        meta.state     = ValueState::Active;
+        dc_.meta_index.Insert(op->key, meta);
+        if (had_old) {
+            dc_.block_allocator.Recycle(old_meta.block);
+            TrimDeviceBlock(old_meta.block);
+        }
+        MaybeRequestSnapshot();
+        return err::kSuccess;
+    }
+
+    std::int32_t Reactor::ExecuteDelete(OpNode* op) {
+        ValueMeta meta{};
+        std::int32_t rc = dc_.meta_index.Lookup(op->key, &meta);
+        if (rc != err::kSuccess) return rc;                                  // kIndexKeyNotFound：不存在不写 WAL
+        rc = WriteWalRescuing(WalEntry{WalEntryType::Delete, op->key, BlockId{}, 0, util::GetWallTimeNs()});
+        if (rc != err::kSuccess) return rc;                                  // WAL 失败不动内存
+        dc_.meta_index.Delete(op->key);
+        dc_.block_allocator.Recycle(meta.block);
+        TrimDeviceBlock(meta.block);
+        MaybeRequestSnapshot();
+        return err::kSuccess;
+    }
+
+    std::int32_t Reactor::ExecuteSetWalLevel(OpNode* op) {
+        // 校验（IsValidWalLevel）已在调用线程 fail-fast；执行体假定入参合法。
+        const WalLevel old = options_.wal_level;
+        // 收紧（攒批档 2/4 → 同步档 1/3）：先把本 reactor 攒批缓冲刷净，新保证从此刻成立。
+        if (!IsWalSyncLevel(old) && IsWalSyncLevel(op->new_level)) {
+            std::int32_t rc = dc_.wal.Flush();
+            if (rc != err::kSuccess) return rc;
+        }
+        options_.wal_level = op->new_level;   // io/wal 的 opts_ 指此，下次操作现读到
+        return err::kSuccess;
+    }
+
+    std::int32_t Reactor::ExecuteSnapshot(OpNode* /*op*/) {
+        return DoSnapshot();
+    }
+
+    // ---- P7M2：快照触发链 + 撞墙救援（从 Engine 迁入，以 dc_/options_ 为隐式对象）----
+
+    void Reactor::TrimDeviceBlock(BlockId id) {
+        // TODO(性能轮)：通过待 TRIM 队列异步批量 BLKDISCARD（P7 全程不做）。
+        (void)id;
+    }
+
+    void Reactor::MaybeRequestSnapshot() {
+        const std::uint64_t grown =
+            (dc_.wal.last_seq() - dc_.snapshot.last_trigger_seq()) * kWalFrameSize;
+        if (grown >= options_.snapshot_threshold_bytes) {
+            RequestSnapshot();
+        }
+    }
+
+    void Reactor::RequestSnapshot() {
+        std::int32_t rc = DoSnapshot();
+        if (rc != err::kSuccess) {
+            CABE_LOG_ERROR("自动触发的快照失败: rc=%d（不影响本次写，后续按退避重试）", rc);
+        }
+    }
+
+    std::int32_t Reactor::DoSnapshot() {
+        dc_.snapshot.NoteTriggerAttempt(dc_.wal.last_seq());
+        std::int32_t rc = dc_.wal.Flush();
+        if (rc != err::kSuccess) return rc;
+        const std::uint64_t covered_seq = dc_.wal.last_seq();
+        const std::uint64_t boundary    = dc_.wal.reclaim_boundary();
+        rc = dc_.snapshot.Write(covered_seq, [&](const MetaIndexVisitor& v) {
+            return dc_.meta_index.ForEach(v);
+        });
+        if (rc != err::kSuccess) return rc;                                  // 失败：boundary 丢弃，绝不回收
+        const std::int32_t rrc = dc_.wal.ReclaimUpTo(boundary);
+        if (rrc != err::kSuccess) {
+            CABE_LOG_ERROR("WAL 回收失败（快照本身已成功，空间暂不复用）: rc=%d", rrc);
+        }
+        return err::kSuccess;
+    }
+
+    std::int32_t Reactor::WriteWalRescuing(const WalEntry& e) {
+        std::int32_t rc = dc_.wal.WriteWal(e);
+        if (rc != err::kWalFull) return rc;                                  // 正常路径零开销：就一个比较
+        CABE_LOG_WARN("WAL 环已满，强制快照腾空间");
+        rc = DoSnapshot();
+        if (rc != err::kSuccess) return err::kWalFull;                       // 救不了 → 对外就是"满"
+        return dc_.wal.WriteWal(e);                                          // 重试恰一次（Open 验过 ring≥缓冲+4K）
     }
 
     std::int32_t SubmitAndWait(Reactor& r, OpNode& op) noexcept {
