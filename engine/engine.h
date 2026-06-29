@@ -25,19 +25,19 @@ namespace cabe {
         Engine(Engine&&) = delete;
         Engine& operator=(Engine&&) = delete;
 
+        // P7M3 并发契约：Open / Close 是排他操作——调用方必须保证其执行期间没有任何其他 Engine 方法
+        //   与之重叠（join 工作线程或等价同步建立 happens-before）。同步 API 下"op 在途"⟺"某 caller
+        //   阻塞在调用里"⟺"未静默"，故静默后 Close 即无并发（reactors_ 唯一写者不撞读者）。靠契约、不加锁。
         Status Open(const Options& opts);
         Status Close();
 
+        // 数据/运营 op：多调用线程彼此可自由并发（各自栈上 op + 只读 reactors_ + reactor 串行执行）。
         Status Put(std::string_view key, DataView value);
         Status Get(std::string_view key, DataBuffer value);
         Status Delete(std::string_view key);
 
-        // P5M3：运行时改 WAL 级别。
-        Status SetWalLevel(WalLevel level);
-        // P5M4：手动触发一份快照。
-        Status Snapshot();
-        // P7M1：Put / Delete / SetWalLevel / Snapshot 在 M1 暂返 kEngineNotImplemented——
-        //   写路径与运营口随 M2 入 reactor。M1 能用的公开 API = Open / Get / Close / is_open。
+        Status SetWalLevel(WalLevel level);   // P5M3：运行时改 WAL 级别（P7M2 入 reactor，per-reactor wal_level）
+        Status Snapshot();                    // P5M4：手动触发快照（P7M2 入 reactor，N=1 广播即投唯一 reactor）
 
         bool is_open() const noexcept;
 

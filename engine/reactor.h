@@ -74,7 +74,7 @@ namespace cabe {
         OpNode* DrainAll() noexcept;                   // exchange(nullptr, acquire) 整批摘
         static OpNode* Reverse(OpNode* head) noexcept; // LIFO → 到达序
 
-        std::atomic<OpNode*> inbox_{nullptr};          // 栈顶，兼 reactor 空闲时的 futex 字
+        std::atomic<OpNode*> inbox_{nullptr};          // 栈顶，兼 reactor 空闲时的 futex 字；MPSC：多 caller CAS-push、reactor 单消费（P7M3）
         std::thread thread_;
         Options options_;                              // P7M2：per-reactor 配置拷贝（声明在 dc_ 之前 → 后析构，dc_ 内 opts_ 指针全程有效）
         DeviceContext dc_;

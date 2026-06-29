@@ -47,16 +47,22 @@ namespace cabe {
         return close_result_;
     }
 
+    // P7M3（多生产者）：push 必须是 RMW（CAS）。每个 CAS 读到前一 push 的值即并入其 release 序列
+    //   （C++20：RMW 不论自身内存序都算入序列），于是 DrainAll 的单次 acquire-exchange 能看到链上
+    //   **所有**节点的内容（各 push 在 CAS 前对 op 字段的普通写，经 release 序列对单消费者可见）。
+    //   改成非 RMW 的 store-push 会断链 → 多生产者下消费者看不到部分节点。勿动。
     void Reactor::Submit(OpNode* op) noexcept {
         OpNode* old = inbox_.load(std::memory_order_relaxed);
         do {
             op->next = old;
         } while (!inbox_.compare_exchange_weak(old, op,
-                     std::memory_order_release, std::memory_order_relaxed));
+                     std::memory_order_release, std::memory_order_relaxed));   // release：发布 op 内容 + 链入序列
         inbox_.notify_one();   // 唤醒 reactor（栈顶唯一等待者）
     }
 
     OpNode* Reactor::DrainAll() noexcept {
+        // P7M3：acquire 不可降为 relaxed——它 synchronizes-with 链尾 push 的 release（经 release 序列
+        //   含全部 push），保证本消费者看到所有被推 op 的内容。这是多生产者可见性的根因（见 Submit）。
         return inbox_.exchange(nullptr, std::memory_order_acquire);
     }
 
