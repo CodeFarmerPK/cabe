@@ -4,6 +4,7 @@
 #include "util/crc32.h"
 #include "util/util.h"          // P7M2：GetWallTimeNs
 
+#include <cassert>              // P7M4：dev() 一致性断言
 #include <cstring>
 #include <utility>
 
@@ -139,6 +140,9 @@ namespace cabe {
         ValueMeta meta{};
         std::int32_t rc = dc_.meta_index.Lookup(op->key, &meta);
         if (rc != err::kSuccess) return rc;              // miss → kIndexKeyNotFound
+
+        // P7M4：命中块必属本设备(dev() == 本 reactor 的 device_id == RouteKey)。debug 防御，NDEBUG 消失、release 零成本。
+        assert(meta.block.dev() == static_cast<DeviceId>(dc_.super_block.device_id));
 
         std::byte* buf = dc_.pool.Allocate();            // reactor 私有 pool，单线程无锁
         if (buf == nullptr) return err::kEnginePoolExhausted;

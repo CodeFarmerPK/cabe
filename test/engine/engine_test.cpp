@@ -213,10 +213,10 @@ TEST(Engine, EmptyDevicesFails) {
     EXPECT_EQ(e.Open(cabe::Options{}).code, cabe::err::kEngineInvalidOpts);
 }
 
-TEST(Engine, MultipleDevicesFails) {
+// P7M4：N>1 现合法（多设备）；负向测改为守 N≤256 上界（DeviceId=uint8_t）。
+TEST(Engine, TooManyDevicesFails) {
     cabe::Engine e;
     cabe::Options opts;
-    opts.devices.push_back({"d1", "w1", "s1"});
-    opts.devices.push_back({"d2", "w2", "s2"});
+    for (int i = 0; i < 257; ++i) opts.devices.push_back({"d", "w", "s"});   // size 校验在开设备前，不碰假路径
     EXPECT_EQ(e.Open(opts).code, cabe::err::kEngineInvalidOpts);
 }

@@ -5,8 +5,10 @@
 #
 # 用法:
 #   ./scripts/mkloop.sh create        # 创建测试三设备（小，cabe_test_*.img）
+#   ./scripts/mkloop.sh create-multi  # 创建两组共 6 块（多设备测试 N=2；组2加后缀 2）
 #   ./scripts/mkloop.sh create-bench  # 创建性能基准三设备（大、稀疏，cabe_bench_*.img）
 #   ./scripts/mkloop.sh cleanup       # 卸载 + 删除测试镜像
+#   ./scripts/mkloop.sh cleanup-multi # 卸载 + 删除两组测试镜像
 #   ./scripts/mkloop.sh cleanup-bench # 卸载 + 删除基准镜像
 #   ./scripts/mkloop.sh status        # 查看当前状态
 #
@@ -43,6 +45,10 @@ SNAPSHOT_IMG="$IMG_DIR/cabe_test_snapshot.img"
 BENCH_DATA_IMG="$IMG_DIR/cabe_bench_data.img"
 BENCH_WAL_IMG="$IMG_DIR/cabe_bench_wal.img"
 BENCH_SNAPSHOT_IMG="$IMG_DIR/cabe_bench_snapshot.img"
+# P7M4：多设备测试第二组（cabe_test_*2.img），与第一组并存
+DATA_IMG2="$IMG_DIR/cabe_test_data2.img"
+WAL_IMG2="$IMG_DIR/cabe_test_wal2.img"
+SNAPSHOT_IMG2="$IMG_DIR/cabe_test_snapshot2.img"
 
 find_loop() {  # $1 = 镜像路径；按 backing file 精确匹配该镜像绑定的 loop 设备（首个）
     # 用 losetup -j 精确按 backing file 匹配，避免把路径当正则/子串误配其它镜像
@@ -89,6 +95,29 @@ case "$ACTION" in
         echo ""
         echo "清理: $0 cleanup"
         ;;
+    create-multi)
+        # P7M4：建两组共 6 块（组 1 沿用现名/现环境变量；组 2 加后缀 2），多设备测试用。
+        DATA_DEV=$(create_one "$DATA_IMG" "$DATA_SIZE_MB")
+        WAL_DEV=$(create_one "$WAL_IMG" "$WAL_SIZE_MB")
+        SNAPSHOT_DEV=$(create_one "$SNAPSHOT_IMG" "$SNAPSHOT_SIZE_MB")
+        DATA_DEV2=$(create_one "$DATA_IMG2" "$DATA_SIZE_MB")
+        WAL_DEV2=$(create_one "$WAL_IMG2" "$WAL_SIZE_MB")
+        SNAPSHOT_DEV2=$(create_one "$SNAPSHOT_IMG2" "$SNAPSHOT_SIZE_MB")
+        echo ""
+        echo "  组1 数据/WAL/快照: $DATA_DEV / $WAL_DEV / $SNAPSHOT_DEV"
+        echo "  组2 数据/WAL/快照: $DATA_DEV2 / $WAL_DEV2 / $SNAPSHOT_DEV2"
+        echo ""
+        echo "多设备测试时使用（环境变量）:"
+        echo "  export CABE_TEST_DEVICE=$DATA_DEV CABE_TEST_WAL_DEVICE=$WAL_DEV CABE_TEST_SNAPSHOT_DEVICE=$SNAPSHOT_DEV"
+        echo "  export CABE_TEST_DEVICE2=$DATA_DEV2 CABE_TEST_WAL_DEVICE2=$WAL_DEV2 CABE_TEST_SNAPSHOT_DEVICE2=$SNAPSHOT_DEV2"
+        echo ""
+        echo "或传给测试脚本:"
+        echo "  ./scripts/run-tests.sh --backend=sync \\"
+        echo "      --device=$DATA_DEV --wal-device=$WAL_DEV --snapshot-device=$SNAPSHOT_DEV \\"
+        echo "      --device2=$DATA_DEV2 --wal-device2=$WAL_DEV2 --snapshot-device2=$SNAPSHOT_DEV2"
+        echo ""
+        echo "清理: $0 cleanup-multi"
+        ;;
     create-bench)
         DATA_DEV=$(create_one "$BENCH_DATA_IMG" "$BENCH_DATA_SIZE_MB" 1)
         WAL_DEV=$(create_one "$BENCH_WAL_IMG" "$BENCH_WAL_SIZE_MB" 1)
@@ -117,6 +146,18 @@ case "$ACTION" in
             [[ -f "$img" ]] && $SUDO rm -f "$img" && echo ">>> 已删除 $img"
         done
         echo ">>> 清理完成"
+        ;;
+    cleanup-multi)
+        # P7M4：清两组共 6 块（组 1 + 组 2）。
+        for img in "$DATA_IMG" "$WAL_IMG" "$SNAPSHOT_IMG" "$DATA_IMG2" "$WAL_IMG2" "$SNAPSHOT_IMG2"; do
+            while read -r dev; do
+                [[ -z "$dev" ]] && continue
+                echo ">>> 卸载 $dev"
+                $SUDO losetup -d "$dev"
+            done < <($SUDO losetup -j "$img" 2>/dev/null | cut -d: -f1)
+            [[ -f "$img" ]] && $SUDO rm -f "$img" && echo ">>> 已删除 $img"
+        done
+        echo ">>> 多设备清理完成"
         ;;
     cleanup-bench)
         for img in "$BENCH_DATA_IMG" "$BENCH_WAL_IMG" "$BENCH_SNAPSHOT_IMG"; do
@@ -148,5 +189,5 @@ case "$ACTION" in
         done
         ;;
     *)
-        sed -n '2,16p' "$0"; exit 1 ;;
+        sed -n '2,18p' "$0"; exit 1 ;;
 esac

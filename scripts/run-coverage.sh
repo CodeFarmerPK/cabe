@@ -47,6 +47,9 @@ INDEX=hashmap
 DEVICE=""
 WAL_DEVICE=""
 SNAPSHOT_DEVICE=""
+DEVICE2=""           # P7M4：多设备第二组
+WAL_DEVICE2=""
+SNAPSHOT_DEVICE2=""
 STRICT=false
 
 # ---------- 参数解析 ----------
@@ -82,6 +85,9 @@ while [[ $# -gt 0 ]]; do
         --snapshot-device=*)
             SNAPSHOT_DEVICE="${1#*=}"
             ;;
+        --device2=*)          DEVICE2="${1#*=}" ;;
+        --wal-device2=*)      WAL_DEVICE2="${1#*=}" ;;
+        --snapshot-device2=*) SNAPSHOT_DEVICE2="${1#*=}" ;;
         --strict)  STRICT=true ;;
         -h|--help) usage; exit 0 ;;
         *) echo "Error: 未知参数: $1" >&2; usage >&2; exit 2 ;;
@@ -165,6 +171,9 @@ fi
 [[ -n "$DEVICE" ]]          && export CABE_TEST_DEVICE="$DEVICE"
 [[ -n "$WAL_DEVICE" ]]      && export CABE_TEST_WAL_DEVICE="$WAL_DEVICE"
 [[ -n "$SNAPSHOT_DEVICE" ]] && export CABE_TEST_SNAPSHOT_DEVICE="$SNAPSHOT_DEVICE"
+[[ -n "$DEVICE2" ]]          && export CABE_TEST_DEVICE2="$DEVICE2"
+[[ -n "$WAL_DEVICE2" ]]      && export CABE_TEST_WAL_DEVICE2="$WAL_DEVICE2"
+[[ -n "$SNAPSHOT_DEVICE2" ]] && export CABE_TEST_SNAPSHOT_DEVICE2="$SNAPSHOT_DEVICE2"
 
 ctest --test-dir "$BUILD_DIR" --output-on-failure \
     || { echo "Error: ctest 失败" >&2; exit 4; }

@@ -3,6 +3,7 @@
 #include "common/logger.h"
 #include "util/crc32.h"
 #include "util/util.h"
+#include "util/hash.h"          // P7M4：RouteToDevice
 
 #include <cstring>
 #include <memory>
@@ -26,7 +27,7 @@ namespace cabe {
     Status Engine::Open(const Options& opts) {
         if (opened_.load(std::memory_order_acquire)) return Status::Error(err::kEngineAlreadyOpen);
         if (opts.devices.empty()) return Status::Error(err::kEngineInvalidOpts);
-        if (opts.devices.size() > 1) return Status::Error(err::kEngineInvalidOpts);
+        if (opts.devices.size() > 256) return Status::Error(err::kEngineInvalidOpts);   // P7M4：DeviceId=uint8_t → 最多 256 设备
 
         options_ = opts;   // P5M3：常驻；组件持 &options_ 现读 wal_level（M1 只读）
 
@@ -64,9 +65,9 @@ namespace cabe {
             }
 
             dc.pool = BufferPool(kDefaultPoolBlocks);
-            // TODO(P7/多设备 M4): BlockId device 位此处仍硬编码 0；M4 改 static_cast<DeviceId>(i)
-            //   并与 RouteKey 路由对齐。M1 是 N=1，device 位无歧义。
-            dc.block_allocator.Init(0, dc.super_block.block_count);
+            // P7M4：分配器绑定本设备号(super_block.device_id 已由 Create/RecoverDeviceGroup 校验 ==i)，
+            //   Acquire 返回的 BlockId 高 8 位即此 dev，与 RouteKey 路由对齐。N=1 时 device_id=0。
+            dc.block_allocator.Init(static_cast<DeviceId>(dc.super_block.device_id), dc.super_block.block_count);
 
             if (opts.create) {
                 // create：开 WAL + 快照设备（空环 / 清槽），索引从空开始。
@@ -192,8 +193,8 @@ namespace cabe {
     bool Engine::is_open() const noexcept { return opened_.load(std::memory_order_acquire); }
 
     std::size_t Engine::RouteKey(std::string_view key) const noexcept {
-        (void)key;
-        return 0;   // P7M1：N=1，单 reactor；M4 改 hash(key)%N（P7-D7）
+        // P7M4：device = Hash(key) % N（util::RouteToDevice，D6/D7 冻结）。N==1 退化为 0。
+        return util::RouteToDevice(key, reactors_.size());
     }
 
     void Engine::AbortOpen(DeviceContext& dc) {
@@ -255,8 +256,8 @@ namespace cabe {
         const char* why = nullptr;
         if (key.empty() || key.size() > kWalKeyMax) {
             why = "key 长度非法";                          // 空 key 是写路径门口就拒的（幽灵键）
-        } else if (has_block && block.dev() != 0) {
-            why = "BlockId device 位非零";                 // 指向不存在的设备，污染分配器重建（P7 随路由改）
+        } else if (has_block && block.dev() != static_cast<DeviceId>(dc.super_block.device_id)) {
+            why = "BlockId device 位与本设备不符";          // P7M4：本设备的块 dev() 必 == device_id（恢复一致性）
         } else if (has_block && block.block_idx() >= dc.super_block.block_count) {
             why = "块号越出数据区";                        // 越界读 / RebuildFromActive 被喂越界块
         }
@@ -325,7 +326,8 @@ namespace cabe {
             return err::kSuccess;
         });
         if (rc != err::kSuccess) return rc;
-        rc = dc.block_allocator.RebuildFromActive(0, dc.super_block.block_count, active);
+        rc = dc.block_allocator.RebuildFromActive(static_cast<DeviceId>(dc.super_block.device_id),
+                                                  dc.super_block.block_count, active);
         if (rc != err::kSuccess) {
             // 越界/重复活块（P5M6-D18 增补检测）——穿透了上游校验的恢复一致性矛盾，拒开。
             CABE_LOG_ERROR("空闲块重建失败（活块清单矛盾）: rc=%d, 活块数=%zu", rc, active.size());

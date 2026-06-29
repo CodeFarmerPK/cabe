@@ -86,6 +86,9 @@ CLEAN=false
 DEVICE=""
 WAL_DEVICE=""
 SNAPSHOT_DEVICE=""
+DEVICE2=""           # P7M4：多设备第二组
+WAL_DEVICE2=""
+SNAPSHOT_DEVICE2=""
 FILTER=""
 JOBS="$(nproc)"
 
@@ -107,6 +110,12 @@ while [[ $# -gt 0 ]]; do
         --wal-device)          WAL_DEVICE="$2"; shift ;;
         --snapshot-device=*)   SNAPSHOT_DEVICE="${1#*=}" ;;
         --snapshot-device)     SNAPSHOT_DEVICE="$2"; shift ;;
+        --device2=*)           DEVICE2="${1#*=}" ;;
+        --device2)             DEVICE2="$2"; shift ;;
+        --wal-device2=*)       WAL_DEVICE2="${1#*=}" ;;
+        --wal-device2)         WAL_DEVICE2="$2"; shift ;;
+        --snapshot-device2=*)  SNAPSHOT_DEVICE2="${1#*=}" ;;
+        --snapshot-device2)    SNAPSHOT_DEVICE2="$2"; shift ;;
         --clean)      CLEAN=true ;;
         --filter=*)   FILTER="${1#*=}" ;;
         --filter)     FILTER="$2"; shift ;;
@@ -183,6 +192,9 @@ export UBSAN_OPTIONS="${UBSAN_OPTIONS:-halt_on_error=1:abort_on_error=1:print_st
 [[ -n "$DEVICE" ]]          && export CABE_TEST_DEVICE="$DEVICE"
 [[ -n "$WAL_DEVICE" ]]      && export CABE_TEST_WAL_DEVICE="$WAL_DEVICE"
 [[ -n "$SNAPSHOT_DEVICE" ]] && export CABE_TEST_SNAPSHOT_DEVICE="$SNAPSHOT_DEVICE"
+[[ -n "$DEVICE2" ]]          && export CABE_TEST_DEVICE2="$DEVICE2"
+[[ -n "$WAL_DEVICE2" ]]      && export CABE_TEST_WAL_DEVICE2="$WAL_DEVICE2"
+[[ -n "$SNAPSHOT_DEVICE2" ]] && export CABE_TEST_SNAPSHOT_DEVICE2="$SNAPSHOT_DEVICE2"
 
 # ---------- 跑测试 ----------
 ctest_args=(--test-dir "$BUILD_DIR" --output-on-failure)

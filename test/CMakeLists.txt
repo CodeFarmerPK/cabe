@@ -97,6 +97,11 @@ add_executable(test_engine_concurrency engine/engine_concurrency_test.cpp)
 target_link_libraries(test_engine_concurrency PRIVATE cabe::engine GTest::gtest_main)
 gtest_discover_tests(test_engine_concurrency DISCOVERY_TIMEOUT 60)
 
+# P7M4：多设备测试（需 2 组共 6 块 loop 设备；CABE_TEST_*  +  CABE_TEST_*2，见 mkloop.sh create-multi）
+add_executable(test_engine_multidevice engine/engine_multidevice_test.cpp)
+target_link_libraries(test_engine_multidevice PRIVATE cabe::engine GTest::gtest_main)
+gtest_discover_tests(test_engine_multidevice DISCOVERY_TIMEOUT 60)
+
 # P4M1：IoUringIoBackend 测试（仅 io_uring 后端时编译）
 if(CABE_IO_BACKEND STREQUAL "io_uring")
     add_executable(test_io_uring_backend io/io_uring_backend_test.cpp)
