@@ -43,6 +43,13 @@ usage() {
                           需设备的测试要三者齐备，否则跳过
                           可用 ./scripts/mkloop.sh create 一键创建三块
 
+多设备第二组（P7M4，N=2 多设备测试用；缺则相关用例整体 GTEST_SKIP）:
+  --device2=PATH           第二组数据设备路径（如 /dev/loop3）
+  --wal-device2=PATH       第二组 WAL 设备路径（如 /dev/loop4）
+  --snapshot-device2=PATH  第二组快照设备路径（如 /dev/loop5）
+                           需两组共 6 块齐备，否则 N=2 用例跳过
+                           可用 ./scripts/mkloop.sh create-multi 一键创建两组
+
 测试过滤:
   --filter REGEX      只跑匹配 POSIX 正则的测试用例
                       例: --filter 'Engine*'  --filter 'Status.*'
@@ -62,6 +69,10 @@ usage() {
   ./scripts/run-tests.sh --device=/dev/loop0 --wal-device=/dev/loop1 --snapshot-device=/dev/loop2
   ./scripts/run-tests.sh --device=/dev/loop0 --wal-device=/dev/loop1 --snapshot-device=/dev/loop2 --asan
   ./scripts/run-tests.sh --device=/dev/loop0 --wal-device=/dev/loop1 --snapshot-device=/dev/loop2 --backend=io_uring
+  # N=2 多设备：先 ./scripts/mkloop.sh create-multi 建两组 6 块，再带两组设备旗标
+  ./scripts/run-tests.sh --backend=sync \\
+      --device=/dev/loop0 --wal-device=/dev/loop1 --snapshot-device=/dev/loop2 \\
+      --device2=/dev/loop3 --wal-device2=/dev/loop4 --snapshot-device2=/dev/loop5
   ./scripts/run-tests.sh --compiler=clang++ --asan                    # clang++ + ASAN（无设备测试跳过）
   ./scripts/run-tests.sh --release                                    # Release（跳过设备测试）
   ./scripts/run-tests.sh --filter 'Engine*' --device=...              # 只跑 Engine 用例

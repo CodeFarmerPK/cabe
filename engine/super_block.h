@@ -12,7 +12,7 @@ namespace cabe {
 
     // kSuperBlockSize（4K）/ kDataRegionOffset（8K）在 common/structs.h 定义——io 与 engine 共享。
     inline constexpr std::uint32_t kSuperBlockMagic   = 0x43424553u; // "SEBC"
-    inline constexpr std::uint32_t kSuperBlockVersion = 1;
+    inline constexpr std::uint32_t kSuperBlockVersion = 2;   // P7：@120 保留字节改作 device_count（持久布局语义变更）→ bump v1→v2，使旧 v1 库以明确版本不符被 CheckSuperBlock 拒开、而非撞进语义不相干的 device_count 校验
     inline constexpr std::size_t   kUuidBytes         = 16;          // 128 位 UUID
 
     enum class DeviceType : std::uint32_t {
@@ -36,7 +36,8 @@ namespace cabe {
         std::uint64_t device_id;                // @96   数据设备编号（多设备顺序校验，M1 下为 0）
         std::uint64_t block_count;              // @104  数据区可用块数=(设备字节-kDataRegionOffset)/kValueSize；仅数据设备有效，WAL/快照为 0
         std::uint64_t created_at;               // @112  创建时间戳
-        std::uint8_t  reserved[3972];           // @120  预留扩展，填零
+        std::uint64_t device_count;             // @120   设备组总数 N(多设备拓扑校验;三设备一致写入)
+        std::uint8_t  reserved[3964];           // @128   预留扩展，填零
         std::uint32_t crc32c;                   // @4092 自身 CRC32C，覆盖 [0, 4092)
     };
 
@@ -47,12 +48,12 @@ namespace cabe {
     // 为一个设备组（数据 + WAL + 快照）写超级块（create，破坏性）。
     // 生成引擎 UUID + 三设备 UUID，按 device_type 填充，各写双份。
     // 返回写入数据设备的 SuperBlock（out）。
-    int32_t CreateDeviceGroup(const DeviceConfig& cfg, std::uint64_t device_id, SuperBlock* out);
+    int32_t CreateDeviceGroup(const DeviceConfig& cfg, std::uint64_t device_id, std::uint64_t device_count, SuperBlock* out);
 
     // 校验一个设备组的超级块（recover）。
     // 读三设备超级块（主备 + 主坏用备份修复），校验 engine_uuid 一致 + 双向配对 + device_id。
     // 返回数据设备的 SuperBlock（out）。
-    int32_t RecoverDeviceGroup(const DeviceConfig& cfg, std::uint64_t expected_device_id, SuperBlock* out);
+    int32_t RecoverDeviceGroup(const DeviceConfig& cfg, std::uint64_t expected_device_id, std::uint64_t expected_device_count, SuperBlock* out);
 
 } // namespace cabe
 

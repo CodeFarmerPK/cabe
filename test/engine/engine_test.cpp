@@ -193,6 +193,30 @@ TEST_F(EngineDeviceTest, PutWrongValueSizeFails) {
     EXPECT_EQ(engine_.Put("k", cabe::DataView{small}).code, cabe::err::kEngineInvalidValue);
 }
 
+// P7：key 长度边界——超 kWalKeyMax 拒绝（注：Put 先校 value 尺寸，故须配合法 1MiB value）。
+TEST_F(EngineDeviceTest, PutKeyTooLongFails) {
+    ASSERT_TRUE(engine_.Open(CreateOpts()).ok());
+    const std::string too_long(cabe::kWalKeyMax + 1, 'x');           // 85 字节
+    EXPECT_EQ(engine_.Put(too_long, cabe::DataView{MakeValue(std::byte{0x5A})}).code,
+              cabe::err::kWalKeyTooLong);
+}
+
+// P7：key 长度边界正例——恰 kWalKeyMax(84) 字节放行，可读回。
+TEST_F(EngineDeviceTest, PutKeyMaxLenSucceeds) {
+    ASSERT_TRUE(engine_.Open(CreateOpts()).ok());
+    const std::string max_key(cabe::kWalKeyMax, 'k');                // 恰 84 字节
+    EXPECT_TRUE(engine_.Put(max_key, cabe::DataView{MakeValue(std::byte{0xA5})}).ok());
+    std::vector<std::byte> out(cabe::kValueSize);
+    EXPECT_TRUE(engine_.Get(max_key, cabe::DataBuffer{out}).ok());
+}
+
+// P7：非法 WAL 档（合法枚举区 1..4 之外）→ kEngineInvalidOpts（运行时改档守卫；开着引擎）。
+TEST_F(EngineDeviceTest, SetWalLevelInvalidFails) {
+    ASSERT_TRUE(engine_.Open(CreateOpts()).ok());
+    EXPECT_EQ(engine_.SetWalLevel(static_cast<cabe::WalLevel>(0)).code, cabe::err::kEngineInvalidOpts);
+    EXPECT_EQ(engine_.SetWalLevel(static_cast<cabe::WalLevel>(5)).code, cabe::err::kEngineInvalidOpts);
+}
+
 // =========================================================================
 // 不需要设备的测试
 // =========================================================================
@@ -219,4 +243,13 @@ TEST(Engine, TooManyDevicesFails) {
     cabe::Options opts;
     for (int i = 0; i < 257; ++i) opts.devices.push_back({"d", "w", "s"});   // size 校验在开设备前，不碰假路径
     EXPECT_EQ(e.Open(opts).code, cabe::err::kEngineInvalidOpts);
+}
+
+// P7M4：256 是 DeviceId=uint8_t 的上界（size 闸是 >256 才拒）——恰 256 个设备过闸，之后在开假
+// 设备路径上失败（非 kEngineInvalidOpts）。与 TooManyDevicesFails(257) 构成边界对称覆盖。
+TEST(Engine, DeviceCountBoundary) {
+    cabe::Engine e;
+    cabe::Options opts;
+    for (int i = 0; i < 256; ++i) opts.devices.push_back({"d", "w", "s"});
+    EXPECT_NE(e.Open(opts).code, cabe::err::kEngineInvalidOpts);   // 过 size 闸 → 在假设备路径上失败
 }

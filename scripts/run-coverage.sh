@@ -23,6 +23,11 @@ usage() {
   --wal-device=PATH       WAL 设备路径（如 /dev/loop1）
   --snapshot-device=PATH  快照设备路径（如 /dev/loop2）
                           需设备的测试要三者齐备（./scripts/mkloop.sh create 一键创建）
+  --device2=PATH           第二组数据设备路径（如 /dev/loop3，P7M4 N=2 多设备测试）
+  --wal-device2=PATH       第二组 WAL 设备路径（如 /dev/loop4）
+  --snapshot-device2=PATH  第二组快照设备路径（如 /dev/loop5）
+                           需两组共 6 块齐备，否则 N=2 用例整体 GTEST_SKIP
+                           可用 ./scripts/mkloop.sh create-multi 一键创建两组
   --strict          总行覆盖率 <80% 时退出码 1
                     （默认仅打印 + 着色提示，不阻塞）
   -h, --help        输出本用法
@@ -30,6 +35,10 @@ usage() {
 示例:
   ./scripts/run-coverage.sh --strict                                  (sync + hashmap，无设备测试跳过)
   ./scripts/run-coverage.sh --device=/dev/loop0 --wal-device=/dev/loop1 --snapshot-device=/dev/loop2 --strict
+  # N=2 多设备：先 ./scripts/mkloop.sh create-multi 建两组 6 块，再带两组设备旗标
+  ./scripts/run-coverage.sh --backend=sync \
+      --device=/dev/loop0 --wal-device=/dev/loop1 --snapshot-device=/dev/loop2 \
+      --device2=/dev/loop3 --wal-device2=/dev/loop4 --snapshot-device2=/dev/loop5 --strict
 
 退出码:
   0  覆盖率脚本跑完（无 --strict 时；或 --strict 且 ≥80%）

@@ -212,6 +212,8 @@ TEST_F(ConcurrencyTest, ConcurrentSameKeyNoTear) {
             EXPECT_EQ(st.code, cabe::err::kSuccess);
             if (st.code != cabe::err::kSuccess) continue;
             const std::byte b = out[0];
+            // 注：无撕裂在"单消费者 reactor 串行 + 整块写/读"架构下 by-construction 成立——本断言
+            //     非真撕裂检验，而是串行化/竞态回归守卫（TSAN 多轮 + 任何架构倒退会在此现形）。
             // 无撕裂：整块均匀字节（撕裂会读到两个线程值的拼接）。
             EXPECT_TRUE(std::all_of(out.begin(), out.end(), [b](std::byte x) { return x == b; }))
                 << "撕裂：同 key 值非均匀字节";
@@ -230,7 +232,8 @@ TEST_F(ConcurrencyTest, ConcurrentWritesRecoverConsistent) {
         return MakeValue(static_cast<std::byte>((tid * 13 + i) & 0xFF));
     };
     // 共用 loop 设备：先抹 WAL 环区 + 快照槽头，清除前序用例残留（recover 对设备洁净敏感）。
-    WipeWalAndSnapshot();
+    // 包 ASSERT_NO_FATAL_FAILURE：清盘内部 ASSERT 失败时在此干净停下，不级联污染后续 recover 断言。
+    ASSERT_NO_FATAL_FAILURE(WipeWalAndSnapshot());
     // 会话一：并发写到已知终态。
     {
         cabe::Engine eng;
@@ -257,6 +260,22 @@ TEST_F(ConcurrencyTest, ConcurrentWritesRecoverConsistent) {
         }
     }
     EXPECT_TRUE(eng2.Close().ok());
+}
+
+// ② kWalFull 引擎级救援分支（reactor.cpp WriteWalRescuing）：占位 SKIP。下述三点使该分支无法经
+//    Engine 公开 API 良性触达，故不硬凑——
+//    1) 救援即"整环回收"兜底：WAL 满时 WriteWalRescuing 先强制 DoSnapshot，快照把 covered_seq 推到
+//       last_seq 并 ReclaimUpTo 整环回收（与数据是否存活无关——WAL 只是日志，索引一旦落快照全环即可
+//       回收），随后重试恰一次必落空环 → Put 返成功。对外回报 kWalFull 仅在"强制快照本身失败"时发生
+//       （如快照盘损/满），属故障注入范畴，本项目不做注入（见 MEMORY：假定软硬件不故障）。
+//    2) 逼近救援路径代价过高：16MiB WAL 环 ≈ (16MiB−8K−4K)/128 ≈ 13 万帧；而 64MiB 数据盘仅 ~63 个
+//       1MiB 槽——写不同 key ~63 次即 kEngineNoSpace（先于环满）。唯一不耗数据盘的填环法是狂覆盖同一
+//       key（块循环回收），但需 ~13 万 × 1MiB DMA 过 reactor，秒级以上，不宜入单测。
+//    3) WAL 层 kWalFull + 回收复活已被直测覆盖：wal_test.cpp 的 WalFullBatchModeAndReclaimRevives /
+//       WalFullSyncMode / RecoverFullRing（直驱 Wal、不经 1MiB 数据写，精确顶环）。
+TEST_F(ConcurrencyTest, WalFullRescue) {
+    GTEST_SKIP() << "kWalFull 经 Engine 公开 API 不可良性触达：救援即整环回收兜底（重试必成）+ 数据盘"
+                    "先满 + 填环代价过高；WAL 层满/复活已由 wal_test.cpp 直测覆盖。详见上方注释。";
 }
 
 } // namespace

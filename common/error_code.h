@@ -84,6 +84,10 @@ namespace cabe::err {
     inline constexpr int kSuperBlockReadFailed         = InSeg(kWalRecoveryBase, 7); // -105007  主备超级块均读 I/O 失败（区别于"非本格式/损坏"，勿据此重建）
     inline constexpr int kSuperBlockEntropyFailure     = InSeg(kWalRecoveryBase, 8); // -105008  系统熵源不可用，无法生成 UUID，create 中止
     inline constexpr int kSuperBlockSizeMismatch       = InSeg(kWalRecoveryBase, 9); // -105009  持久 block_count 与当前数据设备实际大小不符（设备被缩容）
+    // P7(多设备拓扑防线,续编号 13——索引 10~12 已被下方 WAL recovery 段占用):recover 时设备
+    // 总数 N 与 create 时不符(缩/增设备列表);与 device_id 防漂移校验互补,把"静默错路由"变"开盘即拒"。
+    inline constexpr int kSuperBlockDeviceCountMismatch = InSeg(kWalRecoveryBase, 13); // -105013
+    static_assert(kSuperBlockDeviceCountMismatch > kWalRecoveryBase - kSegmentSize);
 
     // ---- wal_recovery 段续编（P5M6 新增：崩溃恢复，从 10 号起；按运维动作配码——
     //      "查设备 / 查数据 / 报 bug" 三类，细节定位归日志三件套（seq + 偏移 + 原因）。----

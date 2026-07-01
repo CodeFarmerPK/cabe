@@ -199,4 +199,78 @@ TEST_F(MultiDeviceTest, MultiThreadMultiDevice) {
     // 先 join(RunThreads 内)再 Close(TearDown):M3 静默契约
 }
 
+// P7M5 隔离演示(坏设备 io.Open 失败):两好设备组建库后,recover 时把 device 1 的**数据盘**换成
+//   不存在路径 → device 0 的 RecoverDeviceGroup 过(device_count 2==2)、io.Open 成;device 1 在打开
+//   坏数据盘处真失败(kIoBase)→ all-or-nothing 干净拒开(无崩/漏/孤儿),且不污染好设备:补回完整两组
+//   recover 数据仍在。与 OpenWithFewerDevicesFailsCleanly 分工不同——那条测 device_count 缩列表拒开
+//   (kSuperBlockDeviceCountMismatch),这条测坏设备 io.Open 拒开(kIoBase),各钉一条独立路径。
+TEST_F(MultiDeviceTest, OpenFailsCleanlyOnBadDevice) {
+    WipeBoth();   // 清两组陈帧/陈快照(阶段1 create 两组、阶段3 要 recover)
+    const auto val = MakeValue(std::byte{0x5A});
+    std::vector<std::byte> out(cabe::kValueSize);
+
+    // 阶段1:两个好设备组 create(device 0 因此持久 device_count=2)+ 写一笔 + Close。
+    {
+        cabe::Engine good;
+        ASSERT_TRUE(good.Open(MakeOpts(true)).ok());
+        ASSERT_EQ(good.Put("iso", cabe::DataView{val}).code, cabe::err::kSuccess);
+        ASSERT_TRUE(good.Close().ok());
+    }
+    // 阶段2:仍是两设备 recover,但只把 device 1 的**数据盘**换成不存在路径(wal/snapshot 仍真)。
+    //   device 0 全过 → 循环走到 device 1 打开坏数据盘处真失败 → 干净拒开、引擎未开。
+    {
+        cabe::Engine bad;
+        cabe::Options o = MakeOpts(false);
+        o.devices[1].data_path = "/dev/cabe_no_such_device_zzz";          // 坏:仅 device 1 数据盘不存在
+        const auto st = bad.Open(o);
+        EXPECT_EQ(st.code, cabe::err::kIoBase) << "坏数据盘应在 io.Open 处致 Open 失败";  // 精确钉死路径,防退化回 device_count 分支
+        EXPECT_FALSE(bad.is_open());                                      // all-or-nothing:整体未开
+    }
+    // 阶段3:补回完整两组好设备 recover → 阶段1 写的 key 仍读得回(失败的 Open 未污染好设备)。
+    {
+        cabe::Engine good2;
+        ASSERT_TRUE(good2.Open(MakeOpts(false)).ok()) << "完整两组应可正常 recover";
+        ASSERT_EQ(good2.Get("iso", cabe::DataBuffer{out}).code, cabe::err::kSuccess);
+        EXPECT_EQ(out, val);                                              // 数据未被污染
+        EXPECT_TRUE(good2.Close().ok());
+    }
+}
+
+// P7M5 隔离演示(设备数不符):两设备组 create 的库,用更短设备列表(N=1)recover →
+//   device 0 超级块 device_count=2,单设备 recover 期望 N=1 → kSuperBlockDeviceCountMismatch 干净拒开;
+//   补回完整两组 recover 数据仍在(超级块校验只读,失败的 Open 未污染好设备)。
+TEST_F(MultiDeviceTest, OpenWithFewerDevicesFailsCleanly) {
+    WipeBoth();   // 清两组陈帧/陈快照(create 不抹盘数据区)
+    const auto val = MakeValue(std::byte{0x7E});
+    std::vector<std::byte> out(cabe::kValueSize);
+
+    // 阶段1:两设备组 create + Put 一个 key + Close。
+    {
+        cabe::Engine eng;
+        ASSERT_TRUE(eng.Open(MakeOpts(true)).ok());
+        ASSERT_EQ(eng.Put("fewer", cabe::DataView{val}).code, cabe::err::kSuccess);
+        ASSERT_TRUE(eng.Close().ok());
+    }
+    // 阶段2:只含第一个设备组的 Options(create=false)→ Open 干净失败、引擎未开。
+    {
+        cabe::Engine eng;
+        cabe::Options o;
+        o.create = false;
+        o.snapshot_threshold_bytes = 1024 * 1024;
+        o.devices.push_back({d1_, w1_, s1_});                            // 仅 device 0(超级块记 device_count=2)
+        const auto st = eng.Open(o);
+        EXPECT_NE(st.code, cabe::err::kSuccess) << "设备数不符应致 Open 失败";
+        EXPECT_EQ(st.code, cabe::err::kSuperBlockDeviceCountMismatch);
+        EXPECT_FALSE(eng.is_open());
+    }
+    // 阶段3:补回完整两设备组 recover → 阶段1 写的 key 仍读得回(失败的 Open 未污染)。
+    {
+        cabe::Engine eng;
+        ASSERT_TRUE(eng.Open(MakeOpts(false)).ok()) << "完整两组应可正常 recover";
+        ASSERT_EQ(eng.Get("fewer", cabe::DataBuffer{out}).code, cabe::err::kSuccess);
+        EXPECT_EQ(out, val);
+        EXPECT_TRUE(eng.Close().ok());
+    }
+}
+
 } // namespace

@@ -139,6 +139,24 @@ TEST(Reactor, GetWithoutOpenFails) {
     EXPECT_EQ(e.Get("k", cabe::DataBuffer{out}).code, cabe::err::kEngineNotOpen);
 }
 
+// —— not-open 守卫补全：Delete / SetWalLevel / Snapshot 与 Get 同样在未开时即拒（kEngineNotOpen）——
+TEST(Reactor, DeleteWithoutOpenFails) {
+    cabe::Engine e;
+    EXPECT_EQ(e.Delete("k").code, cabe::err::kEngineNotOpen);
+}
+
+TEST(Reactor, SetWalLevelWithoutOpenFails) {
+    cabe::Engine e;
+    EXPECT_EQ(e.SetWalLevel(cabe::WalLevel::WalSync).code, cabe::err::kEngineNotOpen);
+}
+
+TEST(Reactor, SnapshotWithoutOpenFails) {
+    cabe::Engine e;
+    EXPECT_EQ(e.Snapshot().code, cabe::err::kEngineNotOpen);
+}
+
+// 注：下两条 EmptyDevicesFails / TooManyDevicesFails 与 engine_test.cpp 有逐字相同的 Engine-suite
+// 版本；此为 Reactor-suite 的对称覆盖（同款负向 Open 校验、不同 suite），刻意各留一份，非漏改。
 TEST(Reactor, EmptyDevicesFails) {
     cabe::Engine e;
     EXPECT_EQ(e.Open(cabe::Options{}).code, cabe::err::kEngineInvalidOpts);

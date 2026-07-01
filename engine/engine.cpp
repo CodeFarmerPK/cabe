@@ -47,9 +47,10 @@ namespace cabe {
             DeviceContext dc;
 
             // 超级块：create 写双份 / recover 读校验（含双向配对 + 设备编号）——流水线 ①
+            const std::uint64_t device_count = opts.devices.size();
             int32_t rc = opts.create
-                ? CreateDeviceGroup(cfg, i, &dc.super_block)
-                : RecoverDeviceGroup(cfg, i, &dc.super_block);
+                ? CreateDeviceGroup(cfg, i, device_count, &dc.super_block)
+                : RecoverDeviceGroup(cfg, i, device_count, &dc.super_block);
             if (rc != err::kSuccess) return fail_phase1(dc, rc);
 
             // 打开数据设备的 IoBackend——流水线 ②

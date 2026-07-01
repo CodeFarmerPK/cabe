@@ -129,7 +129,7 @@ namespace cabe {
 
     } // namespace
 
-    int32_t CreateDeviceGroup(const DeviceConfig& cfg, std::uint64_t device_id, SuperBlock* out) {
+    int32_t CreateDeviceGroup(const DeviceConfig& cfg, std::uint64_t device_id, std::uint64_t device_count, SuperBlock* out) {
         RawDevice data_dev, wal_dev, snap_dev;
         if (data_dev.Open(cfg.data_path) != err::kSuccess) return err::kIoBase;
         if (wal_dev.Open(cfg.wal_path) != err::kSuccess) return err::kIoBase;
@@ -163,6 +163,7 @@ namespace cabe {
         std::memcpy(data_sb.paired_snapshot_uuid, snap_uuid, kUuidBytes);
         data_sb.device_id = device_id;
         data_sb.block_count = block_count;
+        data_sb.device_count = device_count;
         data_sb.created_at = now;
         data_sb.crc32c = ComputeCrc(data_sb);
 
@@ -175,6 +176,7 @@ namespace cabe {
         std::memcpy(wal_sb.device_uuid, wal_uuid, kUuidBytes);
         std::memcpy(wal_sb.paired_data_uuid, data_uuid, kUuidBytes);
         wal_sb.device_id = device_id;
+        wal_sb.device_count = device_count;
         wal_sb.created_at = now;
         wal_sb.crc32c = ComputeCrc(wal_sb);
 
@@ -187,6 +189,7 @@ namespace cabe {
         std::memcpy(snap_sb.device_uuid, snap_uuid, kUuidBytes);
         std::memcpy(snap_sb.paired_data_uuid, data_uuid, kUuidBytes);
         snap_sb.device_id = device_id;
+        snap_sb.device_count = device_count;
         snap_sb.created_at = now;
         snap_sb.crc32c = ComputeCrc(snap_sb);
 
@@ -200,7 +203,7 @@ namespace cabe {
         return err::kSuccess;
     }
 
-    int32_t RecoverDeviceGroup(const DeviceConfig& cfg, std::uint64_t expected_device_id, SuperBlock* out) {
+    int32_t RecoverDeviceGroup(const DeviceConfig& cfg, std::uint64_t expected_device_id, std::uint64_t expected_device_count, SuperBlock* out) {
         RawDevice data_dev, wal_dev, snap_dev;
         if (data_dev.Open(cfg.data_path) != err::kSuccess) return err::kIoBase;
         if (wal_dev.Open(cfg.wal_path) != err::kSuccess) return err::kIoBase;
@@ -244,6 +247,19 @@ namespace cabe {
             wal_sb.device_id  != expected_device_id ||
             snap_sb.device_id != expected_device_id) {
             return err::kSuperBlockDeviceIdMismatch;
+        }
+
+        // 设备组总数 N 与 create 时一致(防用更短/更长的设备列表 recover:device_id 逐槽仍匹配"成功",
+        // 但 RouteKey 的 hash%N 会静默改路由 → 老数据错位不可达。三设备对称校验)。
+        if (data_sb.device_count != expected_device_count ||
+            wal_sb.device_count  != expected_device_count ||
+            snap_sb.device_count != expected_device_count) {
+            CABE_LOG_ERROR("设备组总数不符: data_sb=%llu, wal_sb=%llu, snap_sb=%llu, 期望 N=%llu",
+                           static_cast<unsigned long long>(data_sb.device_count),
+                           static_cast<unsigned long long>(wal_sb.device_count),
+                           static_cast<unsigned long long>(snap_sb.device_count),
+                           static_cast<unsigned long long>(expected_device_count));
+            return err::kSuperBlockDeviceCountMismatch;
         }
 
         // 持久 block_count 与当前数据设备实际大小核对（防 create 后设备被缩容导致过量供给）。

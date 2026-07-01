@@ -16,7 +16,7 @@
 | 项 | 值 |
 |---|---|
 | 阶段 / 里程碑 | P7 / M1 |
-| 状态 | ⏳ **设计中(待实装)** |
+| 状态 | ✅ **已实装**(P7M5 收敛) |
 | 上游依赖 | P6 全部完成;P7 阶段计划(doc/P7/README.md,P7-D1~D13) |
 | 下游依赖本里程碑 | P7M2(写路径入 reactor:Put/Delete 执行体 + 运营口 + per-reactor Options + Get 取值/recover 联动测)→ M3 → M4 → M5 |
 | 退出判定 | 见 §9 |
@@ -40,8 +40,8 @@
 1. **`engine/reactor.h`**(新建):`OpType` / `OpNode` / `kOpPending` / `Reactor` 类(接口 + 私有
    入站队列、`std::thread`、`DeviceContext dc_`、执行体声明)。
 2. **`engine/reactor.cpp`**(新建,主战场):`Run` 事件循环、`Submit`、`Start`/`Stop`、`ExecuteGet`、
-   finalize、入站 Treiber 栈(push/drain/reverse)、drain-then-close、调用线程侧 `thread_local`
-   唤醒字 + 等待循环。
+   finalize、入站 Treiber 栈(push/drain/reverse)、drain-then-close、调用线程侧进程级长寿 WakeSlot
+   唤醒字(非 thread_local,见 `CallerWakeWord`)+ 等待循环。
 3. **`engine/engine.h`**(修改):`devices_` → `reactors_`(`vector<unique_ptr<Reactor>>`);
    `opened_` → `atomic<bool>`;include `reactor.h`;`RouteKey` 返扁平 reactor 下标。恢复方法签名不变。
 4. **`engine/engine.cpp`**(修改):`Open` 两阶段;`Get` → 验证 + 路由 + submit + wait + 翻译;
@@ -51,8 +51,9 @@
 7. **`test/CMakeLists.txt`**(修改):注册测试目标。
 
 **零触碰区**:`wal/`(group commit 全程不碰,P7-D10)、`snapshot/`、`io/`、`index/`、`slots/`、
-恢复链逻辑、盘上格式、错误码表(零新增——`kOpPending` 是 reactor 内部哨兵不进表,`kEngineNotImplemented`
-已存在 -104004)。
+恢复链逻辑、盘上格式。**错误码表:仅追加 1 个** `kEngineReactorStartFailed` = -104010
+(engine 段第 10 位 `InSeg(kEngineBase,10)`,reactor 工作线程/资源创建失败用,属"明显故障"一档);
+`kOpPending` 仍是 reactor 内部哨兵不进表,`kEngineNotImplemented` 已存在 -104004。
 
 ### 1.3 明确不做(各有归处)
 
@@ -77,7 +78,7 @@
 | **P7M1-D1** | 交付边界 | reactor 只做 **Get + Stop**;`Put`/`Delete`/`SetWalLevel`/`Snapshot` 返 `kEngineNotImplemented`;测试只验机制(create 空 + Get miss + Close + TSAN),**取值正确性 + recover 带数据 + Put 随 M2 的 Put-Get 联动测**(不碰伪造 fixture) |
 | **P7M1-D2** | Reactor 接口 + OpNode + OpType | `Reactor(DeviceContext&&)` move 接管、`Start()→int32_t` / `Stop()` / `Submit(OpNode*)`(**只投递不等待**);`OpNode` 建调用线程栈上、零堆分配:`{type, key(视图), out(DataBuffer), result{kOpPending}, next, wake}`;`OpType` M1 只 `Get`/`Stop`;**等待分到调用线程侧**(M4 fan-out 前向兼容);Reactor 不可移动 → Engine 用 `unique_ptr` 持有 |
 | **P7M1-D3** | 入站队列 | 给 reactor **新写一份最小侵入式 Treiber 栈,inline 在 reactor.cpp**:复刻 P6 的 push / exchange-drain / reverse,**去掉 leader 选举与 epoch**(reactor 是唯一固定消费者);**保留 reverse**(到达序/drain-then-close 需要);否决抽公共原语(B8 不碰 WAL CommitGroup,共享在 P7 只一个用户)、否决直接复用 WAL 的栈 |
-| **P7M1-D4** | 同步包异步 | **唤醒挂点(每调用线程一个 `thread_local wake_gen`)与结果槽(`OpNode.result`)分离**(避"最后触碰"UB);调用线程快照 gen **在 submit 之前**、`wake_gen.wait(gen)` 阻塞、`result` 作完成判据;reactor finalize 扣 **last-touch**(先存 next/wake → `result.store(release)` → wake `fetch_add`+`notify_one`);reactor 空闲在栈顶 `atomic::wait(nullptr)`;**全 release/acquire、不需要 seq_cst**(无选举的 Dekker 对);Get 的 `memcpy→op.out` 经 result 的 release/acquire 发布 |
+| **P7M1-D4** | 同步包异步 | **唤醒挂点(每调用线程一个进程级长寿 WakeSlot 槽,非 thread_local,见 `CallerWakeWord`)与结果槽(`OpNode.result`)分离**(避"最后触碰"UAF);调用线程快照 gen **在 submit 之前**、`wake.wait(gen)` 阻塞、`result` 作完成判据;reactor finalize 扣 **last-touch**(先存 next/wake → `result.store(release)` → wake `fetch_add`+`notify_one`);reactor 空闲在栈顶 `atomic::wait(nullptr)`;**全 release/acquire、不需要 seq_cst**(无选举的 Dekker 对);Get 的 `memcpy→op.out` 经 result 的 release/acquire 发布 |
 | **P7M1-D5** | 生命周期 | `Start` 起线程(`std::thread` 构造 try/catch 转错误码——明显故障简单判断、不让异常逃逸);**Stop op 走 drain-then-close**(处理完 Stop 前的 op → close 序列 snapshot→wal→io 首错存 `close_result_` → 唤醒掉队 op 成 `kEngineNotOpen` → 退出 Run);`Close` = 逐 reactor 投 Stop + `join` + 聚合首错(**join 即同步,Stop op 无需 wake**);**Open 两阶段**(逐设备 recover 进临时 holder → 全成功后 wrap 进 Reactor + Start);Reactor 析构 RAII 兜底防 fd 泄漏 |
 | **P7M1-D6** | Get 执行体 + 输出 buffer | 验证(`opened_`/`key.empty`/`value.size`)**上移调用线程 fail-fast**;执行体 = 现有 Get 逻辑原样搬进 reactor(改 dc 来源 + 输出到 `op.out` + 去验证);**保留 pool-buffer + CRC + 成功才 memcpy**(O_DIRECT 对齐 + CRC 失败不脏写 caller buffer);**pool 是 reactor 私有、单线程无锁**;完整执行体 M1 写全,但只测到 Lookup miss |
 | **P7M1-D7** | Engine 改造 + 测试 | `devices_`→`reactors_`;`opened_`→`atomic<bool>`;Open 两阶段;Get→submit/wait;Close→Stop/join;其余公开方法 not-implemented;**options_ 留 Engine 持有、M1 只读安全**(无 SetWalLevel,per-reactor 副本是 M2);测试 = create 空设备 + Get-miss + Close + (可选)recover 空 + not-implemented + 坏 Open + TSAN + liveness,全走公开 API |
@@ -99,7 +100,7 @@ struct OpNode {
     DataBuffer out;                             // Get 输出(caller 的 buffer)
     std::atomic<std::int32_t> result{kOpPending};
     OpNode* next = nullptr;                     // MPSC 侵入式链
-    std::atomic<std::uint32_t>* wake = nullptr; // 指向 caller 的 thread_local 唤醒字
+    std::atomic<std::uint32_t>* wake = nullptr; // → caller 的进程级长寿 WakeSlot 槽(非 thread_local,见 CallerWakeWord)
 };
 
 class Reactor {
@@ -133,44 +134,85 @@ private:
 `PushWriter` 等价的入队由 `Submit` 实现(见 §4.4)。`CommitGroup` 那套三原子 + 选举 + epoch
 **不出现**——reactor 是唯一固定消费者,只需一个 `inbox_`。
 
-### 3.2 调用线程侧唤醒字
+### 3.2 调用线程侧唤醒字(进程级 WakeSlot 槽)
 
 ```cpp
-// reactor.cpp 文件作用域:每调用线程一个,跨多个 reactor 共享(为 M4 fan-out 准备)
-thread_local std::atomic<std::uint32_t> g_wake_gen{0};
+// reactor.cpp 匿名 namespace:唤醒字【不放 thread_local】,而放进程级永生槽,
+// 首用时 new 出、CAS 注册进静态侵入链表 g_wake_registry(永不释放但经此始终可达)。
+struct WakeSlot {
+    std::atomic<std::uint32_t> gen{0};
+    WakeSlot* next{nullptr};
+};
+std::atomic<WakeSlot*> g_wake_registry{nullptr};   // 进程级,永不释放(经此可达,LSAN 非泄漏)
+
+std::atomic<std::uint32_t>* CallerWakeWord() noexcept {
+    thread_local WakeSlot* slot = [] {
+        WakeSlot* s = new WakeSlot{};              // 故意永不 delete:寿命须长于任何 reactor 对它的触碰
+        WakeSlot* head = g_wake_registry.load(std::memory_order_relaxed);
+        do { s->next = head; }                     // 冷路径 CAS 注册,无 mutex(保持无锁不变量)
+        while (!g_wake_registry.compare_exchange_weak(
+                   head, s, std::memory_order_release, std::memory_order_relaxed));
+        return s;
+    }();
+    return &slot->gen;                             // 返回该 caller 的长寿唤醒字
+}
 ```
 
-挂点放 `thread_local`(生命周期 ≥ 线程),**不放 OpNode**——这是避"最后触碰"UB 的根本(§4.1)。
+挂点放**进程级永生 WakeSlot 槽**(经 `g_wake_registry` 始终可达),**不放 OpNode、也不放 thread_local**——
+这才是避"最后触碰"UAF 的根本(§4.1)。反 thread_local 的因果:thread_local 寿命=线程,快路径下调用线程
+先退出 → reactor 晚到的 `fetch_add`/`notify` 打在已析构的 thread_local 上 = UAF。改进程级槽后,
+`CallerWakeWord()` 每调用线程首用 new 出一个永不释放的槽、经 registry 可达(LSAN 非泄漏),reactor 晚到
+触碰恒落有效内存;注册走冷路径 CAS、无 mutex(保 P7 无锁不变量)。thread_local 只存槽指针,线程退出只销毁
+指针、槽本身长存。
+> 该 WakeSlot 机制是 P7 收敛期(修 UAF)对最初 thread_local 唤醒字设计的修订。
 
 ---
 
 ## 4. 同步包异步机制(核心)
 
-### 4.1 核心安全:挂点与结果槽分离
+### 4.1 核心安全:挂点与结果槽分离,且挂点须活过调用线程
 
 reactor 对 OpNode 的**最后一次访问必须是 `result.store`**——这之后调用线程随时可能读到结果、
-返回、栈上的 OpNode 析构。所以唤醒(`notify`)绝不能打在 OpNode 上,要打在比节点活得久的字上
-= `g_wake_gen`(thread_local)。OpNode 只带一个指向它的指针 `wake`。
+返回、栈上的 OpNode 析构。所以唤醒(`notify`)绝不能打在 OpNode 上,要打在比节点活得久的字上。
+但"比节点久"还不够:finalize 里 `result.store` 之后才 `fetch_add`/`notify` 唤醒字,快路径下调用线程
+一观察到 `result` 即返回、**乃至整个调用线程退出**;若唤醒字寿命=线程(`thread_local`),reactor 晚到的
+`fetch_add`/`notify` 就打在已析构的 thread_local 上 = **use-after-free**(这正是 P7 收敛期修掉的 UAF 根因)。
+故挂点必须活得比 reactor 对它的最后一次触碰久 = **进程级永生 WakeSlot 槽**(`CallerWakeWord`:首用 new 出、
+CAS 注册进 `g_wake_registry`、永不释放但始终可达)。OpNode 只带一个指向该槽 `gen` 的指针 `wake`。
 
-### 4.2 调用线程侧等待(在 `Engine::Get` 里)
+### 4.2 调用线程侧等待(自由函数 `SubmitAndWait`,caller 侧通用)
+
+等待循环承载在 reactor.cpp 的自由函数 `std::int32_t SubmitAndWait(Reactor& r, OpNode& op) noexcept`
+(reactor.h:87 声明):取 `op.wake = CallerWakeWord()`(该 caller 的进程级 WakeSlot 槽)、`op.result` 自复位、
+在 submit 之前快照 gen、`wait` 循环、返回结果码;由 `Get`/`Put`/`Delete` 直接调用、`SetWalLevel`/`Snapshot`
+循环复用。`Engine::Get` 只做"前置校验 → 建 OpNode → SubmitAndWait → 翻译 Status"。
 
 ```cpp
+// reactor.cpp 自由函数,所有调用线程侧门面共用(reactor.h:87 声明):
+std::int32_t SubmitAndWait(Reactor& r, OpNode& op) noexcept {
+    std::atomic<std::uint32_t>* wake = CallerWakeWord();    // 该 caller 的进程级 WakeSlot 槽(活得比任何 reactor 触碰久)
+    op.wake = wake;
+    op.result.store(kOpPending, std::memory_order_relaxed); // 自带复位:不依赖调用方每次新建 OpNode
+    const std::uint32_t gen = wake->load(std::memory_order_acquire);  // 快照必须在 submit 之前
+    r.Submit(&op);
+    std::uint32_t cur = gen;
+    while (op.result.load(std::memory_order_acquire) == kOpPending) {
+        wake->wait(cur, std::memory_order_acquire);         // wake==cur 时阻塞
+        cur = wake->load(std::memory_order_acquire);
+    }
+    return op.result.load(std::memory_order_acquire);
+}
+```
+
+```cpp
+// Engine::Get 里(前置校验后):建 OpNode + SubmitAndWait + 翻译 Status
 OpNode op;
 op.type = OpType::Get; op.key = key; op.out = value;
-op.result.store(kOpPending, std::memory_order_relaxed);
-op.wake = &g_wake_gen;
-
-std::uint32_t gen = g_wake_gen.load(std::memory_order_acquire);   // 快照必须在 submit 之前
-reactor.Submit(&op);
-while (op.result.load(std::memory_order_acquire) == kOpPending) {
-    g_wake_gen.wait(gen, std::memory_order_acquire);              // wake_gen==gen 时阻塞
-    gen = g_wake_gen.load(std::memory_order_acquire);
-}
-std::int32_t rc = op.result.load(std::memory_order_acquire);
+std::int32_t rc = SubmitAndWait(r, op);                  // r = *reactors_[RouteKey(key)];result 由 SubmitAndWait 复位
 return rc == err::kSuccess ? Status::Ok() : Status::Error(rc);
 ```
 
-快照取在 submit 之前:reactor 在快照之后任何时刻 bump 了 `wake_gen`,`wait(gen)` 都会立即返回 →
+快照取在 submit 之前:reactor 在快照之后任何时刻 bump 了该 WakeSlot 槽的 `gen`,`wait(gen)` 都会立即返回 →
 不丢唤醒。这是 P6 `WaitResult` 同款。
 
 ### 4.3 reactor finalize(扣 last-touch)
@@ -185,8 +227,8 @@ w->notify_one();                          // 精确唤醒该调用线程
 // 推进到 next(见 §4.5 Run)
 ```
 
-`next`/`wake` 必须在 `result.store` **之前**读进本地;store 之后只碰本地 `w`(指向仍存活的
-thread_local 字)和 `next`,绝不再碰 op。
+`next`/`wake` 必须在 `result.store` **之前**读进本地;store 之后只碰本地 `w`(指向进程级永生的
+WakeSlot 槽,恒有效)和 `next`,绝不再碰 op。
 
 ### 4.4 投递与 reactor 空闲等待
 
@@ -212,7 +254,7 @@ void Reactor::Run() {
         if (!batch) { inbox_.wait(nullptr, std::memory_order_acquire); continue; }
         for (OpNode* op = Reverse(batch); op; ) {        // 到达序
             OpNode* next = op->next;
-            if (op->type == OpType::Stop) { HandleStop(op, next); return; }   // §5.2
+            if (op->type == OpType::Stop) { CloseDc(); FailWakeChain(next); FailWakeChain(Reverse(DrainAll())); return; }  // 关 dc 见 §5.2 CloseDc()
             auto* w = op->wake;
             std::int32_t rc = ExecuteGet(op);
             op->result.store(rc, std::memory_order_release);
@@ -231,8 +273,8 @@ void Reactor::Run() {
 | `Submit` push CAS(发布 op 内容) | release |
 | reactor `exchange`-drain / `inbox_.wait` | acquire |
 | reactor `result.store`(发布执行结果 + `op.out`) | release |
-| caller `result.load` / `wake_gen.wait`/`load` | acquire |
-| reactor `wake_gen.fetch_add` | release |
+| caller `result.load` / `wake.wait`/`load`(WakeSlot.gen) | acquire |
+| reactor `wake.fetch_add`(WakeSlot.gen) | release |
 
 > **为什么不需要 seq_cst**:P6 的四个 seq_cst 是为封 leader 选举那对跨变量 Dekker store-load;
 > M1 reactor 没有选举,也就没有那对 store-load,全部 release/acquire + `atomic::wait/notify` 即足。
@@ -252,22 +294,32 @@ std::int32_t Reactor::Start() {
 }
 ```
 
-> 注:`kEngineReactorStartFailed` 若 error_code.h 无现成贴切码,实装时在 engine 段追加一个;
+> 注:`kEngineReactorStartFailed` 已在 error_code.h 的 engine 段追加(-104010,第 10 位);
 > 它是"明显故障(线程/资源创建失败)"那一档(no-fault-injection),不做注入测试。
 
-### 5.2 Stop op 的 drain-then-close
+### 5.2 Stop op 的 drain-then-close(内联在 Run + CloseDc 辅助)
+
+代码无独立 `HandleStop` 方法;Stop 分派内联在 `Run()` 中(§4.5),关闭序列抽成独立的
+`CloseDc()`,节点收尾抽成 `Finalize()` / `FailWakeChain()`:
 
 ```cpp
-void Reactor::HandleStop(OpNode* /*stop*/, OpNode* post_stop) {
-    close_result_ = dc_.snapshot.Close();                    // 沿用现有顺序 snapshot→wal→io
+// §4.5 Run() 内,到达序遇到 Stop op 时内联执行(无独立 HandleStop 方法):
+if (op->type == OpType::Stop) {
+    CloseDc();                                  // 关 dc:snapshot→wal→io,首错入 close_result_、置 dc_closed_
+    FailWakeChain(next);                         // 唤醒本批 Stop 之后到达序的掉队 op
+    FailWakeChain(Reverse(DrainAll()));          // 处理关闭期间新 push 进来的 op
+    return;                                      // return 后线程结束
+}
+
+void Reactor::CloseDc() noexcept {              // 关闭序列,沿用现有顺序 snapshot→wal→io
+    close_result_ = dc_.snapshot.Close();
     std::int32_t w = dc_.wal.Close(), i = dc_.io.Close();
     if (close_result_ == err::kSuccess) close_result_ = w ? w : i;
     dc_closed_ = true;
-    // 唤醒掉队 op:本批 Stop 之后的链 + 再 drain 一次 inbox,全部回 kEngineNotOpen(不留孤儿)
-    FailWakeChain(post_stop);
-    FailWakeChain(Reverse(inbox_.exchange(nullptr, std::memory_order_acquire)));
-    // return 后线程结束
 }
+
+void Reactor::Finalize(OpNode* op, std::int32_t rc);  // 单节点收尾(§4.3 last-touch):result.store→wake fetch_add+notify
+void Reactor::FailWakeChain(OpNode* head);            // 链上每个 op 走 Finalize,但 rc = kEngineNotOpen
 ```
 
 `FailWakeChain` 对每个 op 走 §4.3 的 finalize、但 `rc = kEngineNotOpen`。最后一纳秒(最终 drain
@@ -331,7 +383,7 @@ Status Engine::Get(std::string_view key, DataBuffer value) {
     if (key.empty()) return Status::Error(err::kMemEmptyKey);
     if (value.size() != kValueSize) return Status::Error(err::kEngineInvalidValue);
     Reactor& r = *reactors_[RouteKey(key)];     // M1:RouteKey 返 0
-    // 建 OpNode + submit + wait + 翻译(§4.2)
+    // 建 OpNode + SubmitAndWait + 翻译(§4.2)
 }
 ```
 
@@ -353,7 +405,7 @@ std::int32_t Reactor::ExecuteGet(OpNode* op) {
 }
 ```
 
-逻辑与现有 `Engine::Get`(engine.cpp:188-210)一致,只改三处:dc 来自 reactor 自己、输出写
+逻辑与(迁移前的)`Engine::Get` 一致,搬进 reactor.cpp:137-166 的 `Reactor::ExecuteGet` 后只改三处:dc 来自 reactor 自己、输出写
 `op->out`、验证已上移。**完整执行体 M1 写全,但只测到 Lookup miss**(命中路径随 M2 Put-Get 联动测)。
 
 ### 6.3 输出 buffer
@@ -387,8 +439,10 @@ caller 同步阻塞 → DataBuffer 全程有效;`memcpy → op->out` 经 `result
 | GetMissThroughReactor | create 空设备 → Get 任意 key | 返 `kIndexKeyNotFound`;整个异步机制走全(投递/事件循环/执行体/finalize/唤醒/等待),零数据 |
 | CloseDrainThenClose | Open → 若干 Get(miss)→ Close | 干净退出、不挂、无 fd 泄漏 |
 | RecoverEmptyThenGetMiss(可选) | create → Close → recover → Get(miss) | Open 两阶段对 recover 模式也成立(带数据 + 取值正确是 M2) |
-| NotImplemented | Put/Delete/SetWalLevel/Snapshot | 返 `kEngineNotImplemented` |
-| BadOpen | empty devices / size>1 | 返 `kEngineInvalidOpts` |
+| EmptyDevicesFails | Open 空设备列表 | 返 `kEngineInvalidOpts` |
+| TooManyDevicesFails | Open 257 个设备(size>256) | 返 `kEngineInvalidOpts` |
+| PutGetHitThroughReactor(M2 落地) | Put → Get 命中 → 校验取值 | 写路径 + 命中读路径端到端正确 |
+| WritePathStress(M2 落地) | 经 reactor 批量 Put/Get 压测 | 异步写路径无 race、不挂 |
 
 - **TSAN(sync 后端)**:跑上述,验 caller↔reactor 交接 race-free——单 caller 也是 caller+reactor
   两线程,TSAN 查得到 inbox CAS / futex / 结果槽 / 唤醒。
@@ -402,7 +456,7 @@ caller 同步阻塞 → DataBuffer 全程有效;`memcpy → op->out` 经 `result
 2. Close drain-then-close 干净退出,无等待者孤儿、无 fd 泄漏(CloseDrainThenClose ✅)
 3. caller↔reactor 交接 race-free(sync + TSAN ✅)
 4. liveness:不挂(ctest 不超时)
-5. `Put`/`Delete`/`SetWalLevel`/`Snapshot` 返 `kEngineNotImplemented`;坏 Open 返 `kEngineInvalidOpts`
+5. 坏 Open(空设备 / size>256)返 `kEngineInvalidOpts`
 6. (观察)单线程 Get(miss)p50,只记录、不卡门槛(P7-D2)
 7. 单线程现有非数据通路测试零退步;四档检测器 + io_uring(release)回归全绿
 
@@ -412,9 +466,12 @@ caller 同步阻塞 → DataBuffer 全程有效;`memcpy → op->out` 经 `result
 
 ## 10. 关键技术备忘
 
-1. **挂点必须比 op 节点活得久**:reactor 在 `result.store` 之后 `notify`,而 caller 可能已读结果、
-   返回、栈帧(含 OpNode)析构——所以挂点放 `thread_local g_wake_gen`、不放 per-op 栈节点
-   (迁移 P6"最后触碰条款")。
+1. **挂点必须活过调用线程,不只是比 op 节点久**:reactor 在 `result.store` 之后才 `fetch_add`/`notify`,
+   而 caller 可能已读结果、返回、栈帧(含 OpNode)析构、**乃至整个调用线程退出**。`thread_local` 寿命仅=线程,
+   恰是快路径下的 UAF 根因(调用线程先退 → reactor 晚到触碰已析构的 thread_local)。正确挂点是**进程级永生
+   WakeSlot 槽**(经 `g_wake_registry` 可达、`CallerWakeWord` 首用 new 出永不释放、冷路径 CAS 无 mutex);
+   迁移的是 P6"最后触碰"条款本身,而非 thread_local。**该 WakeSlot 机制是 P7 收敛期修 UAF 对最初 thread_local
+   设计的修订。**
 2. **比 P6 简单**:reactor 是 WAL/inbox 的唯一消费者,无 leader 选举,故无 seq_cst 四件套,
    全 release/acquire。group commit 的并发机械 M1 全程不碰(reactor 单写者直调现有 `WriteWal`、
    自任 leader 批 1),它在 P7 是死代码、留着无害(P7-D10)。

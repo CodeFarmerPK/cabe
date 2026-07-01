@@ -373,7 +373,7 @@ cabe::SuperBlock RecoverDataSB(const std::string& data, const std::string& wal,
     cabe::DeviceConfig cfg;
     cfg.data_path = data; cfg.wal_path = wal; cfg.snapshot_path = snap;
     cabe::SuperBlock sb{};
-    EXPECT_EQ(cabe::RecoverDeviceGroup(cfg, 0, &sb), cabe::err::kSuccess);
+    EXPECT_EQ(cabe::RecoverDeviceGroup(cfg, 0, 1, &sb), cabe::err::kSuccess);
     return sb;
 }
 

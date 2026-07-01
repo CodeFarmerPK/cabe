@@ -211,7 +211,7 @@ TEST_F(RecoveryTest, RecoverOrphanBlocksReusable) {
         cabe::DeviceConfig cfg;
         cfg.data_path = data_; cfg.wal_path = wal_; cfg.snapshot_path = snap_;
         cabe::SuperBlock sb{};
-        ASSERT_EQ(cabe::RecoverDeviceGroup(cfg, 0, &sb), cabe::err::kSuccess);
+        ASSERT_EQ(cabe::RecoverDeviceGroup(cfg, 0, 1, &sb), cabe::err::kSuccess);
         block_count = sb.block_count;                               // 16M 设备 = 15 块
     }
 

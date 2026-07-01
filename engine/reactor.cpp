@@ -11,9 +11,35 @@
 namespace cabe {
 
     namespace {
-        // 每调用线程一个唤醒字，跨多个 reactor 共享（为 M4 fan-out 准备）。生命周期 = 线程，
-        // 比 per-op 栈节点活得久 → reactor 的 notify 绝不打在已析构的 OpNode 上（避"最后触碰"UB）。
-        thread_local std::atomic<std::uint32_t> g_wake_gen{0};
+        // 每调用线程一个唤醒字。Finalize 先发布 result(完成信号)、再 fetch_add/notify 唤醒字,
+        // 故"唤醒字最后一次被触碰"晚于"调用线程观察到完成"。若唤醒字寿命=线程(thread_local),
+        // 快路径下调用线程一观察到 result 即返回并退出 → reactor 随后对已销毁的 thread_local 做
+        // fetch_add/notify = use-after-free。所以唤醒字必须活得比 reactor 对它的最后一次触碰久:
+        // 改为进程级、首次使用时 new 出、CAS 注册进静态侵入链表的槽——永不释放,但经 g_wake_registry
+        // 始终可达(LSAN 视为非泄漏)。线程退出只销毁 thread_local 的指针,槽本身长存,reactor 的
+        // 晚到 fetch_add/notify 永远落在有效内存上。注册走冷路径 CAS,无 mutex(保持 P7 无锁不变量)。
+        // TODO(性能/资源轮):槽永不回收 → 寿命界 = 进程内曾调用过 SubmitAndWait 的不同线程数;当前
+        //   假定调用线程有界(线程池/有界集合),该假定下开销可忽略。若未来接入无界 thread-per-request
+        //   churn,应改为"线程退出时把槽归还进程级空闲自由链复用(而非 delete)",以保住"reactor 晚到的
+        //   fetch_add/notify 仍落在有效内存"这一不变量。
+        struct WakeSlot {
+            std::atomic<std::uint32_t> gen{0};
+            WakeSlot* next{nullptr};
+        };
+        std::atomic<WakeSlot*> g_wake_registry{nullptr};   // 进程级,永不释放(经此可达,非泄漏)
+
+        std::atomic<std::uint32_t>* CallerWakeWord() noexcept {
+            thread_local WakeSlot* slot = [] {
+                WakeSlot* s = new WakeSlot{};              // 故意永不 delete:寿命须长于任何 reactor 对它的触碰
+                WakeSlot* head = g_wake_registry.load(std::memory_order_relaxed);
+                do {
+                    s->next = head;
+                } while (!g_wake_registry.compare_exchange_weak(
+                             head, s, std::memory_order_release, std::memory_order_relaxed));
+                return s;
+            }();
+            return &slot->gen;
+        }
     } // namespace
 
     Reactor::Reactor(DeviceContext&& dc, const Options& opts)
@@ -284,13 +310,15 @@ namespace cabe {
     }
 
     std::int32_t SubmitAndWait(Reactor& r, OpNode& op) noexcept {
-        op.wake = &g_wake_gen;
-        const std::uint32_t gen = g_wake_gen.load(std::memory_order_acquire);  // 快照必须在 submit 之前
+        std::atomic<std::uint32_t>* wake = CallerWakeWord();    // 长寿唤醒字(活得比任何 reactor 的触碰久)
+        op.wake = wake;
+        op.result.store(kOpPending, std::memory_order_relaxed); // 自带复位:不依赖调用方每次新建 OpNode
+        const std::uint32_t gen = wake->load(std::memory_order_acquire);  // 快照必须在 submit 之前
         r.Submit(&op);
         std::uint32_t cur = gen;
         while (op.result.load(std::memory_order_acquire) == kOpPending) {
-            g_wake_gen.wait(cur, std::memory_order_acquire);   // wake_gen==cur 时阻塞
-            cur = g_wake_gen.load(std::memory_order_acquire);
+            wake->wait(cur, std::memory_order_acquire);   // wake==cur 时阻塞
+            cur = wake->load(std::memory_order_acquire);
         }
         return op.result.load(std::memory_order_acquire);
     }

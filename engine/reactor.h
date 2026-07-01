@@ -26,8 +26,8 @@ namespace cabe {
     inline constexpr std::int32_t kOpPending = 1;
 
     // 操作描述符。建在调用线程栈上、零堆分配（复刻 P6 WriterNode）。输入用视图不拷贝
-    // （同步 API，调用栈内存全程有效）。wake 指向调用线程的 thread_local 唤醒字——与 result
-    // 分离，避"最后触碰"UB（reactor 在 result.store 之后绝不再碰 OpNode，notify 打在长寿字上）。
+    // （同步 API，调用栈内存全程有效）。wake 指向调用线程的【长寿】唤醒字（进程级 WakeSlot 槽，
+    // 活得比任何 reactor 对它的触碰久；见 reactor.cpp CallerWakeWord），与 result 分离避"最后触碰"UB。
     struct OpNode {
         OpType type;                                   // 由投递方设定
         std::string_view key;                          // Get/Put/Delete 输入
@@ -36,7 +36,7 @@ namespace cabe {
         WalLevel new_level = WalLevel::WalSync;        // SetWalLevel 输入（P7M2）
         std::atomic<std::int32_t> result{kOpPending};  // 结果槽 + 完成标志
         OpNode* next = nullptr;                        // MPSC 侵入式链
-        std::atomic<std::uint32_t>* wake = nullptr;    // → caller 的 thread_local 唤醒字
+        std::atomic<std::uint32_t>* wake = nullptr;    // → caller 的长寿唤醒字(进程级 WakeSlot 槽,非 thread_local)
     };
 
     // reactor：独占一份 DeviceContext，单线程跑事件循环。不可拷贝、不可移动（内含线程引用 this）
@@ -82,8 +82,10 @@ namespace cabe {
         bool dc_closed_ = false;                       // RAII 防双关
     };
 
-    // 调用线程侧：投递单个 op 并挂起等结果，返回结果码。用每调用线程一个 thread_local 唤醒字
-    // （内部）。M4 fan-out（一个调用等 N 个 reactor）将另加多 op 版本，Submit 本身不变。
+    // 调用线程侧：投递单个 op 并挂起等结果，返回结果码。用每调用线程一个长寿唤醒字
+    // （进程级槽，内部）。唤醒槽按调用线程分配且不回收 → 假定调用线程集合有界(线程池)；无界
+    // thread churn 场景需引入槽回收(见 reactor.cpp TODO)。
+    // M4 fan-out（一个调用等 N 个 reactor）将另加多 op 版本，Submit 本身不变。
     std::int32_t SubmitAndWait(Reactor& r, OpNode& op) noexcept;
 
 } // namespace cabe

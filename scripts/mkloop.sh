@@ -171,7 +171,12 @@ case "$ACTION" in
         echo ">>> 基准设备清理完成"
         ;;
     status)
-        for pair in "数据:$DATA_IMG" "WAL :$WAL_IMG" "快照:$SNAPSHOT_IMG"; do
+        # 覆盖集合与 cleanup-multi / cleanup-bench 一致：组1 + 组2 + 基准三组九块；
+        # 不存在的镜像照常报「存在: 否」、不报错（静默跳过）。
+        for pair in \
+            "数据:$DATA_IMG" "WAL :$WAL_IMG" "快照:$SNAPSHOT_IMG" \
+            "数据2:$DATA_IMG2" "WAL2:$WAL_IMG2" "快照2:$SNAPSHOT_IMG2" \
+            "基准数据:$BENCH_DATA_IMG" "基准WAL:$BENCH_WAL_IMG" "基准快照:$BENCH_SNAPSHOT_IMG"; do
             role="${pair%%:*}"; img="${pair#*:}"
             echo "$role 设备: $img"
             if [[ -f "$img" ]]; then

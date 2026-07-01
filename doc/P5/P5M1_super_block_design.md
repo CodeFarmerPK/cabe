@@ -105,7 +105,7 @@ namespace cabe {
     // common/structs.h（io 后端需用 kDataRegionOffset 加偏移，故下沉到公共头）；super_block.h
     // 仅保留以下超级块自身常量。
     inline constexpr std::uint32_t kSuperBlockMagic   = 0x43424553u; // "SEBC"
-    inline constexpr std::uint32_t kSuperBlockVersion = 1;
+    inline constexpr std::uint32_t kSuperBlockVersion = 2;  // P7：@120 由 reserved 拆出 device_count、持久字节语义变更，v1→v2
     inline constexpr std::size_t   kUuidBytes         = 16;          // 128 位 UUID
 
     enum class DeviceType : std::uint32_t {
@@ -129,7 +129,8 @@ namespace cabe {
         std::uint64_t device_id;       // @96   数据设备编号（多设备顺序校验，M1 下为 0）
         std::uint64_t block_count;     // @104  数据设备可用块数（数据设备填）
         std::uint64_t created_at;      // @112  创建时间戳（util::GetWallTimeNs）
-        std::uint8_t  reserved[3972];  // @120  预留扩展，填零
+        std::uint64_t device_count;    // @120  设备组总数 N（多设备拓扑校验，三设备一致写入，纳入 CRC）
+        std::uint8_t  reserved[3964];  // @128  预留扩展，填零
         std::uint32_t crc32c;          // @4092 自身 CRC32C，覆盖 [0, 4092)
     };
 
@@ -148,6 +149,7 @@ namespace cabe {
 - `device_uuid`：每块设备唯一——配对校验的锚点。
 - `paired_*`：双向配对——数据设备记录配对的 WAL/快照 UUID，WAL/快照记录所属数据设备 UUID。
 - `device_id`：数据设备在 `Options.devices` 中的序号——防盘符漂移（M1 单设备恒为 0，P7 多设备生效）。
+- `device_count`：设备组总数 N——与 `device_id` 互补（device_id=组内下标防盘符漂移，device_count=组总数 N 防设备列表被缩容/增删）；三设备一致写入并纳入 CRC，M1 单设备下为 1，P7 多设备校验生效。
 - `crc32c`：覆盖前 4092 字节，校验超级块自身完整性。
 
 ---
@@ -424,7 +426,7 @@ inline constexpr int kSuperBlockEntropyFailure     = InSeg(kWalRecoveryBase, 8);
 inline constexpr int kSuperBlockSizeMismatch       = InSeg(kWalRecoveryBase, 9); // -105009 持久 block_count 与当前设备大小不符（缩容）
 ```
 
-- 版本号（`version`）不符与魔数不符同归 `kSuperBlockMagicMismatch`——均视为"非本格式"，防止未来 v2 超级块被旧二进制按错误语义读取而毁数据。
+- 版本号（`version`）不符与魔数不符同归 `kSuperBlockMagicMismatch`——均视为“非本格式”，防止未来更高版本超级块被旧二进制按错误语义读取而毁数据。P7 已按此约定实践：超级块 @120 由 reserved 拆出 device_count、持久字节语义变更，故 `kSuperBlockVersion` 由 1 bump 到 2；旧 v1 二进制读到 v2 会据此判为“非本格式”而拒绝，不会误读。
 - `kSuperBlockReadFailed` 与 `kSuperBlockMagicMismatch` 必须区分：前者是读 I/O 失败（盘可能有数据、可恢复），后者是"未格式化/插错盘"；混淆会诱导运维对有数据的坏盘重建而毁数据。
 - `kSuperBlockEntropyFailure` 由 create 期 getrandom 失败触发（安全攸关，硬失败而非降级）。
 - RawDevice 的 I/O 错误复用 `kIoBase` 段。

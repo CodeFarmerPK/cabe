@@ -400,6 +400,8 @@ D10 与 doc/P6/P6M3 §6.5(P6M3-D14~D17)。
 
 ### P7 — Reactor 并发模型 + 无锁多线程 + 多 device 端到端
 
+**状态**：✅ 已实施（P7M5 收敛通过；五里程碑 M1~M5 全部实装，7 配置全量回归全绿，详见 [doc/P7/P7M5_isolation_convergence_design.md](doc/P7/P7M5_isolation_convergence_design.md)）
+
 **目标**:per-reactor 状态分区 + 消息传递,**无任何 mutex**;公开 API 自此冻结;多 device 端到端跑通。
 
 **范围**:
