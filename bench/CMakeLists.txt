@@ -20,9 +20,15 @@ target_link_libraries(bench_crc32 PRIVATE cabe::util cabe::common benchmark::ben
 add_executable(bench_hash util/hash_bench.cpp)
 target_link_libraries(bench_hash  PRIVATE cabe::util cabe::common benchmark::benchmark_main)
 
-# P1M5：Engine 微基准（Put / Get / Delete 吞吐）
+# P1M5：Engine 微基准（Put / Get / Delete 吞吐，单设备单线程）
 add_executable(bench_engine engine/engine_bench.cpp)
 target_link_libraries(bench_engine PRIVATE cabe::engine benchmark::benchmark_main)
+
+# P7：多设备 + 并发 engine 吞吐微基准（per-device reactor 无锁并发 + 多设备路由的扩展性；
+#   Threads(1/2/4/8) 扫并发，需两组设备 CABE_TEST_*[ 与 *2]，缺则该 bench 自跳过）。
+#   run-bench 自动发现 bench_* 运行，新增此目标不需改脚本。
+add_executable(bench_engine_mt engine/engine_mt_bench.cpp)
+target_link_libraries(bench_engine_mt PRIVATE cabe::engine benchmark::benchmark_main)
 
 # P6M3：多线程 Wal 吞吐微基准（直打 Wal，测 group commit 并发收益）。
 # 链 cabe::wal（与 test_wal_concurrency 同款，直打 Wal、不经 Engine）。

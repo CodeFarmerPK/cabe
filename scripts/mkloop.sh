@@ -7,9 +7,11 @@
 #   ./scripts/mkloop.sh create        # 创建测试三设备（小，cabe_test_*.img）
 #   ./scripts/mkloop.sh create-multi  # 创建两组共 6 块（多设备测试 N=2；组2加后缀 2）
 #   ./scripts/mkloop.sh create-bench  # 创建性能基准三设备（大、稀疏，cabe_bench_*.img）
+#   ./scripts/mkloop.sh create-bench-multi  # 创建两组大基准设备（多设备并发基准 N=2；组2加后缀 2）
 #   ./scripts/mkloop.sh cleanup       # 卸载 + 删除测试镜像
 #   ./scripts/mkloop.sh cleanup-multi # 卸载 + 删除两组测试镜像
 #   ./scripts/mkloop.sh cleanup-bench # 卸载 + 删除基准镜像
+#   ./scripts/mkloop.sh cleanup-bench-multi # 卸载 + 删除两组基准镜像
 #   ./scripts/mkloop.sh status        # 查看当前状态
 #
 # 测试设备小、性能基准设备大且分开（P6M3）：测试套件靠小环测撞墙等用例，性能基准要大设备
@@ -45,6 +47,10 @@ SNAPSHOT_IMG="$IMG_DIR/cabe_test_snapshot.img"
 BENCH_DATA_IMG="$IMG_DIR/cabe_bench_data.img"
 BENCH_WAL_IMG="$IMG_DIR/cabe_bench_wal.img"
 BENCH_SNAPSHOT_IMG="$IMG_DIR/cabe_bench_snapshot.img"
+# P7：多设备并发基准第二组（cabe_bench_*2.img，同为大稀疏），与第一组并存
+BENCH_DATA_IMG2="$IMG_DIR/cabe_bench_data2.img"
+BENCH_WAL_IMG2="$IMG_DIR/cabe_bench_wal2.img"
+BENCH_SNAPSHOT_IMG2="$IMG_DIR/cabe_bench_snapshot2.img"
 # P7M4：多设备测试第二组（cabe_test_*2.img），与第一组并存
 DATA_IMG2="$IMG_DIR/cabe_test_data2.img"
 WAL_IMG2="$IMG_DIR/cabe_test_wal2.img"
@@ -135,6 +141,30 @@ case "$ACTION" in
         echo "  bench_engine 用三设备；bench_wal_concurrency 只用 WAL 设备。"
         echo "  每次基准写入 ≤ 20G（< 32G value，永不写满）。清理: $0 cleanup-bench"
         ;;
+    create-bench-multi)
+        # P7：建两组大稀疏基准设备（= create-bench 的大小 × create-multi 的双组），
+        # 供 bench_engine_mt（多设备+并发）用。组1 沿用现名/CABE_TEST_*，组2 加后缀 2。
+        DATA_DEV=$(create_one "$BENCH_DATA_IMG" "$BENCH_DATA_SIZE_MB" 1)
+        WAL_DEV=$(create_one "$BENCH_WAL_IMG" "$BENCH_WAL_SIZE_MB" 1)
+        SNAPSHOT_DEV=$(create_one "$BENCH_SNAPSHOT_IMG" "$BENCH_SNAPSHOT_SIZE_MB" 1)
+        DATA_DEV2=$(create_one "$BENCH_DATA_IMG2" "$BENCH_DATA_SIZE_MB" 1)
+        WAL_DEV2=$(create_one "$BENCH_WAL_IMG2" "$BENCH_WAL_SIZE_MB" 1)
+        SNAPSHOT_DEV2=$(create_one "$BENCH_SNAPSHOT_IMG2" "$BENCH_SNAPSHOT_SIZE_MB" 1)
+        echo ""
+        echo "  [基准] 组1 数据/WAL/快照: $DATA_DEV / $WAL_DEV / $SNAPSHOT_DEV (稀疏)"
+        echo "  [基准] 组2 数据/WAL/快照: $DATA_DEV2 / $WAL_DEV2 / $SNAPSHOT_DEV2 (稀疏)"
+        echo ""
+        echo "多设备并发基准时使用（环境变量，沿用 CABE_TEST_* 名）:"
+        echo "  export CABE_TEST_DEVICE=$DATA_DEV CABE_TEST_WAL_DEVICE=$WAL_DEV CABE_TEST_SNAPSHOT_DEVICE=$SNAPSHOT_DEV"
+        echo "  export CABE_TEST_DEVICE2=$DATA_DEV2 CABE_TEST_WAL_DEVICE2=$WAL_DEV2 CABE_TEST_SNAPSHOT_DEVICE2=$SNAPSHOT_DEV2"
+        echo ""
+        echo "或传给基准脚本:"
+        echo "  ./scripts/run-bench.sh --backend=io_uring \\"
+        echo "      --device=$DATA_DEV --wal-device=$WAL_DEV --snapshot-device=$SNAPSHOT_DEV \\"
+        echo "      --device2=$DATA_DEV2 --wal-device2=$WAL_DEV2 --snapshot-device2=$SNAPSHOT_DEV2"
+        echo ""
+        echo "  bench_engine_mt 用两组共 6 设备（多设备+并发）。清理: $0 cleanup-bench-multi"
+        ;;
     cleanup)
         for img in "$DATA_IMG" "$WAL_IMG" "$SNAPSHOT_IMG"; do
             # 卸载该镜像绑定的全部 loop 设备（可能不止一个）
@@ -170,13 +200,28 @@ case "$ACTION" in
         done
         echo ">>> 基准设备清理完成"
         ;;
+    cleanup-bench-multi)
+        # P7：清两组共 6 块大基准镜像（组 1 + 组 2）。
+        for img in "$BENCH_DATA_IMG" "$BENCH_WAL_IMG" "$BENCH_SNAPSHOT_IMG" \
+                   "$BENCH_DATA_IMG2" "$BENCH_WAL_IMG2" "$BENCH_SNAPSHOT_IMG2"; do
+            while read -r dev; do
+                [[ -z "$dev" ]] && continue
+                echo ">>> 卸载 $dev"
+                $SUDO losetup -d "$dev"
+            done < <($SUDO losetup -j "$img" 2>/dev/null | cut -d: -f1)
+            [[ -f "$img" ]] && $SUDO rm -f "$img" && echo ">>> 已删除 $img"
+        done
+        echo ">>> 多设备基准清理完成"
+        ;;
     status)
-        # 覆盖集合与 cleanup-multi / cleanup-bench 一致：组1 + 组2 + 基准三组九块；
+        # 覆盖集合与 cleanup-multi / cleanup-bench / cleanup-bench-multi 一致：
+        # 组1 + 组2 + 基准组1 + 基准组2 四组共十二块；
         # 不存在的镜像照常报「存在: 否」、不报错（静默跳过）。
         for pair in \
             "数据:$DATA_IMG" "WAL :$WAL_IMG" "快照:$SNAPSHOT_IMG" \
             "数据2:$DATA_IMG2" "WAL2:$WAL_IMG2" "快照2:$SNAPSHOT_IMG2" \
-            "基准数据:$BENCH_DATA_IMG" "基准WAL:$BENCH_WAL_IMG" "基准快照:$BENCH_SNAPSHOT_IMG"; do
+            "基准数据:$BENCH_DATA_IMG" "基准WAL:$BENCH_WAL_IMG" "基准快照:$BENCH_SNAPSHOT_IMG" \
+            "基准数据2:$BENCH_DATA_IMG2" "基准WAL2:$BENCH_WAL_IMG2" "基准快照2:$BENCH_SNAPSHOT_IMG2"; do
             role="${pair%%:*}"; img="${pair#*:}"
             echo "$role 设备: $img"
             if [[ -f "$img" ]]; then

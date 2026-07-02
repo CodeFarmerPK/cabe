@@ -26,6 +26,9 @@ usage() {
   --wal-device=PATH       WAL 设备（导出为 CABE_TEST_WAL_DEVICE）
   --snapshot-device=PATH  快照设备（导出为 CABE_TEST_SNAPSHOT_DEVICE）
                           建议用 ./scripts/mkloop.sh create-bench 的大设备
+  第二组设备 --device2/--wal-device2/--snapshot-device2（导出为 CABE_TEST_*2），
+                          供 bench_engine_mt（多设备+并发）用；
+                          建议用 ./scripts/mkloop.sh create-bench-multi 的两组大设备
 
 查看:
   --show=PATH       解析已有 bench JSON（google-benchmark 格式），打印
@@ -53,6 +56,9 @@ BACKEND=""          # P6M3-D16：无默认后端，必须经 --backend 显式传
 DEVICE=""           # 三块设备：导出为 CABE_TEST_* 给 bench 程序读
 WAL_DEVICE=""
 SNAPSHOT_DEVICE=""
+DEVICE2=""          # 第二组三块设备：导出为 CABE_TEST_*2，供 bench_engine_mt（多设备+并发）读
+WAL_DEVICE2=""
+SNAPSHOT_DEVICE2=""
 SHOW_JSON=""        # --show=PATH：仅解析已有 bench JSON 并打印表格，不跑测试
 
 # ---------- 参数解析 ----------
@@ -80,6 +86,12 @@ while [[ $# -gt 0 ]]; do
         --wal-device)        WAL_DEVICE="$2"; shift ;;
         --snapshot-device=*) SNAPSHOT_DEVICE="${1#*=}" ;;
         --snapshot-device)   SNAPSHOT_DEVICE="$2"; shift ;;
+        --device2=*)          DEVICE2="${1#*=}" ;;
+        --device2)            DEVICE2="$2"; shift ;;
+        --wal-device2=*)      WAL_DEVICE2="${1#*=}" ;;
+        --wal-device2)        WAL_DEVICE2="$2"; shift ;;
+        --snapshot-device2=*) SNAPSHOT_DEVICE2="${1#*=}" ;;
+        --snapshot-device2)   SNAPSHOT_DEVICE2="$2"; shift ;;
         --show=*)     SHOW_JSON="${1#*=}" ;;
         --show)       SHOW_JSON="$2"; shift ;;
         -v|--verbose) VERBOSE=true ;;
@@ -128,6 +140,9 @@ fi
 [[ -n "$DEVICE" ]]          && export CABE_TEST_DEVICE="$DEVICE"
 [[ -n "$WAL_DEVICE" ]]      && export CABE_TEST_WAL_DEVICE="$WAL_DEVICE"
 [[ -n "$SNAPSHOT_DEVICE" ]] && export CABE_TEST_SNAPSHOT_DEVICE="$SNAPSHOT_DEVICE"
+[[ -n "$DEVICE2" ]]          && export CABE_TEST_DEVICE2="$DEVICE2"
+[[ -n "$WAL_DEVICE2" ]]      && export CABE_TEST_WAL_DEVICE2="$WAL_DEVICE2"
+[[ -n "$SNAPSHOT_DEVICE2" ]] && export CABE_TEST_SNAPSHOT_DEVICE2="$SNAPSHOT_DEVICE2"
 
 # ---------- 颜色 ----------
 if [[ -t 2 ]]; then
@@ -243,6 +258,7 @@ RESULTS=()
 total=${#RUN_COMPILERS[@]}
 echo ">>> 跑 $total 格: compilers=[${RUN_COMPILERS[*]}]  backend=$BACKEND  root=$ROOT" >&2
 echo "    设备: data=${DEVICE:-（未指定→需设备的 bench 跳过）} wal=${WAL_DEVICE:-（未指定）} snapshot=${SNAPSHOT_DEVICE:-（未指定）}" >&2
+echo "    第二组: data2=${DEVICE2:-（未指定）} wal2=${WAL_DEVICE2:-（未指定）} snapshot2=${SNAPSHOT_DEVICE2:-（未指定）}" >&2
 idx=0
 for c in "${RUN_COMPILERS[@]}"; do
     idx=$((idx + 1))
