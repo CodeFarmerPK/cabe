@@ -125,6 +125,21 @@ namespace cabe {
 
     // ---- P7M1：写路径与运营口暂返 not-implemented（M2 入 reactor）。参数不命名以避 -Wunused-parameter ----
 
+    ValueBufferResult Engine::AllocateValueBuffer(std::string_view key) {
+        if (!opened_.load(std::memory_order_acquire)) {
+            return {Status::Error(err::kEngineNotOpen), {}};
+        }
+        if (key.empty()) {
+            return {Status::Error(err::kMemEmptyKey), {}};
+        }
+        if (key.size() > kWalKeyMax) {
+            return {Status::Error(err::kWalKeyTooLong), {}};
+        }
+
+        // P8M1 只落公开 API 和前置校验；真实值缓冲区池从 P8M2 开始接入。
+        return {Status::Error(err::kEngineNotImplemented), {}};
+    }
+
     Status Engine::Put(std::string_view key, DataView value) {
         if (!opened_.load(std::memory_order_acquire)) return Status::Error(err::kEngineNotOpen);
         if (key.empty()) return Status::Error(err::kMemEmptyKey);

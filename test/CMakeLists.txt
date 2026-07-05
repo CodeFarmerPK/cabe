@@ -46,6 +46,11 @@ add_executable(test_buffer_pool engine/buffer_pool_test.cpp)
 target_link_libraries(test_buffer_pool PRIVATE cabe::engine GTest::gtest_main)
 gtest_discover_tests(test_buffer_pool DISCOVERY_TIMEOUT 60)
 
+# P8M1：ValueBuffer 公开 API 与占位分配接口测试
+add_executable(test_value_buffer engine/value_buffer_test.cpp)
+target_link_libraries(test_value_buffer PRIVATE cabe::engine GTest::gtest_main)
+gtest_discover_tests(test_value_buffer DISCOVERY_TIMEOUT 60)
+
 # P3M1：SyncIoBackend 测试
 add_executable(test_sync_io_backend io/sync_io_backend_test.cpp)
 target_link_libraries(test_sync_io_backend PRIVATE cabe::io cabe::engine GTest::gtest_main)

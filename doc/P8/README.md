@@ -1,6 +1,6 @@
 # P8 - 零拷贝写入路径主路径化 · 设计文档索引
 
-状态：🚧 设计中（P8-D1 ~ P8-D11 已讨论锁定；M1 ~ M5 待详细设计与实现）
+状态：🚧 设计中（P8-D1 ~ P8-D11 已讨论锁定；M1 已实装，M2 ~ M5 待详细设计与实现）
 
 ## 1. 阶段目标
 
@@ -105,7 +105,7 @@ flowchart LR
 
 | 里程碑 | 文档 | 状态 | 核心目标 |
 | --- | --- | --- | --- |
-| P8M1 | `P8M1_value_buffer_api_design.md` | ⏳ 待设计 | 固定公开 `ValueBuffer` API、分配结果、配置项和术语文档。 |
+| P8M1 | `P8M1_value_buffer_api_design.md` | ✅ 已实装 | 固定公开 `ValueBuffer` API、分配结果、配置项和术语文档。 |
 | P8M2 | `P8M2_value_buffer_pool_design.md` | ⏳ 待设计 | 建立内部值缓冲区池抽象，实现每设备 1 MiB 对齐缓冲区管理。 |
 | P8M3 | `P8M3_put_path_design.md` | ⏳ 待设计 | 在 `Engine::Put` 到 `Reactor::ExecutePut` 路径中接入零拷贝判断和复制回退。 |
 | P8M4 | `P8M4_backend_write_protocol_design.md` | ⏳ 待设计 | 升级后端写入协议，并在 `io_uring` 后端接入注册缓冲区写入。 |

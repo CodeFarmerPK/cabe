@@ -5,6 +5,7 @@
 #include "engine/device_context.h"
 #include "engine/options.h"
 #include "engine/status.h"
+#include "engine/value_buffer.h"
 #include "common/structs.h"
 
 #include <atomic>
@@ -33,6 +34,7 @@ namespace cabe {
 
         // 数据/运营 op：多调用线程彼此可自由并发（各自栈上 op + 只读 reactors_ + reactor 串行执行）。
         Status Put(std::string_view key, DataView value);
+        ValueBufferResult AllocateValueBuffer(std::string_view key);
         Status Get(std::string_view key, DataBuffer value);
         Status Delete(std::string_view key);
 

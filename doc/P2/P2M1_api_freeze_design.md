@@ -66,6 +66,7 @@ public:
     Status Close();                                     // Opened → Closed
 
     Status Put(std::string_view key, DataView value);   // value.size() == kValueSize
+    ValueBufferResult AllocateValueBuffer(std::string_view key); // P8M1：分配 Cabe 值缓冲区；M1 占位，M2 起真实分配
     Status Get(std::string_view key, DataBuffer value); // value.size() == kValueSize
     Status Delete(std::string_view key);
 
@@ -88,6 +89,10 @@ public:
 > 不是裁判，默认关）。错误码新增 8 个（snapshot 段 -106002/-106003、wal_recovery 段
 > -105010~12、engine 段 -104008/-104009），均可经 `Open` 返回；清单见 `common/error_code.h`
 > 与 P5M6 稿 §11（§4 的分配表保持 P2 时点快照不回写）。
+>
+> **冻结追加注（P8M1）**：零拷贝阶段按 P8-D2 保持 `Put` 统一入口，但追加
+> `ValueBuffer` / `ValueBufferResult` 与 `AllocateValueBuffer(key)` 分配接口。M1 只落 API 和
+> 前置校验，占位返回 `kEngineNotImplemented`；真实分配从 P8M2 接入。
 
 **承诺语义**：
 
@@ -99,6 +104,37 @@ public:
 | `Get` | 返回最后一次 Put 的 value；CRC32 校验不匹配返回 `kEngineDataCorrupted` |
 | `Delete` | 标记删除 + 立即回收块号；删后 Get 返回 `kIndexKeyNotFound`。P5M5 起可能返回 `kWalFull`（同 Put：失败时索引/块全不动） |
 | 析构 | 若仍 Opened → 自动 Close + `CABE_LOG_WARN` |
+
+#### `cabe::ValueBuffer` / `cabe::ValueBufferResult`（`engine/value_buffer.h`）
+
+```cpp
+class ValueBuffer {
+public:
+    ValueBuffer() noexcept;
+    ~ValueBuffer();
+
+    ValueBuffer(ValueBuffer&&) noexcept;
+    ValueBuffer& operator=(ValueBuffer&&) noexcept;
+
+    ValueBuffer(const ValueBuffer&) = delete;
+    ValueBuffer& operator=(const ValueBuffer&) = delete;
+
+    DataBuffer data() noexcept;
+    DataView view() const noexcept;
+    bool valid() const noexcept;
+};
+
+struct ValueBufferResult {
+    Status status;
+    ValueBuffer buffer;
+
+    bool ok() const noexcept;
+};
+```
+
+> **冻结追加注（P8M1）**：`ValueBuffer` 是 Cabe 值缓冲区的公开 RAII 资源对象，移动专属、
+> 默认无效、析构自动归还资源。`ValueBufferResult` 用于返回分配结果，错误语义仍以 `Status`
+> 为准。M1 暂不产生有效 `ValueBuffer`；真实值缓冲区池从 P8M2 接入。
 
 #### `cabe::Options`（`engine/options.h`）
 
@@ -122,6 +158,7 @@ struct Options {
                                                             //   cabe 不承诺 ABI 且 Options 不用位置式聚合初始化，故可接受（合约定精神）
     std::uint32_t snapshot_interval_sec = 600;
     bool verify_value_crc_on_recovery = false;
+    std::size_t value_buffer_pool_blocks = 16;           // P8M1 新增：每设备 Cabe 值缓冲区数量；0 表示关闭公开分配能力
 };
 ```
 

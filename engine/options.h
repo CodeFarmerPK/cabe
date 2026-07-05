@@ -56,6 +56,9 @@ namespace cabe {
 
         // ---- 恢复配置（M6 起生效，M1 占位）----
         bool verify_value_crc_on_recovery = false;             // 恢复时是否逐个校验 value CRC，默认关
+
+        // ---- P8 零拷贝值缓冲区配置 ----
+        std::size_t value_buffer_pool_blocks = 16;             // 每设备 Cabe 值缓冲区数量；0 表示关闭公开分配能力
     };
 
 } // namespace cabe
