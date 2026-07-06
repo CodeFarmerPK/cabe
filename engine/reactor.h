@@ -8,6 +8,7 @@
 
 #include "engine/device_context.h"
 #include "engine/options.h"
+#include "engine/put_path.h"
 #include "common/structs.h"
 
 #include <atomic>
@@ -32,6 +33,7 @@ namespace cabe {
         OpType type;                                   // 由投递方设定
         std::string_view key;                          // Get/Put/Delete 输入
         DataView value;                                // Put 输入（P7M2；caller DataView，视图不拷贝）
+        PutValueSource value_source{};                 // Put 输入（P8M3；Engine 调用线程预识别）
         DataBuffer out;                                // Get 输出（caller 的 buffer）
         WalLevel new_level = WalLevel::WalSync;        // SetWalLevel 输入（P7M2）
         std::atomic<std::int32_t> result{kOpPending};  // 结果槽 + 完成标志

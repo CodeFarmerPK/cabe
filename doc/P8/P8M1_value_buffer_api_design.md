@@ -84,7 +84,7 @@
 | **P8M1-D3** | 分配结果与错误表达 | 使用 `{ Status status; ValueBuffer buffer; bool ok() const; }`；成功时 buffer 有效，失败时 buffer 无效。 |
 | **P8M1-D4** | `ValueBuffer` 对象语义 | 移动专属 RAII 对象；默认无效；析构自动归还；禁止拷贝。M1 暂不提供手动释放；P8M2 因严格关闭边界补充 `reset()`。 |
 | **P8M1-D5** | 填充与提交方式 | 只提供 `data()` 和 `view()`；应用必须填满 1 MiB；提交仍调用 `Engine::Put(key, buffer.view())`；不承诺自动清零。 |
-| **P8M1-D6** | key 与设备归属 | 分配接口必须接收 key；key 只用于计算目标设备归属，不绑定业务键。 |
+| **P8M1-D6** | key 与设备归属 | 分配接口必须接收 key；P8M1 先固定 key 用于计算目标设备归属；P8M3 已将最终性能路径语义收紧为键绑定。 |
 | **P8M1-D7** | 分配接口校验语义 | 复用 `Put` 的 key 校验：未打开、空 key、key 过长分别返回既有错误码；池耗尽用 `kEnginePoolExhausted`。 |
 | **P8M1-D8** | 容量配置 | 在 `Options` 末尾追加 `std::size_t value_buffer_pool_blocks = 16`；含义为每设备值缓冲区数量；允许为 0。 |
 | **P8M1-D9** | `Close` 与生命周期 | M1 无真实池，仅固定公开对象形态；P8M2 已将最终语义收紧为严格打开周期：`Close()` 等待所有已分配 `ValueBuffer` 释放，不允许 `ValueBuffer` 跨 `Close/Open` 存活。 |
@@ -112,17 +112,19 @@ P8 将 value 来源分成两类：
 
 P8M1 只固定该术语；P8M2 已将最终语义收紧为严格打开周期：`ValueBuffer` 必须在分配它的 Engine 打开周期内释放，`Engine::Close()` 等待所有已分配 `ValueBuffer` 释放后才返回。
 
-### 3.3 key 的含义
+### 3.3 key 的含义与后续键绑定
 
-`AllocateValueBuffer(key)` 中的 key 只用于计算目标设备归属：
+P8M1 中，`AllocateValueBuffer(key)` 先固定 key 用于计算目标设备归属：
 
 ```text
 key -> RouteKey(key) -> 目标设备 -> 对应设备的值缓冲区池
 ```
 
-`ValueBuffer` 不绑定业务键本身。后续 `Put` 使用不同 key 时，只要实际写入 key 路由到同一设备，仍可命中主零拷贝路径；若路由到不同设备，则复制回退。
+P8M3 已将最终性能路径语义收紧为键绑定：`AllocateValueBuffer(key_a)` 返回的 `ValueBuffer` 只有在
+`Put(key_a, buffer.view())` 时才可以命中主直接写入路径；`Put(key_b, buffer.view())` 即使路由到同一设备，
+也必须复制回退。键不匹配不是公开写入错误，只影响是否进入主直接写入路径。
 
-P8M1 不实现该路径判断，但必须把公开语义先固定。
+P8M1 不实现该路径判断，只固定公开接口形态。
 
 ---
 

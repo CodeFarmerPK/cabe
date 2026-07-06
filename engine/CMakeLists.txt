@@ -3,6 +3,7 @@
 add_library(cabe_engine STATIC
     engine.cpp
     reactor.cpp
+    put_path.cpp
     value_buffer.cpp
     value_buffer_pool.cpp
     buffer_pool.cpp

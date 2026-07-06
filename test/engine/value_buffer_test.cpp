@@ -7,8 +7,10 @@
 
 #include <atomic>
 #include <chrono>
+#include <cstdlib>
 #include <cstdint>
 #include <cstring>
+#include <memory>
 #include <string>
 #include <thread>
 #include <type_traits>
@@ -18,6 +20,20 @@
 namespace {
 
 using cabe::test::GetEnv;
+
+struct FreeDeleter {
+    void operator()(std::byte* ptr) const noexcept {
+        std::free(ptr);
+    }
+};
+
+std::unique_ptr<std::byte, FreeDeleter> MakeAlignedValue(std::byte fill) {
+    void* raw = nullptr;
+    if (posix_memalign(&raw, 4096, cabe::kValueSize) != 0) return {};
+    auto value = std::unique_ptr<std::byte, FreeDeleter>(static_cast<std::byte*>(raw));
+    std::memset(value.get(), static_cast<int>(fill), cabe::kValueSize);
+    return value;
+}
 
 class ValueBufferEngineTest : public ::testing::Test {
 protected:
@@ -190,7 +206,7 @@ TEST_F(ValueBufferEngineTest, PoolExhaustion) {
     EXPECT_TRUE(engine_.AllocateValueBuffer("key").ok());
 }
 
-TEST_F(ValueBufferEngineTest, ValueBufferPutGetRoundTripUsesExistingCopyPath) {
+TEST_F(ValueBufferEngineTest, ValueBufferSameKeyRoundTrip) {
     ASSERT_TRUE(engine_.Open(CreateOpts()).ok());
 
     auto r = engine_.AllocateValueBuffer("round");
@@ -203,6 +219,94 @@ TEST_F(ValueBufferEngineTest, ValueBufferPutGetRoundTripUsesExistingCopyPath) {
     ASSERT_EQ(engine_.Get("round", cabe::DataBuffer{out}).code, cabe::err::kSuccess);
     EXPECT_EQ(out[0], std::byte{0xA7});
     EXPECT_EQ(out[cabe::kValueSize - 1], std::byte{0xA7});
+}
+
+TEST_F(ValueBufferEngineTest, ValueBufferDifferentKeyFallbackRoundTrip) {
+    ASSERT_TRUE(engine_.Open(CreateOpts()).ok());
+
+    auto r = engine_.AllocateValueBuffer("alloc-key");
+    ASSERT_TRUE(r.ok());
+    auto data = r.buffer.data();
+    std::memset(data.data(), 0xB6, data.size());
+
+    ASSERT_EQ(engine_.Put("put-key", r.buffer.view()).code, cabe::err::kSuccess);
+    std::vector<std::byte> out(cabe::kValueSize);
+    ASSERT_EQ(engine_.Get("put-key", cabe::DataBuffer{out}).code, cabe::err::kSuccess);
+    EXPECT_EQ(out[0], std::byte{0xB6});
+    EXPECT_EQ(out[cabe::kValueSize - 1], std::byte{0xB6});
+}
+
+TEST_F(ValueBufferEngineTest, ReleasedValueBufferViewFallbackRoundTrip) {
+    ASSERT_TRUE(engine_.Open(CreateOpts()).ok());
+
+    auto r = engine_.AllocateValueBuffer("released");
+    ASSERT_TRUE(r.ok());
+    auto data = r.buffer.data();
+    std::memset(data.data(), 0xC3, data.size());
+    const cabe::DataView view = r.buffer.view();
+    r.buffer.reset();
+
+    ASSERT_EQ(engine_.Put("released", view).code, cabe::err::kSuccess);
+    std::vector<std::byte> out(cabe::kValueSize);
+    ASSERT_EQ(engine_.Get("released", cabe::DataBuffer{out}).code, cabe::err::kSuccess);
+    EXPECT_EQ(out[0], std::byte{0xC3});
+    EXPECT_EQ(out[cabe::kValueSize - 1], std::byte{0xC3});
+}
+
+TEST_F(ValueBufferEngineTest, AlignedExternalValueRoundTrip) {
+    ASSERT_TRUE(engine_.Open(CreateOpts()).ok());
+
+    auto value = MakeAlignedValue(std::byte{0xD4});
+    ASSERT_NE(value, nullptr);
+    ASSERT_EQ(reinterpret_cast<std::uintptr_t>(value.get()) % 4096, 0u);
+
+    ASSERT_EQ(engine_.Put("aligned", cabe::DataView{value.get(), cabe::kValueSize}).code,
+              cabe::err::kSuccess);
+    std::vector<std::byte> out(cabe::kValueSize);
+    ASSERT_EQ(engine_.Get("aligned", cabe::DataBuffer{out}).code, cabe::err::kSuccess);
+    EXPECT_EQ(out[0], std::byte{0xD4});
+    EXPECT_EQ(out[cabe::kValueSize - 1], std::byte{0xD4});
+}
+
+TEST_F(ValueBufferEngineTest, ConcurrentMixedPutSources) {
+    auto opts = CreateOpts();
+    opts.value_buffer_pool_blocks = 8;
+    ASSERT_TRUE(engine_.Open(opts).ok());
+
+    constexpr int kThreads = 4;
+    constexpr int kIters = 12;
+    std::vector<std::thread> threads;
+    threads.reserve(kThreads);
+
+    for (int tid = 0; tid < kThreads; ++tid) {
+        threads.emplace_back([&, tid] {
+            std::vector<std::byte> out(cabe::kValueSize);
+            for (int i = 0; i < kIters; ++i) {
+                const std::string key = "mixed_" + std::to_string(tid) + "_" + std::to_string(i);
+                const std::byte fill = static_cast<std::byte>((tid * 31 + i) & 0xFF);
+                if (i % 3 == 0) {
+                    auto r = engine_.AllocateValueBuffer(key);
+                    ASSERT_TRUE(r.ok()) << r.status.code;
+                    std::memset(r.buffer.data().data(), static_cast<int>(fill), cabe::kValueSize);
+                    EXPECT_EQ(engine_.Put(key, r.buffer.view()).code, cabe::err::kSuccess);
+                } else if (i % 3 == 1) {
+                    auto value = MakeAlignedValue(fill);
+                    ASSERT_NE(value, nullptr);
+                    EXPECT_EQ(engine_.Put(key, cabe::DataView{value.get(), cabe::kValueSize}).code,
+                              cabe::err::kSuccess);
+                } else {
+                    std::vector<std::byte> value(cabe::kValueSize, fill);
+                    EXPECT_EQ(engine_.Put(key, cabe::DataView{value}).code, cabe::err::kSuccess);
+                }
+
+                EXPECT_EQ(engine_.Get(key, cabe::DataBuffer{out}).code, cabe::err::kSuccess);
+                EXPECT_EQ(out[0], fill);
+                EXPECT_EQ(out[cabe::kValueSize - 1], fill);
+            }
+        });
+    }
+
+    for (auto& t : threads) t.join();
 }
 
 TEST_F(ValueBufferEngineTest, CloseWaitsForOutstandingValueBuffer) {
@@ -249,4 +353,23 @@ TEST_F(ValueBufferMultiDeviceTest, PoolsAreIndependentPerDevice) {
     a.buffer.reset();
     EXPECT_TRUE(engine_.AllocateValueBuffer(key0).ok());
     EXPECT_EQ(engine_.AllocateValueBuffer(key1).status.code, cabe::err::kEnginePoolExhausted);
+}
+
+TEST_F(ValueBufferMultiDeviceTest, OtherDeviceValueBufferFallbackRoundTrip) {
+    const std::string key0 = KeyForDevice(0);
+    const std::string key1 = KeyForDevice(1);
+    ASSERT_FALSE(key0.empty());
+    ASSERT_FALSE(key1.empty());
+    ASSERT_TRUE(engine_.Open(CreateOpts()).ok());
+
+    auto r = engine_.AllocateValueBuffer(key0);
+    ASSERT_TRUE(r.ok()) << r.status.code;
+    auto data = r.buffer.data();
+    std::memset(data.data(), 0xE5, data.size());
+
+    ASSERT_EQ(engine_.Put(key1, r.buffer.view()).code, cabe::err::kSuccess);
+    std::vector<std::byte> out(cabe::kValueSize);
+    ASSERT_EQ(engine_.Get(key1, cabe::DataBuffer{out}).code, cabe::err::kSuccess);
+    EXPECT_EQ(out[0], std::byte{0xE5});
+    EXPECT_EQ(out[cabe::kValueSize - 1], std::byte{0xE5});
 }

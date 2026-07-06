@@ -132,7 +132,7 @@ P8M2 的 `ValueBuffer` 不是通用 buffer 基础设施：
 |---|---|
 | 用途 | 专门承载 key/value 中固定 1 MiB 的 value |
 | 大小 | 固定 `kValueSize` |
-| 分配依据 | key 路由到目标设备池 |
+| 分配依据 | key 路由到目标设备池；P8M3 在此基础上补充键绑定 |
 | 提交方式 | 仍通过 `Engine::Put(key, buffer.view())` |
 | 关闭边界 | 必须在分配它的 Engine 打开周期内释放 |
 | 后端信息 | 不暴露给上层应用 |
@@ -172,6 +172,9 @@ P7M3 已经定义 `Open` / `Close` 是排他操作：调用方必须保证 `Open
 该槽位当前是否处于 allocated 状态
 设备归属是否匹配
 ```
+
+P8M2 只实现地址、长度、槽位状态和设备归属识别。P8M3 会在槽位元数据中补充绑定键，并把
+“绑定键是否与 `Put` key 一致”作为主直接写入路径的必要条件。
 
 如果上层在 `ValueBuffer::reset()` 或析构后继续保存旧 `DataView` 并使用，这是调用方违反生命周期契约。
 当槽位已释放且尚未重新分配时，来源识别应失败；如果同一槽位已被重新分配给新的 `ValueBuffer`，旧
@@ -744,6 +747,14 @@ Engine::AllocateValueBuffer
 
 P8M2 中 `reactor` 只持有池引用，不使用池改变写入行为。这样后续 P8M3 可以在 `ExecutePut` 中直接访问
 `dc_.value_buffer_pool` 做来源识别，不需要再改池归属。
+
+P8M3 的最终规则是：
+
+```text
+来自目标设备 ValueBufferPool 且绑定键匹配 -> 主直接写入路径候选
+来自目标设备 ValueBufferPool 但绑定键不匹配 -> 复制回退
+来自其他设备 ValueBufferPool -> 复制回退
+```
 
 ### 10.3 与 `io_uring` / SPDK
 

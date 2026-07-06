@@ -40,6 +40,40 @@ namespace cabe {
             }();
             return &slot->gen;
         }
+
+        class BufferPoolLease {
+        public:
+            explicit BufferPoolLease(BufferPool& pool) noexcept
+                : pool_(&pool) {}
+
+            BufferPoolLease(const BufferPoolLease&) = delete;
+            BufferPoolLease& operator=(const BufferPoolLease&) = delete;
+
+            ~BufferPoolLease() {
+                if (buf_ != nullptr) pool_->Free(buf_);
+            }
+
+            std::byte* Allocate() {
+                buf_ = pool_->Allocate();
+                return buf_;
+            }
+
+            void Reset() noexcept {
+                if (buf_ != nullptr) {
+                    pool_->Free(buf_);
+                    buf_ = nullptr;
+                }
+            }
+
+        private:
+            BufferPool* pool_;
+            std::byte* buf_ = nullptr;
+        };
+
+        BackendDirectWriteCaps DefaultBackendDirectWriteCaps() noexcept {
+            return BackendDirectWriteCaps{.allow_external_value_memory = true,
+                                          .external_memory_alignment = kPageSize};
+        }
     } // namespace
 
     Reactor::Reactor(DeviceContext&& dc, const Options& opts)
@@ -197,16 +231,26 @@ namespace cabe {
         BlockId block_id{};
         std::int32_t rc = dc_.block_allocator.Acquire(&block_id);
         if (rc != err::kSuccess) return rc;                                  // kEngineNoSpace
-        std::byte* buf = dc_.pool.Allocate();
-        if (buf == nullptr) {
-            dc_.block_allocator.Recycle(block_id);
-            return err::kEnginePoolExhausted;
+
+        const PutWritePlan plan = BuildPutWritePlan(
+            op->value, op->value_source, DefaultBackendDirectWriteCaps());
+        BufferPoolLease fallback(dc_.pool);
+        const std::byte* write_source = op->value.data();
+
+        if (plan.path == PutWritePath::CopyFallback) {
+            std::byte* buf = fallback.Allocate();
+            if (buf == nullptr) {
+                dc_.block_allocator.Recycle(block_id);
+                return err::kEnginePoolExhausted;
+            }
+            std::memcpy(buf, op->value.data(), kValueSize);
+            write_source = buf;
         }
-        std::memcpy(buf, op->value.data(), kValueSize);
-        const std::uint32_t value_crc = util::CRC32(op->value);
+
+        const std::uint32_t value_crc = util::CRC32(DataView{write_source, kValueSize});
         const std::uint64_t now       = util::GetWallTimeNs();
-        rc = dc_.io.Write(block_id.block_idx(), buf);                        // FUA 由 io 读 opts_->wal_level 定
-        dc_.pool.Free(buf);
+        rc = dc_.io.Write(block_id.block_idx(), write_source);               // FUA 由 io 读 opts_->wal_level 定
+        fallback.Reset();
         if (rc != err::kSuccess) {
             dc_.block_allocator.Recycle(block_id);
             return rc;

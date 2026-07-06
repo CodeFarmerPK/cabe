@@ -1,4 +1,5 @@
 #include "engine/engine.h"
+#include "engine/put_path.h"
 #include "engine/super_block.h"
 #include "engine/value_buffer_pool.h"
 #include "common/logger.h"
@@ -16,6 +17,51 @@ namespace cabe {
         // P5M6：⑨ 步 value CRC 全检的逐键日志上限（百万条坏 value 刷屏等于没有日志；
         // 上限 + 收尾汇总兼顾可读与全貌，设计 D16）。
         constexpr std::uint64_t kRecoveryCrcLogCap = 100;
+
+        PutValueSource ClassifyPutValueSource(
+            const std::vector<std::shared_ptr<ValueBufferPool>>& pools,
+            DeviceId target_device,
+            std::string_view key,
+            DataView value) noexcept {
+            PutValueSource fallback{};
+            bool saw_pool_address_not_allocated = false;
+            PutValueSource pool_address_source{};
+            pool_address_source.kind = PutValueSourceKind::PoolAddressNotAllocated;
+
+            for (const auto& pool : pools) {
+                if (!pool) continue;
+                const auto info = pool->Identify(value);
+                if (info.kind == ValueBufferPool::ProbeKind::NotInPool) continue;
+
+                PutValueSource source{};
+                source.owner_device_id = info.device_id;
+                source.pool_id = info.pool_id;
+                source.slot_index = info.slot_index;
+                source.slot_generation = info.slot_generation;
+
+                if (info.kind == ValueBufferPool::ProbeKind::PoolAddressNotAllocated) {
+                    saw_pool_address_not_allocated = true;
+                    pool_address_source = source;
+                    pool_address_source.kind = PutValueSourceKind::PoolAddressNotAllocated;
+                    continue;
+                }
+
+                if (info.device_id != target_device) {
+                    source.kind = PutValueSourceKind::OtherDeviceValueBuffer;
+                    return source;
+                }
+                if (!info.BoundKeyEquals(key)) {
+                    source.kind = PutValueSourceKind::OtherKeyValueBuffer;
+                    return source;
+                }
+
+                source.kind = PutValueSourceKind::TargetKeyValueBuffer;
+                return source;
+            }
+
+            if (saw_pool_address_not_allocated) return pool_address_source;
+            return fallback;
+        }
     } // namespace
 
     Engine::~Engine() {
@@ -161,7 +207,7 @@ namespace cabe {
         if (device >= value_buffer_pools_.size() || !value_buffer_pools_[device]) {
             return {Status::Error(err::kEngineNotOpen), {}};
         }
-        return value_buffer_pools_[device]->Allocate();
+        return value_buffer_pools_[device]->Allocate(key);
     }
 
     Status Engine::Put(std::string_view key, DataView value) {
@@ -169,12 +215,17 @@ namespace cabe {
         if (key.empty()) return Status::Error(err::kMemEmptyKey);
         if (value.size() != kValueSize) return Status::Error(err::kEngineInvalidValue);
         if (key.size() > kWalKeyMax) return Status::Error(err::kWalKeyTooLong);
+        const std::size_t target = RouteKey(key);
+        const auto source = ClassifyPutValueSource(
+            value_buffer_pools_, static_cast<DeviceId>(target), key, value);
+
         // 校验上移调用线程 fail-fast（A3）→ 栈上建写 op → 路由到单 reactor → 投递并挂起。
         OpNode op{};
-        op.type  = OpType::Put;
-        op.key   = key;
-        op.value = value;
-        const int32_t rc = SubmitAndWait(*reactors_[RouteKey(key)], op);
+        op.type         = OpType::Put;
+        op.key          = key;
+        op.value        = value;
+        op.value_source = source;
+        const int32_t rc = SubmitAndWait(*reactors_[target], op);
         return rc == err::kSuccess ? Status::Ok() : Status::Error(rc);
     }
 

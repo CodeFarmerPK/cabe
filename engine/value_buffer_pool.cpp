@@ -1,11 +1,14 @@
 #include "engine/value_buffer_pool.h"
 #include "common/error_code.h"
 
+#include <algorithm>
+#include <array>
 #include <atomic>
 #include <cassert>
 #include <cstdlib>
 #include <limits>
 #include <new>
+#include <string_view>
 #include <utility>
 
 namespace cabe {
@@ -36,6 +39,8 @@ namespace cabe {
             std::atomic<std::uint32_t> next_free{kInvalidSlot};
             std::atomic<std::uint8_t> state{static_cast<std::uint8_t>(SlotState::Free)};
             std::atomic<std::uint32_t> generation{1};
+            std::atomic<std::uint16_t> bound_key_len{0};
+            std::array<std::atomic<unsigned char>, kWalKeyMax> bound_key_bytes{};
             std::byte* data = nullptr;
         };
 
@@ -139,10 +144,38 @@ namespace cabe {
         void FinishFailedAllocate(const std::shared_ptr<detail::ValueBufferPoolState>& state) noexcept {
             state->DropActiveRef();
         }
+
+        void StoreBoundKey(detail::ValueBufferSlot& slot, std::string_view bound_key) noexcept {
+            const auto len = static_cast<std::uint16_t>(bound_key.size());
+            for (std::size_t i = 0; i < bound_key.size(); ++i) {
+                slot.bound_key_bytes[i].store(static_cast<unsigned char>(bound_key[i]),
+                                              std::memory_order_relaxed);
+            }
+            slot.bound_key_len.store(len, std::memory_order_release);
+        }
+
+        void CopyBoundKey(const detail::ValueBufferSlot& slot,
+                          ValueBufferPool::SourceInfo& info) noexcept {
+            const auto len = static_cast<std::size_t>(
+                slot.bound_key_len.load(std::memory_order_acquire));
+            info.bound_key_len = static_cast<std::uint16_t>(std::min(len, kWalKeyMax));
+            for (std::size_t i = 0; i < info.bound_key_len; ++i) {
+                info.bound_key_bytes[i] = static_cast<char>(
+                    slot.bound_key_bytes[i].load(std::memory_order_relaxed));
+            }
+        }
     } // namespace
 
     bool ValueBufferPool::CreateResult::ok() const noexcept {
         return status.ok();
+    }
+
+    std::string_view ValueBufferPool::SourceInfo::bound_key() const noexcept {
+        return std::string_view{bound_key_bytes.data(), bound_key_len};
+    }
+
+    bool ValueBufferPool::SourceInfo::BoundKeyEquals(std::string_view key) const noexcept {
+        return matched && bound_key() == key;
     }
 
     ValueBufferPool::CreateResult ValueBufferPool::Create(DeviceId device_id, std::uint64_t pool_id,
@@ -185,6 +218,7 @@ namespace cabe {
                 state->slots[i].state.store(static_cast<std::uint8_t>(SlotState::Free),
                                             std::memory_order_relaxed);
                 state->slots[i].generation.store(1, std::memory_order_relaxed);
+                state->slots[i].bound_key_len.store(0, std::memory_order_relaxed);
             }
             state->free_head.store(PackHead(0, 0), std::memory_order_release);
         }
@@ -199,7 +233,13 @@ namespace cabe {
     ValueBufferPool::ValueBufferPool(std::shared_ptr<detail::ValueBufferPoolState> state) noexcept
         : state_(std::move(state)) {}
 
-    ValueBufferResult ValueBufferPool::Allocate() {
+    ValueBufferResult ValueBufferPool::Allocate(std::string_view bound_key) {
+        if (bound_key.empty()) {
+            return {Status::Error(err::kMemEmptyKey), {}};
+        }
+        if (bound_key.size() > kWalKeyMax) {
+            return {Status::Error(err::kWalKeyTooLong), {}};
+        }
         if (!state_ || state_->closing.load(std::memory_order_acquire)) {
             return {Status::Error(err::kEngineNotOpen), {}};
         }
@@ -226,6 +266,7 @@ namespace cabe {
                 continue;
             }
 
+            StoreBoundKey(slot, bound_key);
             slot.state.store(static_cast<std::uint8_t>(SlotState::Allocated), std::memory_order_release);
             const std::uint32_t generation = slot.generation.load(std::memory_order_acquire);
             try {
@@ -240,7 +281,7 @@ namespace cabe {
 
     ValueBufferPool::SourceInfo ValueBufferPool::Identify(DataView value) const noexcept {
         SourceInfo info{};
-        if (!state_ || value.size() != kValueSize || value.data() == nullptr || state_->slot_count == 0 ||
+        if (!state_ || value.data() == nullptr || state_->slot_count == 0 ||
             state_->base == nullptr) {
             return info;
         }
@@ -250,6 +291,12 @@ namespace cabe {
         const auto end = base + state_->total_size;
         if (addr < base || addr >= end) return info;
 
+        info.kind = ProbeKind::PoolAddressNotAllocated;
+        info.device_id = state_->device_id;
+        info.pool_id = state_->pool_id;
+
+        if (value.size() != kValueSize) return info;
+
         const std::uintptr_t offset = addr - base;
         if (offset % kValueSize != 0) return info;
 
@@ -257,16 +304,28 @@ namespace cabe {
         if (slot_index >= state_->slot_count) return info;
 
         const detail::ValueBufferSlot& slot = state_->slots[slot_index];
+        const std::uint32_t generation = slot.generation.load(std::memory_order_acquire);
         if (slot.state.load(std::memory_order_acquire) !=
             static_cast<std::uint8_t>(SlotState::Allocated)) {
             return info;
         }
 
+        CopyBoundKey(slot, info);
+        if (slot.generation.load(std::memory_order_acquire) != generation ||
+            slot.state.load(std::memory_order_acquire) !=
+                static_cast<std::uint8_t>(SlotState::Allocated)) {
+            info.matched = false;
+            info.kind = ProbeKind::PoolAddressNotAllocated;
+            info.bound_key_len = 0;
+            return info;
+        }
+
+        info.kind = ProbeKind::AllocatedSlot;
         info.matched = true;
         info.device_id = state_->device_id;
         info.pool_id = state_->pool_id;
         info.slot_index = static_cast<std::uint32_t>(slot_index);
-        info.slot_generation = slot.generation.load(std::memory_order_acquire);
+        info.slot_generation = generation;
         return info;
     }
 
