@@ -1,6 +1,6 @@
 # P8 - 零拷贝写入路径主路径化 · 设计文档索引
 
-状态：🚧 设计中（P8-D1 ~ P8-D11 已讨论锁定；M1 已实装，M2 ~ M5 待详细设计与实现）
+状态：🚧 设计中（P8-D1 ~ P8-D11 已讨论锁定；M1 ~ M2 已实装，M3 ~ M5 待详细设计与实现）
 
 ## 1. 阶段目标
 
@@ -106,7 +106,7 @@ flowchart LR
 | 里程碑 | 文档 | 状态 | 核心目标 |
 | --- | --- | --- | --- |
 | P8M1 | `P8M1_value_buffer_api_design.md` | ✅ 已实装 | 固定公开 `ValueBuffer` API、分配结果、配置项和术语文档。 |
-| P8M2 | `P8M2_value_buffer_pool_design.md` | ⏳ 待设计 | 建立内部值缓冲区池抽象，实现每设备 1 MiB 对齐缓冲区管理。 |
+| P8M2 | `P8M2_value_buffer_pool_design.md` | ✅ 已实装 | 建立内部值缓冲区池抽象，实现每设备 1 MiB 对齐缓冲区管理。 |
 | P8M3 | `P8M3_put_path_design.md` | ⏳ 待设计 | 在 `Engine::Put` 到 `Reactor::ExecutePut` 路径中接入零拷贝判断和复制回退。 |
 | P8M4 | `P8M4_backend_write_protocol_design.md` | ⏳ 待设计 | 升级后端写入协议，并在 `io_uring` 后端接入注册缓冲区写入。 |
 | P8M5 | `P8M5_bench_convergence_design.md` | ⏳ 待设计 | 补齐 bench、文档、回归测试和 P8 性能档案。 |
@@ -185,6 +185,13 @@ P8M1 退出条件：
 | 后端信息 | 为 `io_uring` 注册缓冲区和未来 SPDK 大页内存保留内部私有字段。 |
 
 P8M2 需要明确当前 `BufferPool` 与新 `ValueBufferPool` 的关系。当前 `BufferPool` 仍可保留为复制回退路径的内部临时数据块池；`ValueBufferPool` 是面向零拷贝主路径的新抽象，不应被当前 4 KiB 对齐实现限制。
+
+P8M2 详细设计见 `doc/P8/P8M2_value_buffer_pool_design.md`。当前已锁定的补充边界：
+
+- P8M2 直接实现无锁 `ValueBufferPool`，不使用临时 mutex 方案；
+- `Engine::Close()` 采用严格关闭边界，必须等待所有已分配 `ValueBuffer` 释放；
+- P8M2 不改变 `Put` 行为，`ValueBuffer.view()` 仍按普通 `DataView` 进入现有复制写入路径；
+- 当前命名统一为 `ValueBuffer` / `ValueBufferPool`，不使用旧称 `BufferHandle`。
 
 P8M2 退出条件：
 

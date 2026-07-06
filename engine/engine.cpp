@@ -1,5 +1,6 @@
 #include "engine/engine.h"
 #include "engine/super_block.h"
+#include "engine/value_buffer_pool.h"
 #include "common/logger.h"
 #include "util/crc32.h"
 #include "util/util.h"
@@ -34,11 +35,14 @@ namespace cabe {
         // ---- 阶段一：逐设备 create/recover 进临时 holder（reactor 线程尚未起，单线程，P7-D11）----
         std::vector<DeviceContext> recovered;
         recovered.reserve(opts.devices.size());
+        std::vector<std::shared_ptr<ValueBufferPool>> value_buffer_pools;
+        value_buffer_pools.reserve(opts.devices.size());
 
         auto fail_phase1 = [&](DeviceContext& dc, int32_t rc) -> Status {
             AbortOpen(dc);
             for (auto& d : recovered) AbortOpen(d);
             recovered.clear();
+            value_buffer_pools.clear();
             return Status::Error(rc);
         };
 
@@ -66,6 +70,13 @@ namespace cabe {
             }
 
             dc.pool = BufferPool(kDefaultPoolBlocks);
+            auto value_pool = ValueBufferPool::Create(static_cast<DeviceId>(dc.super_block.device_id),
+                                                      next_value_buffer_pool_id_++,
+                                                      opts.value_buffer_pool_blocks);
+            if (!value_pool.ok()) return fail_phase1(dc, value_pool.status.code);
+            dc.value_buffer_pool = value_pool.pool;
+            value_buffer_pools.push_back(std::move(value_pool.pool));
+
             // P7M4：分配器绑定本设备号(super_block.device_id 已由 Create/RecoverDeviceGroup 校验 ==i)，
             //   Acquire 返回的 BlockId 高 8 位即此 dev，与 RouteKey 路由对齐。N=1 时 device_id=0。
             dc.block_allocator.Init(static_cast<DeviceId>(dc.super_block.device_id), dc.super_block.block_count);
@@ -96,11 +107,13 @@ namespace cabe {
                 CABE_LOG_ERROR("reactor 启动失败: rc=%d", rc);
                 reactors_.clear();
                 for (auto& d : recovered) AbortOpen(d);
+                value_buffer_pools.clear();
                 return Status::Error(rc);
             }
             reactors_.push_back(std::move(r));
         }
 
+        value_buffer_pools_ = std::move(value_buffer_pools);
         opened_.store(true, std::memory_order_release);
         CABE_LOG_INFO("Engine::Open 成功: %zu 个设备 (%s)", opts.devices.size(),
                       opts.create ? "create" : "recover");
@@ -112,6 +125,13 @@ namespace cabe {
         if (!opened_.load(std::memory_order_acquire)) return Status::Error(err::kEngineNotOpen);
         opened_.store(false, std::memory_order_release);   // 尽力挡新调用；竞态由 reactor 的 drain-then-close 兜
 
+        for (auto& pool : value_buffer_pools_) {
+            if (pool) pool->BeginClose();
+        }
+        for (auto& pool : value_buffer_pools_) {
+            if (pool) pool->WaitUntilIdle();
+        }
+
         // 逐 reactor：投 Stop op + join（drain-then-close，关 snapshot→wal→io）+ 取关闭首错。
         int32_t first_err = err::kSuccess;
         for (auto& r : reactors_) {
@@ -119,6 +139,7 @@ namespace cabe {
             if (first_err == err::kSuccess) first_err = rc;
         }
         reactors_.clear();   // 线程已 join、dc 已关；析构是干净的
+        value_buffer_pools_.clear();
         CABE_LOG_INFO("Engine::Close 完成");
         return first_err != err::kSuccess ? Status::Error(first_err) : Status::Ok();
     }
@@ -136,8 +157,11 @@ namespace cabe {
             return {Status::Error(err::kWalKeyTooLong), {}};
         }
 
-        // P8M1 只落公开 API 和前置校验；真实值缓冲区池从 P8M2 开始接入。
-        return {Status::Error(err::kEngineNotImplemented), {}};
+        const std::size_t device = RouteKey(key);
+        if (device >= value_buffer_pools_.size() || !value_buffer_pools_[device]) {
+            return {Status::Error(err::kEngineNotOpen), {}};
+        }
+        return value_buffer_pools_[device]->Allocate();
     }
 
     Status Engine::Put(std::string_view key, DataView value) {

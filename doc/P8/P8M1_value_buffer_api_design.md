@@ -82,12 +82,12 @@
 | **P8M1-D1** | `ValueBuffer` 公开边界 | 新增公开 `ValueBuffer`，放入 `engine/value_buffer.h`；只暴露填充、视图、有效性和移动语义，不暴露后端信息。 |
 | **P8M1-D2** | 分配接口形态 | 新增 `ValueBufferResult Engine::AllocateValueBuffer(std::string_view key)`；写入仍统一走 `Put`。 |
 | **P8M1-D3** | 分配结果与错误表达 | 使用 `{ Status status; ValueBuffer buffer; bool ok() const; }`；成功时 buffer 有效，失败时 buffer 无效。 |
-| **P8M1-D4** | `ValueBuffer` 对象语义 | 移动专属 RAII 对象；默认无效；析构自动归还；禁止拷贝；不提供手动释放。 |
+| **P8M1-D4** | `ValueBuffer` 对象语义 | 移动专属 RAII 对象；默认无效；析构自动归还；禁止拷贝。M1 暂不提供手动释放；P8M2 因严格关闭边界补充 `reset()`。 |
 | **P8M1-D5** | 填充与提交方式 | 只提供 `data()` 和 `view()`；应用必须填满 1 MiB；提交仍调用 `Engine::Put(key, buffer.view())`；不承诺自动清零。 |
 | **P8M1-D6** | key 与设备归属 | 分配接口必须接收 key；key 只用于计算目标设备归属，不绑定业务键。 |
 | **P8M1-D7** | 分配接口校验语义 | 复用 `Put` 的 key 校验：未打开、空 key、key 过长分别返回既有错误码；池耗尽用 `kEnginePoolExhausted`。 |
 | **P8M1-D8** | 容量配置 | 在 `Options` 末尾追加 `std::size_t value_buffer_pool_blocks = 16`；含义为每设备值缓冲区数量；允许为 0。 |
-| **P8M1-D9** | `Close` 与生命周期 | 推荐 `ValueBuffer` 在分配它的 Engine 打开周期内使用；活过 `Close` 时析构必须安全；跨 `Close/Open` 后不再具备当前打开周期的 Cabe 值缓冲区资格。 |
+| **P8M1-D9** | `Close` 与生命周期 | M1 无真实池，仅固定公开对象形态；P8M2 已将最终语义收紧为严格打开周期：`Close()` 等待所有已分配 `ValueBuffer` 释放，不允许 `ValueBuffer` 跨 `Close/Open` 存活。 |
 | **P8M1-D10** | M1 实现边界 | M1 只实现 API、对象语义、配置项和占位分配行为；合法 key 通过前置校验后暂返 `kEngineNotImplemented`。 |
 | **P8M1-D11** | 测试边界 | 新增 `test_value_buffer`；只测类型语义、默认配置和分配接口前置校验；真实分配、对齐、路径选择和 bench 后移。 |
 
@@ -110,7 +110,7 @@ P8 将 value 来源分成两类：
 
 **Engine 打开周期**指一次 `Engine::Open` 成功到对应 `Engine::Close` 完成之间的时间段。
 
-`ValueBuffer` 推荐只在分配它的 Engine 打开周期内用于主零拷贝写入路径。跨过 `Close` 后，对象仍然必须析构安全，但不再承诺能被当前 Engine 实例识别为 Cabe 值缓冲区。
+P8M1 只固定该术语；P8M2 已将最终语义收紧为严格打开周期：`ValueBuffer` 必须在分配它的 Engine 打开周期内释放，`Engine::Close()` 等待所有已分配 `ValueBuffer` 释放后才返回。
 
 ### 3.3 key 的含义
 
@@ -188,7 +188,7 @@ struct ValueBufferResult {
 说明：
 
 - `ValueBufferControlBlock` 是内部生命周期控制块，不进入公开语义。
-- `std::shared_ptr` 是实现建议，用于满足“`ValueBuffer` 活过 `Engine::Close` 仍可安全析构”的要求。
+- `std::shared_ptr` 是 M1 的控制块占位实现；P8M2 会将其接入真实池释放和严格 `Close()` 等待语义。
 - `ValueBuffer` 禁止拷贝，即使内部使用共享控制块，也不允许应用端共享同一个资源所有权。
 - `ValueBufferPool` 在 P8M2 引入；M1 只预留友元声明即可。
 
@@ -204,7 +204,7 @@ struct ValueBufferResult {
 | `view()` | 有效对象返回 1 MiB 只读 `DataView`；无效对象返回空视图。 |
 | `valid()` | 仅表示当前对象是否持有 Cabe 值缓冲区资源。 |
 
-`ValueBuffer` 不提供：
+P8M1 的 `ValueBuffer` 不提供：
 
 - `release()`；
 - `Free()`；
@@ -216,6 +216,7 @@ struct ValueBufferResult {
 - `CopyFrom()`。
 
 原因：`ValueBuffer` 不是通用容器，也不是写入入口。它只负责承载 Cabe 值缓冲区的所有权和视图访问。
+P8M2 因严格 `Close()` 等待语义，会在此基础上补充 `reset()`，用于调用方在作用域结束前显式归还槽位。
 
 ### 4.3 `ValueBufferResult`
 
@@ -383,12 +384,11 @@ Engine::Close
 
 约束：
 
-1. `ValueBuffer` 推荐在分配它的 Engine 打开周期内使用。
+1. `ValueBuffer` 必须在分配它的 Engine 打开周期内使用和释放。
 2. `Put(key, buffer.view())` 调用期间，`ValueBuffer` 必须保持存活。
 3. 当前 `Put` 是同步等待语义，因此 `Put` 返回后即可释放或复用该 `ValueBuffer`。
-4. `ValueBuffer` 活过 `Engine::Close` 时必须析构安全。
-5. `Engine::Close` 不阻塞等待所有 `ValueBuffer` 归还。
-6. 跨 `Close/Open` 后，旧 `ValueBuffer` 不再具备当前打开周期的 Cabe 值缓冲区资格。
+4. P8M1 尚无真实池，不触发关闭等待；P8M2 起，`Engine::Close` 必须等待所有 `ValueBuffer` 释放。
+5. 跨 `Close/Open` 使用旧 `ValueBuffer` 不属于合法行为。
 
 ### 6.2 并发规则
 
@@ -402,7 +402,7 @@ Engine::Close
 
 ### 6.3 跨 `Close/Open` 场景
 
-场景：
+P8M2 已将最终语义收紧为严格打开周期。下面这种场景不属于合法用法：
 
 ```cpp
 cabe::ValueBuffer old;
@@ -415,17 +415,17 @@ cabe::ValueBuffer old;
     engine.Close();
 }
 
-// old 晚于 engine 析构
+// old 晚于 Close 才释放：P8M2 起 Close 会等待，调用方应先 reset 或让 old 离开作用域
 ```
 
 设计要求：
 
-- `old` 析构必须安全；
-- 不允许访问已销毁的 Engine 或值缓冲区池对象；
-- 如果未来把 `old.view()` 传给新的 Engine，最多按普通 `DataView` 处理；
+- `Engine::Close()` 进入关闭流程后拒绝新的公开分配；
+- `Engine::Close()` 必须等待所有已分配 `ValueBuffer` 释放；
+- `Close()` 返回后不允许存在旧周期 `ValueBuffer`；
 - 不能把旧打开周期的内部槽位误识别为新打开周期的 Cabe 值缓冲区。
 
-M2 实现时应使用内部控制块或等价机制满足这些要求。
+M2 实现时应使用内部控制块、无锁计数和 `reset()` 等机制满足这些要求。
 
 ---
 
@@ -555,11 +555,11 @@ ctest --test-dir build --output-on-failure -R 'test_value_buffer|test_engine'
 |---|---|---|
 | 公开 API 设计过宽 | 后续 SPDK 接入被 API 绑死 | `ValueBuffer` 不暴露设备、槽位、注册缓冲区和后端私有信息。 |
 | M1 临时实现被误认为可用零拷贝 | 用户调用后困惑 | 合法 key 暂返 `kEngineNotImplemented`；文档明确 M2 才实现真实分配。 |
-| `ValueBuffer` 活过 `Close` 造成悬空 | 内存安全问题 | 设计内部控制块；M2 实现必须保证析构安全。 |
+| `ValueBuffer` 跨 `Close` 造成关闭边界不清 | 资源泄漏或下一次 Open 被旧资源污染 | P8M2 采用严格关闭边界：`Close()` 等待所有 `ValueBuffer` 释放。 |
 | 默认池容量增加内存占用 | 多设备场景常驻内存增加 | 默认 16 块每设备，允许配置为 0；部署文档后续说明资源规模。 |
 | `ValueBuffer` 身份通过 `DataView` 传递会丢失显式类型 | 后续路径识别需要内部登记 | M2 负责来源识别；M1 不新增 `Put` 重载，保持公开写入接口统一。 |
 | 用户只填一部分 value | 写入未初始化业务数据 | 文档明确应用端必须写满 1 MiB；Cabe 只校验大小。 |
-| 跨 `Close/Open` 旧对象被误识别 | 错用旧池槽位或旧后端私有信息 | 后续 M2/M3 必须引入打开周期或控制块身份校验。 |
+| 旧打开周期槽位被误识别 | 错用旧池槽位或旧后端私有信息 | P8M2 采用严格 `Close()` 等待和当前池身份校验，避免旧周期资源进入新周期。 |
 | M1 不测有效对象移动 | 有效资源移动 bug 留到 M2 | M1 无真实有效对象；M2 在真实池测试中补充有效对象移动和释放。 |
 
 ---

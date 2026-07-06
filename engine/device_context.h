@@ -4,6 +4,7 @@
 #include "engine/backend_config.h"
 #include "engine/buffer_pool.h"
 #include "engine/super_block.h"
+#include "engine/value_buffer_pool.h"
 #include "wal/wal.h"
 #include "snapshot/snapshot.h"
 
@@ -14,6 +15,7 @@ namespace cabe {
         Wal wal;                    // P5M2：管 WAL 设备（与 io 分离，复用 RawDevice）
         Snapshot snapshot;          // P5M4：管快照设备（与 wal/io 平级，复用 RawDevice）
         BufferPool pool{0};
+        std::shared_ptr<ValueBufferPool> value_buffer_pool;
         BlockAllocatorImpl block_allocator;
         MetaIndexImpl meta_index;
         SuperBlock super_block{};   // 本数据设备的超级块（create 写入 / recover 读入后保存）

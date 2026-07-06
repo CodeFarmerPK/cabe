@@ -9,7 +9,11 @@
 namespace cabe {
 
     namespace detail {
-        struct ValueBufferControlBlock;
+        struct ValueBufferControlBlock {
+            virtual ~ValueBufferControlBlock() = default;
+            virtual void Release() noexcept = 0;
+            virtual bool released() const noexcept = 0;
+        };
     }
 
     class ValueBufferPool;
@@ -28,6 +32,7 @@ namespace cabe {
         DataBuffer data() noexcept;
         DataView view() const noexcept;
         bool valid() const noexcept;
+        void reset() noexcept;
 
     private:
         friend class Engine;

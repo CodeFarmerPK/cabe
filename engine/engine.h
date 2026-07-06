@@ -16,6 +16,8 @@
 
 namespace cabe {
 
+    class ValueBufferPool;
+
     class Engine {
     public:
         Engine() noexcept = default;
@@ -63,6 +65,8 @@ namespace cabe {
         std::atomic<bool> opened_{false};
         Options options_;                                  // 常驻；reactor 内组件持 &options_ 现读（M1 只读）
         std::vector<std::unique_ptr<Reactor>> reactors_;   // P7M1：每 device 一个 reactor（N=1，不可移动 → unique_ptr）
+        std::vector<std::shared_ptr<ValueBufferPool>> value_buffer_pools_;
+        std::uint64_t next_value_buffer_pool_id_ = 1;
     };
 
 } // namespace cabe

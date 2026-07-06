@@ -4,15 +4,11 @@
 
 namespace cabe {
 
-    namespace detail {
-        struct ValueBufferControlBlock {
-            virtual ~ValueBufferControlBlock() = default;
-        };
-    } // namespace detail
-
     ValueBuffer::ValueBuffer() noexcept = default;
 
-    ValueBuffer::~ValueBuffer() = default;
+    ValueBuffer::~ValueBuffer() {
+        reset();
+    }
 
     ValueBuffer::ValueBuffer(ValueBuffer&& other) noexcept
         : control_(std::move(other.control_))
@@ -22,6 +18,7 @@ namespace cabe {
 
     ValueBuffer& ValueBuffer::operator=(ValueBuffer&& other) noexcept {
         if (this != &other) {
+            reset();
             control_ = std::move(other.control_);
             data_ = other.data_;
             other.data_ = nullptr;
@@ -45,7 +42,15 @@ namespace cabe {
     }
 
     bool ValueBuffer::valid() const noexcept {
-        return control_ != nullptr && data_ != nullptr;
+        return control_ != nullptr && data_ != nullptr && !control_->released();
+    }
+
+    void ValueBuffer::reset() noexcept {
+        if (control_) {
+            control_->Release();
+            control_.reset();
+        }
+        data_ = nullptr;
     }
 
     bool ValueBufferResult::ok() const noexcept {
