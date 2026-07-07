@@ -85,16 +85,25 @@ namespace cabe {
         return block_count_;
     }
 
-    int32_t SyncIoBackend::Write(std::uint64_t block_idx, const std::byte* buf) {
+    int32_t SyncIoBackend::RegisterWriteBuffers(std::span<const ValueBufferSlotView> /*buffers*/) {
+        return err::kSuccess;
+    }
+
+    int32_t SyncIoBackend::Write(std::uint64_t block_idx, const IoWriteBuffer& buffer) {
         if (block_idx >= block_count_) {
             CABE_LOG_ERROR("block_idx 越界: %llu >= block_count_=%llu",
                            static_cast<unsigned long long>(block_idx),
                            static_cast<unsigned long long>(block_count_));
             return err::kIoBase;
         }
+        if (buffer.data == nullptr || buffer.size != kValueSize) {
+            CABE_LOG_ERROR("写入缓冲区非法: data=%p size=%zu", static_cast<const void*>(buffer.data),
+                           buffer.size);
+            return err::kIoBase;
+        }
         const std::uint64_t offset = kDataRegionOffset + block_idx * kValueSize;
         // EINTR 重试 + 部分写累加（见 util/io_retry.h；sync 后端在信号下也需健壮）
-        if (!io_util::WriteExact(fd_, buf, kValueSize, offset)) {
+        if (!io_util::WriteExact(fd_, buffer.data, kValueSize, offset)) {
             CABE_LOG_ERROR("pwrite 失败: fd=%d block_idx=%llu",
                            fd_, static_cast<unsigned long long>(block_idx));
             return err::kIoBase;

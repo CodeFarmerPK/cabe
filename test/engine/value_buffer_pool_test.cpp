@@ -51,6 +51,34 @@ TEST(ValueBufferPool, CreateAlignedSlab) {
     }
 }
 
+TEST(ValueBufferPool, ExportSlotViewsInSlotOrder) {
+    auto pool = MakePool(3);
+
+    std::vector<cabe::ValueBufferSlotView> views(3);
+    const std::size_t exported = pool->ExportSlotViews(views);
+    ASSERT_EQ(exported, 3u);
+
+    for (std::size_t i = 0; i < views.size(); ++i) {
+        EXPECT_NE(views[i].data, nullptr);
+        EXPECT_EQ(views[i].size, cabe::kValueSize);
+        EXPECT_EQ(views[i].slot_index, i);
+        const auto addr = reinterpret_cast<std::uintptr_t>(views[i].data);
+        EXPECT_EQ(addr % cabe::kValueSize, 0u);
+    }
+    EXPECT_EQ(views[1].data, views[0].data + cabe::kValueSize);
+    EXPECT_EQ(views[2].data, views[1].data + cabe::kValueSize);
+}
+
+TEST(ValueBufferPool, ExportSlotViewsHonorsOutputCapacity) {
+    auto pool = MakePool(3);
+
+    std::vector<cabe::ValueBufferSlotView> views(2);
+    const std::size_t exported = pool->ExportSlotViews(views);
+    ASSERT_EQ(exported, 2u);
+    EXPECT_EQ(views[0].slot_index, 0u);
+    EXPECT_EQ(views[1].slot_index, 1u);
+}
+
 TEST(ValueBufferPool, ExhaustionAndReuse) {
     auto pool = MakePool(2);
     auto a = pool->Allocate("a");

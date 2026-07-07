@@ -4,8 +4,13 @@
 #include <cerrno>
 #include <fcntl.h>
 #include <linux/fs.h>
+#include <limits>
+#include <new>
 #include <sys/ioctl.h>
+#include <sys/uio.h>
 #include <unistd.h>
+#include <utility>
+#include <vector>
 
 namespace cabe {
 
@@ -22,31 +27,41 @@ namespace cabe {
         , ring_(other.ring_)
         , ring_initialized_(other.ring_initialized_)
         , files_registered_(other.files_registered_)
+        , buffers_registered_(other.buffers_registered_)
+        , registered_buffer_count_(other.registered_buffer_count_)
+        , registered_buffers_(std::move(other.registered_buffers_))
         , opts_(other.opts_) {
         other.fd_ = -1;
         other.block_count_ = 0;
         other.ring_initialized_ = false;
         other.files_registered_ = false;
+        other.buffers_registered_ = false;
+        other.registered_buffer_count_ = 0;
+        other.registered_buffers_.clear();
         other.opts_ = nullptr;
     }
 
     IoUringIoBackend& IoUringIoBackend::operator=(IoUringIoBackend&& other) noexcept {
         if (this != &other) {
-            if (files_registered_) io_uring_unregister_files(&ring_);
-            if (ring_initialized_) io_uring_queue_exit(&ring_);
-            if (fd_ >= 0) ::close(fd_);
+            Close();
 
             fd_ = other.fd_;
             block_count_ = other.block_count_;
             ring_ = other.ring_;
             ring_initialized_ = other.ring_initialized_;
             files_registered_ = other.files_registered_;
+            buffers_registered_ = other.buffers_registered_;
+            registered_buffer_count_ = other.registered_buffer_count_;
+            registered_buffers_ = std::move(other.registered_buffers_);
             opts_ = other.opts_;
 
             other.fd_ = -1;
             other.block_count_ = 0;
             other.ring_initialized_ = false;
             other.files_registered_ = false;
+            other.buffers_registered_ = false;
+            other.registered_buffer_count_ = 0;
+            other.registered_buffers_.clear();
             other.opts_ = nullptr;
         }
         return *this;
@@ -111,7 +126,12 @@ namespace cabe {
     }
 
     int32_t IoUringIoBackend::Close() {
-        if (fd_ < 0) return err::kSuccess;
+        if (buffers_registered_) {
+            io_uring_unregister_buffers(&ring_);
+            buffers_registered_ = false;
+            registered_buffer_count_ = 0;
+            registered_buffers_.clear();
+        }
         if (files_registered_) {
             io_uring_unregister_files(&ring_);
             files_registered_ = false;
@@ -120,14 +140,71 @@ namespace cabe {
             io_uring_queue_exit(&ring_);
             ring_initialized_ = false;
         }
-        ::close(fd_);
-        fd_ = -1;
+        if (fd_ >= 0) {
+            ::close(fd_);
+            fd_ = -1;
+        }
         block_count_ = 0;
         return err::kSuccess;
     }
 
     std::uint64_t IoUringIoBackend::BlockCount() const noexcept {
         return block_count_;
+    }
+
+    int32_t IoUringIoBackend::RegisterWriteBuffers(std::span<const ValueBufferSlotView> buffers) {
+        if (buffers.empty()) return err::kSuccess;
+        if (!ring_initialized_ || buffers_registered_) return err::kIoBase;
+        if (buffers.size() > std::numeric_limits<unsigned>::max()) return err::kIoBase;
+
+        std::vector<iovec> iovecs;
+        std::vector<RegisteredBufferRecord> records;
+        std::vector<unsigned char> seen;
+        try {
+            iovecs.resize(buffers.size());
+            records.resize(buffers.size());
+            seen.resize(buffers.size(), 0);
+        } catch (const std::bad_alloc&) {
+            return err::kEnginePoolExhausted;
+        }
+
+        for (const auto& view : buffers) {
+            if (view.data == nullptr || view.size != kValueSize ||
+                view.slot_index >= buffers.size() || seen[view.slot_index] != 0) {
+                return err::kIoBase;
+            }
+            seen[view.slot_index] = 1;
+            iovecs[view.slot_index].iov_base = const_cast<std::byte*>(view.data);
+            iovecs[view.slot_index].iov_len = view.size;
+            records[view.slot_index] = RegisteredBufferRecord{view.data, view.size};
+        }
+
+        const int ret = io_uring_register_buffers(
+            &ring_, iovecs.data(), static_cast<unsigned>(iovecs.size()));
+        if (ret < 0) {
+            CABE_LOG_ERROR("io_uring_register_buffers 失败: ret=%d", ret);
+            return err::kIoBase;
+        }
+
+        registered_buffers_ = std::move(records);
+        registered_buffer_count_ = static_cast<std::uint32_t>(registered_buffers_.size());
+        buffers_registered_ = true;
+        return err::kSuccess;
+    }
+
+    bool IoUringIoBackend::UseFixedWriteBuffer(const IoWriteBuffer& buffer) const noexcept {
+        if (buffer.kind != IoWriteBufferKind::ValueBufferSlot || !buffers_registered_) {
+            return false;
+        }
+        if (buffer.slot_index >= registered_buffer_count_ ||
+            buffer.slot_index >= registered_buffers_.size()) {
+            return false;
+        }
+        const auto& record = registered_buffers_[buffer.slot_index];
+        return buffer.data != nullptr &&
+               buffer.data == record.data &&
+               buffer.size == record.size &&
+               buffer.size == kValueSize;
     }
 
     namespace {
@@ -165,11 +242,16 @@ namespace cabe {
         }
     } // namespace
 
-    int32_t IoUringIoBackend::Write(std::uint64_t block_idx, const std::byte* buf) {
+    int32_t IoUringIoBackend::Write(std::uint64_t block_idx, const IoWriteBuffer& buffer) {
         if (block_idx >= block_count_) {
             CABE_LOG_ERROR("block_idx 越界: %llu >= block_count_=%llu",
                            static_cast<unsigned long long>(block_idx),
                            static_cast<unsigned long long>(block_count_));
+            return err::kIoBase;
+        }
+        if (buffer.data == nullptr || buffer.size != kValueSize) {
+            CABE_LOG_ERROR("写入缓冲区非法: data=%p size=%zu", static_cast<const void*>(buffer.data),
+                           buffer.size);
             return err::kIoBase;
         }
         struct io_uring_sqe* sqe = io_uring_get_sqe(&ring_);
@@ -178,7 +260,12 @@ namespace cabe {
             return err::kIoBase;
         }
         const auto offset = static_cast<__u64>(kDataRegionOffset + block_idx * kValueSize);
-        io_uring_prep_write(sqe, 0, buf, kValueSize, offset);
+        if (UseFixedWriteBuffer(buffer)) {
+            io_uring_prep_write_fixed(
+                sqe, 0, buffer.data, kValueSize, offset, static_cast<int>(buffer.slot_index));
+        } else {
+            io_uring_prep_write(sqe, 0, buffer.data, kValueSize, offset);
+        }
         sqe->flags |= IOSQE_FIXED_FILE;
         io_uring_sqe_set_data64(sqe, block_idx);
         int32_t rc = SubmitAndWait(&ring_, block_idx, "write");

@@ -9,6 +9,8 @@
 
 #include <cstring>
 #include <memory>
+#include <new>
+#include <span>
 #include <vector>
 
 namespace cabe {
@@ -61,6 +63,27 @@ namespace cabe {
 
             if (saw_pool_address_not_allocated) return pool_address_source;
             return fallback;
+        }
+
+        int32_t RegisterValueBufferPool(DeviceContext& dc,
+                                        const std::shared_ptr<ValueBufferPool>& pool) {
+            if (!pool) return err::kEngineNotOpen;
+            const std::size_t slot_count = pool->slot_count();
+            if (slot_count == 0) {
+                return dc.io.RegisterWriteBuffers(std::span<const ValueBufferSlotView>{});
+            }
+
+            std::vector<ValueBufferSlotView> views;
+            try {
+                views.resize(slot_count);
+            } catch (const std::bad_alloc&) {
+                return err::kEnginePoolExhausted;
+            }
+
+            const std::size_t exported = pool->ExportSlotViews(views);
+            if (exported != slot_count) return err::kIoBase;
+            return dc.io.RegisterWriteBuffers(
+                std::span<const ValueBufferSlotView>{views.data(), exported});
         }
     } // namespace
 
@@ -120,8 +143,11 @@ namespace cabe {
                                                       next_value_buffer_pool_id_++,
                                                       opts.value_buffer_pool_blocks);
             if (!value_pool.ok()) return fail_phase1(dc, value_pool.status.code);
-            dc.value_buffer_pool = value_pool.pool;
-            value_buffer_pools.push_back(std::move(value_pool.pool));
+            auto pool = std::move(value_pool.pool);
+            rc = RegisterValueBufferPool(dc, pool);
+            if (rc != err::kSuccess) return fail_phase1(dc, rc);
+            dc.value_buffer_pool = pool;
+            value_buffer_pools.push_back(std::move(pool));
 
             // P7M4：分配器绑定本设备号(super_block.device_id 已由 Create/RecoverDeviceGroup 校验 ==i)，
             //   Acquire 返回的 BlockId 高 8 位即此 dev，与 RouteKey 路由对齐。N=1 时 device_id=0。

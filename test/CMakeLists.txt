@@ -61,6 +61,11 @@ add_executable(test_put_path engine/put_path_test.cpp)
 target_link_libraries(test_put_path PRIVATE cabe::engine GTest::gtest_main)
 gtest_discover_tests(test_put_path DISCOVERY_TIMEOUT 60)
 
+# P8M4：后端写入缓冲区描述符测试
+add_executable(test_io_write_buffer io/io_write_buffer_test.cpp)
+target_link_libraries(test_io_write_buffer PRIVATE cabe::io GTest::gtest_main)
+gtest_discover_tests(test_io_write_buffer DISCOVERY_TIMEOUT 60)
+
 # P3M1：SyncIoBackend 测试
 add_executable(test_sync_io_backend io/sync_io_backend_test.cpp)
 target_link_libraries(test_sync_io_backend PRIVATE cabe::io cabe::engine GTest::gtest_main)

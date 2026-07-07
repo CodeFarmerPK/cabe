@@ -356,4 +356,18 @@ namespace cabe {
         return state_ ? state_->slot_count : 0;
     }
 
+    std::size_t ValueBufferPool::ExportSlotViews(std::span<ValueBufferSlotView> out) const noexcept {
+        if (!state_ || state_->slot_count == 0 || state_->slots == nullptr) return 0;
+
+        const std::size_t count = std::min(out.size(), state_->slot_count);
+        for (std::size_t i = 0; i < count; ++i) {
+            out[i] = ValueBufferSlotView{
+                .data = state_->slots[i].data,
+                .size = kValueSize,
+                .slot_index = static_cast<std::uint32_t>(i),
+            };
+        }
+        return count;
+    }
+
 } // namespace cabe

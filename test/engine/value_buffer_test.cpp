@@ -335,6 +335,17 @@ TEST_F(ValueBufferEngineTest, CloseWaitsForOutstandingValueBuffer) {
     EXPECT_TRUE(returned.load(std::memory_order_acquire));
 }
 
+TEST_F(ValueBufferEngineTest, CloseRejectsOperationsAndAllocation) {
+    ASSERT_TRUE(engine_.Open(CreateOpts()).ok());
+    ASSERT_TRUE(engine_.Close().ok());
+
+    std::vector<std::byte> value(cabe::kValueSize);
+    EXPECT_EQ(engine_.Put("closed", cabe::DataView{value}).code, cabe::err::kEngineNotOpen);
+    EXPECT_EQ(engine_.Get("closed", cabe::DataBuffer{value}).code, cabe::err::kEngineNotOpen);
+    EXPECT_EQ(engine_.Delete("closed").code, cabe::err::kEngineNotOpen);
+    EXPECT_EQ(engine_.AllocateValueBuffer("closed").status.code, cabe::err::kEngineNotOpen);
+}
+
 TEST_F(ValueBufferMultiDeviceTest, PoolsAreIndependentPerDevice) {
     const std::string key0 = KeyForDevice(0);
     const std::string key1 = KeyForDevice(1);

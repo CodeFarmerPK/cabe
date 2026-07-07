@@ -1,17 +1,36 @@
 #include "io/uring/io_uring_backend.h"
 #include "engine/buffer_pool.h"
+#include "engine/value_buffer_pool.h"
 
 #include <gtest/gtest.h>
 
 #include <cstdlib>
 #include <cstring>
+#include <span>
 #include <string>
+#include <vector>
 
 namespace {
 
 std::string GetTestDevice() {
     const char* dev = std::getenv("CABE_TEST_DEVICE");
     return dev ? std::string(dev) : "";
+}
+
+cabe::IoWriteBuffer MakeWriteBuffer(const std::byte* data,
+                                     cabe::IoWriteBufferKind kind = cabe::IoWriteBufferKind::ExternalMemory) {
+    return cabe::IoWriteBuffer{
+        .data = data,
+        .size = cabe::kValueSize,
+        .kind = kind,
+    };
+}
+
+std::vector<cabe::ValueBufferSlotView> ExportViews(const std::shared_ptr<cabe::ValueBufferPool>& pool) {
+    std::vector<cabe::ValueBufferSlotView> views(pool->slot_count());
+    const std::size_t exported = pool->ExportSlotViews(views);
+    views.resize(exported);
+    return views;
 }
 
 } // namespace
@@ -59,8 +78,7 @@ TEST_F(IoUringBackendTest, WriteReadRoundTrip) {
     ASSERT_NE(wbuf, nullptr);
     std::memset(wbuf, 0xAB, cabe::kValueSize);
 
-    EXPECT_EQ(backend_.Write(0, wbuf), cabe::err::kSuccess);
-    pool.Free(wbuf);
+    EXPECT_EQ(backend_.Write(0, MakeWriteBuffer(wbuf)), cabe::err::kSuccess);
 
     auto* rbuf = pool.Allocate();
     ASSERT_NE(rbuf, nullptr);
@@ -68,6 +86,7 @@ TEST_F(IoUringBackendTest, WriteReadRoundTrip) {
 
     EXPECT_EQ(backend_.Read(0, rbuf), cabe::err::kSuccess);
     EXPECT_EQ(std::memcmp(wbuf, rbuf, cabe::kValueSize), 0);
+    pool.Free(wbuf);
     pool.Free(rbuf);
 }
 
@@ -79,7 +98,7 @@ TEST_F(IoUringBackendTest, WriteReadMultipleBlocks) {
         auto* wbuf = pool.Allocate();
         ASSERT_NE(wbuf, nullptr);
         std::memset(wbuf, static_cast<int>(0x10 + i), cabe::kValueSize);
-        EXPECT_EQ(backend_.Write(i, wbuf), cabe::err::kSuccess);
+        EXPECT_EQ(backend_.Write(i, MakeWriteBuffer(wbuf)), cabe::err::kSuccess);
         pool.Free(wbuf);
     }
 
@@ -114,7 +133,125 @@ TEST_F(IoUringBackendTest, ConceptSatisfied) {
     static_assert(cabe::IoBackend<cabe::IoUringIoBackend>);
 }
 
+TEST_F(IoUringBackendTest, RegisterWriteBuffersZeroCapacity) {
+    ASSERT_EQ(backend_.Open(device_), cabe::err::kSuccess);
+    EXPECT_EQ(backend_.RegisterWriteBuffers(std::span<const cabe::ValueBufferSlotView>{}),
+              cabe::err::kSuccess);
+}
+
+TEST_F(IoUringBackendTest, RegisterWriteBuffersRejectsRepeat) {
+    ASSERT_EQ(backend_.Open(device_), cabe::err::kSuccess);
+
+    auto created = cabe::ValueBufferPool::Create(0, 7, 1);
+    ASSERT_TRUE(created.ok()) << created.status.code;
+    auto views = ExportViews(created.pool);
+    ASSERT_EQ(views.size(), 1u);
+
+    ASSERT_EQ(backend_.RegisterWriteBuffers(std::span<const cabe::ValueBufferSlotView>{views}),
+              cabe::err::kSuccess);
+    EXPECT_EQ(backend_.RegisterWriteBuffers(std::span<const cabe::ValueBufferSlotView>{views}),
+              cabe::err::kIoBase);
+}
+
+TEST_F(IoUringBackendTest, FixedValueBufferWriteReadRoundTrip) {
+    ASSERT_EQ(backend_.Open(device_), cabe::err::kSuccess);
+
+    auto created = cabe::ValueBufferPool::Create(0, 9, 2);
+    ASSERT_TRUE(created.ok()) << created.status.code;
+    auto views = ExportViews(created.pool);
+    ASSERT_EQ(views.size(), 2u);
+    ASSERT_EQ(backend_.RegisterWriteBuffers(std::span<const cabe::ValueBufferSlotView>{views}),
+              cabe::err::kSuccess);
+
+    auto value = created.pool->Allocate("fixed");
+    ASSERT_TRUE(value.ok()) << value.status.code;
+    std::memset(value.buffer.data().data(), 0xEE, cabe::kValueSize);
+    const auto info = created.pool->Identify(value.buffer.view());
+    ASSERT_TRUE(info.matched);
+
+    cabe::IoWriteBuffer fixed{
+        .data = value.buffer.view().data(),
+        .size = cabe::kValueSize,
+        .kind = cabe::IoWriteBufferKind::ValueBufferSlot,
+        .device_id = info.device_id,
+        .pool_id = info.pool_id,
+        .slot_index = info.slot_index,
+        .slot_generation = info.slot_generation,
+    };
+    ASSERT_EQ(backend_.Write(0, fixed), cabe::err::kSuccess);
+
+    cabe::BufferPool pool(1);
+    auto* rbuf = pool.Allocate();
+    ASSERT_NE(rbuf, nullptr);
+    ASSERT_EQ(backend_.Read(0, rbuf), cabe::err::kSuccess);
+    EXPECT_EQ(rbuf[0], std::byte{0xEE});
+    EXPECT_EQ(rbuf[cabe::kValueSize - 1], std::byte{0xEE});
+    pool.Free(rbuf);
+}
+
+TEST_F(IoUringBackendTest, CopyFallbackBufferStaysPlainWriteWithRegisteredBuffers) {
+    ASSERT_EQ(backend_.Open(device_), cabe::err::kSuccess);
+
+    auto created = cabe::ValueBufferPool::Create(0, 10, 1);
+    ASSERT_TRUE(created.ok()) << created.status.code;
+    auto views = ExportViews(created.pool);
+    ASSERT_EQ(backend_.RegisterWriteBuffers(std::span<const cabe::ValueBufferSlotView>{views}),
+              cabe::err::kSuccess);
+
+    cabe::BufferPool pool(2);
+    auto* wbuf = pool.Allocate();
+    ASSERT_NE(wbuf, nullptr);
+    std::memset(wbuf, 0x5A, cabe::kValueSize);
+    ASSERT_EQ(backend_.Write(0, MakeWriteBuffer(wbuf, cabe::IoWriteBufferKind::CopyFallbackBuffer)),
+              cabe::err::kSuccess);
+
+    auto* rbuf = pool.Allocate();
+    ASSERT_NE(rbuf, nullptr);
+    ASSERT_EQ(backend_.Read(0, rbuf), cabe::err::kSuccess);
+    EXPECT_EQ(rbuf[0], std::byte{0x5A});
+    EXPECT_EQ(rbuf[cabe::kValueSize - 1], std::byte{0x5A});
+    pool.Free(wbuf);
+    pool.Free(rbuf);
+}
+
+TEST_F(IoUringBackendTest, MoveConstructWithRegisteredBuffers) {
+    ASSERT_EQ(backend_.Open(device_), cabe::err::kSuccess);
+
+    auto created = cabe::ValueBufferPool::Create(0, 11, 1);
+    ASSERT_TRUE(created.ok()) << created.status.code;
+    auto views = ExportViews(created.pool);
+    ASSERT_EQ(backend_.RegisterWriteBuffers(std::span<const cabe::ValueBufferSlotView>{views}),
+              cabe::err::kSuccess);
+
+    cabe::IoUringIoBackend moved(std::move(backend_));
+    EXPECT_TRUE(moved.is_open());
+    EXPECT_FALSE(backend_.is_open());
+
+    auto value = created.pool->Allocate("moved");
+    ASSERT_TRUE(value.ok()) << value.status.code;
+    std::memset(value.buffer.data().data(), 0x6B, cabe::kValueSize);
+    const auto info = created.pool->Identify(value.buffer.view());
+    ASSERT_TRUE(info.matched);
+    cabe::IoWriteBuffer fixed{
+        .data = value.buffer.view().data(),
+        .size = cabe::kValueSize,
+        .kind = cabe::IoWriteBufferKind::ValueBufferSlot,
+        .device_id = info.device_id,
+        .pool_id = info.pool_id,
+        .slot_index = info.slot_index,
+        .slot_generation = info.slot_generation,
+    };
+    EXPECT_EQ(moved.Write(0, fixed), cabe::err::kSuccess);
+    moved.Close();
+}
+
 TEST(IoUringBackendNoDevice, OpenBadPath) {
     cabe::IoUringIoBackend backend;
     EXPECT_NE(backend.Open("/no/such/device"), cabe::err::kSuccess);
+}
+
+TEST(IoUringBackendNoDevice, RejectsInvalidWriteBuffer) {
+    cabe::IoUringIoBackend backend;
+    cabe::IoWriteBuffer invalid{};
+    EXPECT_EQ(backend.Write(0, invalid), cabe::err::kIoBase);
 }

@@ -1,6 +1,7 @@
 #include "engine/reactor.h"
 #include "common/error_code.h"
 #include "common/logger.h"
+#include "io/io_write_buffer.h"
 #include "util/crc32.h"
 #include "util/util.h"          // P7M2：GetWallTimeNs
 
@@ -236,6 +237,12 @@ namespace cabe {
             op->value, op->value_source, DefaultBackendDirectWriteCaps());
         BufferPoolLease fallback(dc_.pool);
         const std::byte* write_source = op->value.data();
+        IoWriteBufferKind write_kind = IoWriteBufferKind::ExternalMemory;
+
+        if (plan.path == PutWritePath::Direct &&
+            op->value_source.kind == PutValueSourceKind::TargetKeyValueBuffer) {
+            write_kind = IoWriteBufferKind::ValueBufferSlot;
+        }
 
         if (plan.path == PutWritePath::CopyFallback) {
             std::byte* buf = fallback.Allocate();
@@ -245,11 +252,24 @@ namespace cabe {
             }
             std::memcpy(buf, op->value.data(), kValueSize);
             write_source = buf;
+            write_kind = IoWriteBufferKind::CopyFallbackBuffer;
+        }
+
+        IoWriteBuffer io_buffer{
+            .data = write_source,
+            .size = kValueSize,
+            .kind = write_kind,
+        };
+        if (write_kind == IoWriteBufferKind::ValueBufferSlot) {
+            io_buffer.device_id = op->value_source.owner_device_id;
+            io_buffer.pool_id = op->value_source.pool_id;
+            io_buffer.slot_index = op->value_source.slot_index;
+            io_buffer.slot_generation = op->value_source.slot_generation;
         }
 
         const std::uint32_t value_crc = util::CRC32(DataView{write_source, kValueSize});
         const std::uint64_t now       = util::GetWallTimeNs();
-        rc = dc_.io.Write(block_id.block_idx(), write_source);               // FUA 由 io 读 opts_->wal_level 定
+        rc = dc_.io.Write(block_id.block_idx(), io_buffer);                  // FUA 由 io 读 opts_->wal_level 定
         fallback.Reset();
         if (rc != err::kSuccess) {
             dc_.block_allocator.Recycle(block_id);

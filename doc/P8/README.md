@@ -1,6 +1,6 @@
 # P8 - 零拷贝写入路径主路径化 · 设计文档索引
 
-状态：🚧 设计中（P8-D1 ~ P8-D11 已讨论锁定；M1 ~ M3 已实装，M4 ~ M5 待详细设计与实现）
+状态：🚧 设计中（P8-D1 ~ P8-D11 已讨论锁定；M1 ~ M4 已实装，M5 待详细设计与实现）
 
 ## 1. 阶段目标
 
@@ -31,6 +31,10 @@ P8 当前仍基于 `io_uring` 路线实施，但接口和内部抽象必须为�
 - P8 不实现 SPDK 后端；
 - P8 的 `ValueBuffer`、值缓冲区池和内部写入描述符不得绑定到 `io_uring` 专属概念；
 - 未来 P10 切换 SPDK 时，`ValueBuffer` 应当能够自然映射到 SPDK 大页内存池。
+
+后续 Cabe 的零拷贝和高性能 I/O 开发将以 SPDK 为主要方向；`io_uring` 是当前阶段的过渡实现。
+因此 P8M4 只应借 `io_uring` 注册缓冲区验证后端写入描述符和 Cabe 自管值缓冲区主路径，
+不得围绕 `io_uring` 的临时能力扩大公开接口或绑定长期架构。
 
 ## 3. 术语边界
 
@@ -108,7 +112,7 @@ flowchart LR
 | P8M1 | `P8M1_value_buffer_api_design.md` | ✅ 已实装 | 固定公开 `ValueBuffer` API、分配结果、配置项和术语文档。 |
 | P8M2 | `P8M2_value_buffer_pool_design.md` | ✅ 已实装 | 建立内部值缓冲区池抽象，实现每设备 1 MiB 对齐缓冲区管理。 |
 | P8M3 | `P8M3_put_path_design.md` | ✅ 已实装 | 在 `Engine::Put` 到 `Reactor::ExecutePut` 路径中接入零拷贝判断和复制回退。 |
-| P8M4 | `P8M4_backend_write_protocol_design.md` | ⏳ 待设计 | 升级后端写入协议，并在 `io_uring` 后端接入注册缓冲区写入。 |
+| P8M4 | `P8M4_backend_write_protocol_design.md` | ✅ 已实装 | 升级后端写入协议，并在 `io_uring` 后端接入注册缓冲区写入。 |
 | P8M5 | `P8M5_bench_convergence_design.md` | ⏳ 待设计 | 补齐 bench、文档、回归测试和 P8 性能档案。 |
 
 ## 7. P8M1 - 公开接口与术语落地
@@ -258,6 +262,15 @@ P8M3 退出条件：
 - 为不同内存来源表达统一写入信息；
 - 在 `io_uring` 后端接入注册缓冲区写入；
 - 为未来 SPDK 后端保留足够表达能力。
+
+P8M4 详细设计见 `doc/P8/P8M4_backend_write_protocol_design.md`。当前已锁定的补充边界：
+
+- P8M4 采用 SPDK 导向方案：`io_uring` 只是过渡实现，用于验证后端中立的写入描述符和 Cabe 自管值缓冲区主路径；
+- 新增内部 `IoWriteBuffer`，后端写入接口统一升级为 `Write(block_idx, const IoWriteBuffer&)`；
+- 只有 Cabe `ValueBuffer` 主路径使用 `io_uring` 固定缓冲区写入；应用端自备内存和复制回退路径继续普通写入；
+- 注册缓冲区在 `Engine::Open` 阶段按设备池一次性注册，注册失败则 `Open` 失败并回滚；
+- `Read` 路径不升级，不新增公开路径统计接口，不引入 SPDK 依赖；
+- `Close` 保持严格打开周期边界，完成后不得再接受旧周期资源请求。
 
 建议内部描述符包含：
 

@@ -6,9 +6,12 @@
 #include "common/structs.h"
 #include "engine/options.h"   // P5M3：现读 wal_level 决定 value 是否 FUA
 
+#include <cstddef>
 #include <cstdint>
 #include <liburing.h>
+#include <span>
 #include <string>
+#include <vector>
 
 namespace cabe {
 
@@ -27,7 +30,8 @@ namespace cabe {
         void RebindOptions(const Options* opts) noexcept { opts_ = opts; }
         int32_t Close();
         std::uint64_t BlockCount() const noexcept;
-        int32_t Write(std::uint64_t block_idx, const std::byte* buf);
+        int32_t RegisterWriteBuffers(std::span<const ValueBufferSlotView> buffers);
+        int32_t Write(std::uint64_t block_idx, const IoWriteBuffer& buffer);
         int32_t Read(std::uint64_t block_idx, std::byte* buf);
 
         bool is_open() const noexcept;
@@ -35,11 +39,21 @@ namespace cabe {
     private:
         static constexpr unsigned kQueueDepth = 64;
 
+        struct RegisteredBufferRecord {
+            const std::byte* data = nullptr;
+            std::size_t size = 0;
+        };
+
+        bool UseFixedWriteBuffer(const IoWriteBuffer& buffer) const noexcept;
+
         int fd_ = -1;
         std::uint64_t block_count_ = 0;
         struct io_uring ring_{};
         bool ring_initialized_ = false;
         bool files_registered_ = false;
+        bool buffers_registered_ = false;
+        std::uint32_t registered_buffer_count_ = 0;
+        std::vector<RegisteredBufferRecord> registered_buffers_;
         const Options* opts_ = nullptr;   // P5M3：现读 wal_level（nullptr → 级别 3，不 FUA）
     };
 

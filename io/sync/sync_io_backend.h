@@ -7,6 +7,7 @@
 #include "engine/options.h"   // P5M3：现读 wal_level 决定 value 是否 FUA
 
 #include <cstdint>
+#include <span>
 #include <string>
 
 namespace cabe {
@@ -26,7 +27,8 @@ namespace cabe {
         void RebindOptions(const Options* opts) noexcept { opts_ = opts; }
         int32_t Close();
         std::uint64_t BlockCount() const noexcept;
-        int32_t Write(std::uint64_t block_idx, const std::byte* buf);
+        int32_t RegisterWriteBuffers(std::span<const ValueBufferSlotView> buffers);
+        int32_t Write(std::uint64_t block_idx, const IoWriteBuffer& buffer);
         int32_t Read(std::uint64_t block_idx, std::byte* buf);
 
         bool is_open() const noexcept;

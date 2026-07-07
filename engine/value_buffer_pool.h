@@ -4,12 +4,14 @@
 #include "common/structs.h"
 #include "engine/status.h"
 #include "engine/value_buffer.h"
+#include "io/io_write_buffer.h"
 #include "wal/wal_frame.h"
 
 #include <array>
 #include <cstddef>
 #include <cstdint>
 #include <memory>
+#include <span>
 #include <string_view>
 
 namespace cabe {
@@ -59,6 +61,7 @@ namespace cabe {
         DeviceId device_id() const noexcept;
         std::uint64_t pool_id() const noexcept;
         std::size_t slot_count() const noexcept;
+        std::size_t ExportSlotViews(std::span<ValueBufferSlotView> out) const noexcept;
 
     private:
         explicit ValueBufferPool(std::shared_ptr<detail::ValueBufferPoolState> state) noexcept;

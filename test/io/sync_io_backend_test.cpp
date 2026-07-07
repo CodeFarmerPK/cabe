@@ -5,6 +5,7 @@
 
 #include <cstdlib>
 #include <cstring>
+#include <span>
 #include <string>
 
 namespace {
@@ -12,6 +13,15 @@ namespace {
 std::string GetTestDevice() {
     const char* dev = std::getenv("CABE_TEST_DEVICE");
     return dev ? std::string(dev) : "";
+}
+
+cabe::IoWriteBuffer MakeWriteBuffer(const std::byte* data,
+                                     cabe::IoWriteBufferKind kind = cabe::IoWriteBufferKind::ExternalMemory) {
+    return cabe::IoWriteBuffer{
+        .data = data,
+        .size = cabe::kValueSize,
+        .kind = kind,
+    };
 }
 
 } // namespace
@@ -60,8 +70,7 @@ TEST_F(SyncIoBackendTest, WriteReadRoundTrip) {
     ASSERT_NE(wbuf, nullptr);
     std::memset(wbuf, 0xAB, cabe::kValueSize);
 
-    EXPECT_EQ(backend_.Write(0, wbuf), cabe::err::kSuccess);
-    pool.Free(wbuf);
+    EXPECT_EQ(backend_.Write(0, MakeWriteBuffer(wbuf)), cabe::err::kSuccess);
 
     auto* rbuf = pool.Allocate();
     ASSERT_NE(rbuf, nullptr);
@@ -69,6 +78,7 @@ TEST_F(SyncIoBackendTest, WriteReadRoundTrip) {
 
     EXPECT_EQ(backend_.Read(0, rbuf), cabe::err::kSuccess);
     EXPECT_EQ(std::memcmp(wbuf, rbuf, cabe::kValueSize), 0);
+    pool.Free(wbuf);
     pool.Free(rbuf);
 }
 
@@ -80,7 +90,7 @@ TEST_F(SyncIoBackendTest, WriteReadMultipleBlocks) {
         auto* wbuf = pool.Allocate();
         ASSERT_NE(wbuf, nullptr);
         std::memset(wbuf, static_cast<int>(0x10 + i), cabe::kValueSize);
-        EXPECT_EQ(backend_.Write(i, wbuf), cabe::err::kSuccess);
+        EXPECT_EQ(backend_.Write(i, MakeWriteBuffer(wbuf)), cabe::err::kSuccess);
         pool.Free(wbuf);
     }
 
@@ -115,8 +125,44 @@ TEST_F(SyncIoBackendTest, ConceptSatisfied) {
     static_assert(cabe::IoBackend<cabe::SyncIoBackend>);
 }
 
+TEST_F(SyncIoBackendTest, RegisterWriteBuffersIsNoop) {
+    ASSERT_EQ(backend_.Open(device_), cabe::err::kSuccess);
+
+    cabe::ValueBufferSlotView views[1]{};
+    EXPECT_EQ(backend_.RegisterWriteBuffers(std::span<const cabe::ValueBufferSlotView>{views, 1}),
+              cabe::err::kSuccess);
+    EXPECT_EQ(backend_.RegisterWriteBuffers(std::span<const cabe::ValueBufferSlotView>{}),
+              cabe::err::kSuccess);
+}
+
+TEST_F(SyncIoBackendTest, AcceptsAllWriteBufferKindsAsPlainWrite) {
+    ASSERT_EQ(backend_.Open(device_), cabe::err::kSuccess);
+
+    cabe::BufferPool pool(2);
+    auto* wbuf = pool.Allocate();
+    ASSERT_NE(wbuf, nullptr);
+    std::memset(wbuf, 0xCD, cabe::kValueSize);
+
+    auto buffer = MakeWriteBuffer(wbuf, cabe::IoWriteBufferKind::ValueBufferSlot);
+    buffer.device_id = 7;
+    buffer.pool_id = 9;
+    buffer.slot_index = 11;
+    buffer.slot_generation = 13;
+    EXPECT_EQ(backend_.Write(0, buffer), cabe::err::kSuccess);
+
+    buffer.kind = cabe::IoWriteBufferKind::CopyFallbackBuffer;
+    EXPECT_EQ(backend_.Write(1, buffer), cabe::err::kSuccess);
+    pool.Free(wbuf);
+}
+
 // 不需要设备的测试
 TEST(SyncIoBackendNoDevice, OpenBadPath) {
     cabe::SyncIoBackend backend;
     EXPECT_NE(backend.Open("/no/such/device"), cabe::err::kSuccess);
+}
+
+TEST(SyncIoBackendNoDevice, RejectsInvalidWriteBuffer) {
+    cabe::SyncIoBackend backend;
+    cabe::IoWriteBuffer invalid{};
+    EXPECT_EQ(backend.Write(0, invalid), cabe::err::kIoBase);
 }
