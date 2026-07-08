@@ -30,6 +30,10 @@ target_link_libraries(bench_engine PRIVATE cabe::engine benchmark::benchmark_mai
 add_executable(bench_engine_mt engine/engine_mt_bench.cpp)
 target_link_libraries(bench_engine_mt PRIVATE cabe::engine benchmark::benchmark_main)
 
+# P8M5：三类 value 来源的 Put 微基准（非对齐自备值内存 / 对齐自备值内存 / Cabe ValueBuffer）。
+add_executable(bench_engine_value_put engine/engine_value_put_bench.cpp)
+target_link_libraries(bench_engine_value_put PRIVATE cabe::engine benchmark::benchmark_main)
+
 # P6M3：多线程 Wal 吞吐微基准（直打 Wal，测 group commit 并发收益）。
 # 链 cabe::wal（与 test_wal_concurrency 同款，直打 Wal、不经 Engine）。
 add_executable(bench_wal_concurrency wal/wal_concurrency_bench.cpp)
