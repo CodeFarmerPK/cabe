@@ -54,7 +54,7 @@
 | Put / Get / Delete 完整路径 | **P1M4** | 本里程碑只做组件，端到端串联在 M4 |
 | MetaIndex 抽象层（C++20 concept） | **P3** | P1 不做抽象——直接 unordered_map |
 | MetaIndex 透明查找优化 | **P3+** | P1 用 `std::string(key)` 显式构造查找，性能不是瓶颈 |
-| FreeList 三容器轮换 | **P4.5** | P1 朴素 LIFO 单栈 |
+| FreeList 替换 | **P4.5** | 最终未采用三容器轮换，而是引入 `BlockAllocator` 抽象和 FIFO `RingBlockAllocator` |
 
 ---
 
@@ -160,7 +160,7 @@ void FreeList::Free(BlockId id) {
 }
 ```
 
-- 不做重复归还校验（P1 信任内部代码；P4.5 FreeList 改造时加）。
+- 不做重复归还校验（P1 信任内部代码；P4.5 最终改为 `RingBlockAllocator`，热路径仍不做重复归还校验；恢复重建会拒绝重复活块）。
 
 **Move 语义**：`vector` 默认支持 move——FreeList 不需要自定义。
 
@@ -419,21 +419,21 @@ gtest_discover_tests(test_meta_index DISCOVERY_TIMEOUT 60)
 
 ```bash
 # FreeList + MetaIndex 纯内存测试（不需要设备）
-./scripts/run-tests.sh --filter 'FreeList|MetaIndex'
+./scripts/run-tests.sh --backend=sync --filter 'FreeList|MetaIndex'
 
 # Engine 设备测试（需要 CABE_TEST_DEVICE）
 ./scripts/mkloop.sh create
 export CABE_TEST_DEVICE=/dev/loopN
-./scripts/run-tests.sh
+./scripts/run-tests.sh --backend=sync
 
 # 四档回归
-./scripts/run-tests.sh --asan
-./scripts/run-tests.sh --tsan
-./scripts/run-tests.sh --ubsan
-./scripts/run-tests.sh --release
+./scripts/run-tests.sh --backend=sync --asan
+./scripts/run-tests.sh --backend=sync --tsan
+./scripts/run-tests.sh --backend=sync --ubsan
+./scripts/run-tests.sh --backend=sync --release
 
 # 覆盖率
-./scripts/run-coverage.sh --strict
+./scripts/run-coverage.sh --backend=sync --strict
 
 # 清理
 ./scripts/mkloop.sh cleanup
@@ -447,7 +447,7 @@ export CABE_TEST_DEVICE=/dev/loopN
 |---|---|---|
 | FreeList 128 GiB 设备内存占用 | 131072 × 8 字节 = 1 MiB vector | 可接受；P4.5 改造时可优化 |
 | MetaIndex string 拷贝 | Insert / Lookup / Delete 每次都 `std::string(key)` | P1 单线程不是瓶颈；P3 透明查找优化 |
-| FreeList 无重复归还校验 | 同一 BlockId 多次 Free → 后续分配出重复块 → 数据损坏 | P1 信任内部代码；P4.5 加 debug 校验 |
+| FreeList 无重复归还校验 | 同一 BlockId 多次 Free → 后续分配出重复块 → 数据损坏 | P4.5 热路径保持内部信任；P5M6 为恢复重建增加重复活块拒绝，未增加热路径 debug 校验 |
 | ioctl BLKGETSIZE64 在非块设备上失败 | loop 设备 OK；普通文件需 `lseek(SEEK_END)` | P1 用 loop 设备测试；Engine::Open 已限定 O_DIRECT 块设备 |
 | MetaIndex Insert 覆盖旧 meta 不释放旧块 | 旧 BlockId 对应的物理块未归还 FreeList | Engine 层（P1M4）负责先 Free 旧块再 Insert 新 meta |
 
@@ -459,7 +459,7 @@ export CABE_TEST_DEVICE=/dev/loopN
 |---|---|
 | **P1M4** | Put：`FreeList::Allocate` → `WriteBlock` → `MetaIndex::Insert`；Get：`MetaIndex::Lookup` → `ReadBlock`；Delete：`MetaIndex::Delete` → `FreeList::Free`——三路径的组件全部就位 |
 | **P3** | `MetaIndex` 的 4 方法签名可直接被 concept 抽象：`Insert(key, meta) → int32_t` / `Lookup(key, out) → int32_t` / `Delete(key) → int32_t` / `Size() → size_t` |
-| **P4.5** | `FreeList` 的 `Allocate` / `Free` 可直接被三容器轮换替代——接口不变，内部数据结构改 |
+| **P4.5** | `FreeList` 最终被 `BlockAllocator` concept 与 FIFO `RingBlockAllocator` 替代；方法改名为 `Acquire` / `Recycle`，未采用三容器轮换 |
 
 ---
 

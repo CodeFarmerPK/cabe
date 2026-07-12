@@ -44,8 +44,8 @@
 
 | 推迟项 | 落点 | 原因 |
 |---|---|---|
-| TRIM（物理设备块回收） | **P4.5**（FreeList 改造 + io_uring 异步 TRIM） | P1 无持久化 + 不影响正确性；P4.5 FreeList 三容器轮换与 TRIM 天然耦合 |
-| GC 线程（数据空洞回收） | **P7**（Reactor + 多线程） | 需多线程基础设施 |
+| TRIM（物理设备块回收） | **性能兑现阶段** | P4.5 只留下调用点，P7 将其迁入 reactor 但仍为空桩；不影响正确性 |
+| GC / 后台空间优化 | **性能兑现阶段** | P7 只建立 reactor 基础设施，没有增加 GC 线程 |
 | WAL 持久化 Delete 帧 | **P5** | P1 无持久化——Delete 只改 RAM 索引 |
 
 ---
@@ -190,7 +190,7 @@ Status Engine::Delete(std::string_view key) {
     // ---- 从索引移除 ----
     dc.meta_index.Delete(key);
 
-    // 不做 I/O、不发 TRIM（P1 无持久化；TRIM 在 P4.5 引入）。
+    // 不做 I/O、不发 TRIM（P1 无持久化；P4.5 只引入空桩，P7 后仍待性能兑现阶段实现）。
     // 物理块上的旧数据残留，由索引控制数据可见性。
 
     return Status::Ok();
@@ -200,7 +200,7 @@ Status Engine::Delete(std::string_view key) {
 **设计要点**：
 - **标记删除 + 立即回收**：FreeList 回收块号 + MetaIndex 移除条目——两步原子性由 P1 单线程保证。
 - **不做 I/O**：旧数据在设备上残留（P1 "无持久化"语义——索引即真相）。
-- **不发 TRIM**：P4.5 FreeList 改造时引入异步 TRIM。
+- **不发 TRIM**：P4.5 只建立 `TrimDeviceBlock` 空桩，P7 将空桩迁入 reactor；真实异步 TRIM 继续归性能兑现阶段。
 
 ---
 
@@ -276,9 +276,9 @@ export CABE_TEST_DEVICE=/dev/loopN
 | 风险 | 说明 | 缓解 |
 |---|---|---|
 | 覆盖写先 Free 旧块再 Allocate 新块 | 如果 FreeList 只剩 1 块：Free 旧 → Allocate 新 → OK。但如果 Free 旧后 Allocate 的是刚 Free 的那个块号 → 写新数据覆盖旧数据 → 如果写失败旧数据也没了 | P1 单线程 + 无持久化——可接受；P5 WAL 保证 crash safety |
-| BufferPool 耗尽返回 `kEnginePoolExhausted` | P1 单线程 16 块——Put/Get 只用 1 块就 Free——几乎不触发 | 防御性兜底；P7 多线程时池可能真满 |
+| BufferPool 耗尽返回 `kEnginePoolExhausted` | P1 单线程 16 块——Put/Get 只用 1 块就 Free——几乎不触发 | 防御性兜底；P7 由 reactor 串行独占该池，仍不形成并发占用；P8 的公开值缓冲区使用独立 `ValueBufferPool` |
 | CRC32 校验假阳性 | CRC32C 碰撞概率 2^-32——极低 | 可接受；P5+ 可加 xxh3 二次校验 |
-| Delete 不发 TRIM | 旧数据残留在 SSD NAND 上 → 写放大 + 寿命损耗 | P4.5 FreeList 改造时加异步 TRIM；P1 用 loop 设备测试无影响 |
+| Delete 不发 TRIM | 旧数据残留在 SSD NAND 上 → 写放大 + 寿命损耗 | P4.5/P7 只保留空桩；真实异步 TRIM 归性能兑现阶段，P1 用 loop 设备测试无影响 |
 | Delete 不写 WAL | P1 无持久化——Delete 信息重启后丢失 | P5 WAL 引入 Delete 帧持久化 |
 
 ---
@@ -302,17 +302,17 @@ SIZE_MB=8 ./scripts/mkloop.sh create
 export CABE_TEST_DEVICE=/dev/loopN
 
 # 端到端测试
-./scripts/run-tests.sh --filter 'Engine'
+./scripts/run-tests.sh --backend=sync --filter 'Engine'
 
 # 四档回归
-./scripts/run-tests.sh --asan
-./scripts/run-tests.sh --tsan
-./scripts/run-tests.sh --ubsan
-./scripts/run-tests.sh --release
+./scripts/run-tests.sh --backend=sync --asan
+./scripts/run-tests.sh --backend=sync --tsan
+./scripts/run-tests.sh --backend=sync --ubsan
+./scripts/run-tests.sh --backend=sync --release
 
 # 覆盖率
 unset CABE_TEST_DEVICE
-./scripts/run-coverage.sh --strict
+./scripts/run-coverage.sh --backend=sync --strict
 
 # 清理
 ./scripts/mkloop.sh cleanup
@@ -327,7 +327,7 @@ unset CABE_TEST_DEVICE
 | **P1M5** | Put / Get / Delete 完整路径可用 → 微基准可跑 Put/Get 吞吐 + 延迟 |
 | **P2** | Engine 公开 API 签名已定型（`Status Put(key, value)` / `Status Get(key, value)` / `Status Delete(key)`）→ P2 冻结只调细节 |
 | **P5** | Put 路径的 CRC32 + timestamp 已填入 ValueMeta → WAL 帧可直接引用 meta 字段 |
-| **P4.5** | Delete 路径的 FreeList::Free(block) 就是 TRIM 触发点 → P4.5 在此处加异步 TRIM |
+| **P4.5 / P7** | Delete 路径建立 TRIM 调用点并迁入 reactor，但函数体仍为空；真实 discard 归性能兑现阶段 |
 
 ---
 

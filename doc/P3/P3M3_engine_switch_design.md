@@ -47,8 +47,8 @@
 | 推迟项 | 落点 | 原因 |
 |---|---|---|
 | io_uring 后端接入 | **P4** | P3 只做同步后端 |
-| B+ 树索引接入 | **P9** | P3 只做 hashmap |
-| BufferHandle / 零拷贝 | **P8** | 继续用裸 `byte*` |
+| B+ 树索引接入 | **P10** | P3 只做 hashmap |
+| `ValueBuffer` / 零拷贝 | **P8** | P3 继续用裸 `byte*`；P8 最终落地 value 专用 `ValueBuffer` |
 
 ---
 
@@ -98,7 +98,7 @@ static_assert(cabe::MetaIndexBackend<cabe::MetaIndexImpl>);
 - `#if` / `#else #error` 结构——未选择后端时给出清晰的编译错误。
 - 末尾 `static_assert` 确保选中的类型满足对应接口约束——编译期安全网。
 - P4 加 io_uring 时只需插入 `#elif defined(CABE_USE_IO_URING)` 分支。
-- P9 加 B+ 树时只需插入 `#elif defined(CABE_USE_META_BPLUSTREE)` 分支。
+- P10 加 B+ 树时只需插入 `#elif defined(CABE_USE_META_BPLUSTREE)` 分支。
 
 ---
 
@@ -289,7 +289,7 @@ endif()
 -     message(STATUS "CABE_IO_BACKEND='${CABE_IO_BACKEND}' recorded; real dispatch lands in P3.")
 - endif()
 - if(NOT CABE_META_INDEX STREQUAL "hashmap")
--     message(STATUS "CABE_META_INDEX='${CABE_META_INDEX}' recorded; real dispatch lands in P3/P9.")
+-     message(STATUS "CABE_META_INDEX='${CABE_META_INDEX}' recorded; real dispatch lands in P3/P10.")
 - endif()
 ```
 
@@ -358,7 +358,7 @@ Engine 的所有测试（`test_engine`）不修改——公开 API 不变，只�
 
 ### 8.2 验证方式
 
-1. 全量测试：`run-tests.sh` 四档（release / asan / tsan / ubsan）全绿。
+1. 全量测试：当前复跑显式使用 `run-tests.sh --backend=sync` 的 release / asan / tsan / ubsan 四档。
 2. 覆盖率 ≥ 80%。
 3. 确认 CMake 分派生效：设置 `CABE_IO_BACKEND=io_uring` → CMake 配置阶段报 `FATAL_ERROR`。
 
@@ -393,7 +393,7 @@ Engine 的所有测试（`test_engine`）不修改——公开 API 不变，只�
 |---|---|
 | **P3M4** | 收敛检查——确认 P3 四个里程碑完成，ROADMAP / README 状态同步 |
 | **P4** | `engine/CMakeLists.txt` 加 `elseif(CABE_IO_BACKEND STREQUAL "io_uring")` + `engine/backend_config.h` 加 `#elif CABE_USE_IO_URING` |
-| **P9** | `engine/CMakeLists.txt` 加 `elseif(CABE_META_INDEX STREQUAL "bplustree")` + `engine/backend_config.h` 加 `#elif CABE_USE_META_BPLUSTREE` |
+| **P10** | `engine/CMakeLists.txt` 加 `elseif(CABE_META_INDEX STREQUAL "bplustree")` + `engine/backend_config.h` 加 `#elif CABE_USE_META_BPLUSTREE` |
 
 ---
 

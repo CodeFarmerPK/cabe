@@ -62,7 +62,7 @@
 
 ---
 
-## 3. 待 owner 终审的决策
+## 3. 收敛前待终审的决策（P0M7 已锁定）
 
 ### 决策-1：GTest / benchmark 接入方式 = `find_package` 优先 + `FetchContent` 兜底
 
@@ -70,7 +70,7 @@
 |---|---|
 | 裁决 | 与 ROADMAP 一致：`find_package(GTest)`/`find_package(benchmark)` 优先（系统库，`setup-dev.sh` 已装）；未命中则 `FetchContent` 拉取**钉死 tag**（建议 GTest `v1.15.2`、benchmark `v1.9.x`） |
 | 与 M4 内嵌的区别 | 测试/基准工具**不影响产品正确性与冻结**，故用系统库 + 兜底即可，不必内嵌；与 hash（必须冻结）的取舍不同 |
-| 状态 | 建议采纳（ROADMAP 指定；仅 FetchContent tag 待定） |
+| 状态 | ✅ 已锁定（P0M7 收敛） |
 
 ### 决策-2（核心）：为可测性给 crc32 / logger 开「测试钩子」
 
@@ -80,7 +80,7 @@
 | 方案 | **crc32**：把两实现从匿名 namespace 提升到 `cabe::util::detail`（或单独 `crc32_internal.h`），对外 API `CRC32` 不变；测试 include 内部头比对软/硬。**logger**：增设测试可见的阈值注入（如 `cabe::log::detail::SetThresholdForTest(Level)`）+ 测试内重定向 stderr 捕获 |
 | 取舍 | 放宽一点 M2/M3 的"内部不外露"，换取 ROADMAP 明列的覆盖项；钩子置于 `detail`/`testing` 子命名空间、注释标注"仅测试用"，把外溢降到最低 |
 | 备选 | ① 测试 `#include "crc32.cpp"` 直接拿匿名符号（hacky、与构建冲突）；② logger 多级别用**子进程**（`fork`+`setenv`+`exec`）避免改 logger（更重、平台相关） |
-| 状态 | **待终审**：是否接受为测试开 `detail` 钩子（推荐），还是走子进程/不测该项 |
+| 状态 | ✅ 已锁定（P0M7 收敛）：采用受限 `detail` 测试钩子 |
 
 ### 决策-3：覆盖率工具与门槛
 
@@ -216,8 +216,8 @@ bench/
 
 | # | 决策 | 备选 | 理由 | 状态 |
 |---|---|---|---|---|
-| M5-D1 | GTest/benchmark：`find_package` 优先 + `FetchContent` 兜底（钉死 tag） | 仅系统库 / 仅 FetchContent / 内嵌 | 与 ROADMAP 一致；测试工具不需冻结，无需内嵌 | 建议采纳 |
-| M5-D2 | 为 crc32/logger 开 `detail` 测试钩子 | `#include .cpp` / 子进程 / 不测 | 触达被封装内部以覆盖 ROADMAP 明列项；钩子限 `detail`、外溢最小 | **待终审**（§3 决策-2） |
+| M5-D1 | GTest/benchmark：`find_package` 优先 + `FetchContent` 兜底（钉死 tag） | 仅系统库 / 仅 FetchContent / 内嵌 | 与 ROADMAP 一致；测试工具不需冻结，无需内嵌 | ✅ 已锁定（P0M7 收敛） |
+| M5-D2 | 为 crc32/logger 开 `detail` 测试钩子 | `#include .cpp` / 子进程 / 不测 | 触达被封装内部以覆盖 ROADMAP 明列项；钩子限 `detail`、外溢最小 | **✅ 已锁定（P0M7 收敛）** |
 | M5-D3 | 覆盖率双轨（gcov/llvm-cov）+ `CABE_COVERAGE` 选项 + ≥80% | 单工具链 / 不设门槛 | 双工具链对称；选项隔离插桩；ROADMAP 定 80% | 锁定 |
 | M5-D4 | 每模块一个测试可执行 + `gtest_discover_tests` | 单一大可执行 | 隔离、并行、定位清晰；`ctest` 自动注册 | 锁定 |
 | M5-D5 | 冻结值（`Hash("")`、CRC32C 向量）写成断言常量 | 不固化 | 守护 D6 冻结 / 防内嵌升级悄改输出 | 锁定 |

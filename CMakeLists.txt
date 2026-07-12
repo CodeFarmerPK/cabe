@@ -44,7 +44,7 @@ set_property(CACHE CMAKE_BUILD_TYPE PROPERTY STRINGS Debug Release RelWithDebInf
 # CABE_SANITIZER 在 M1 即应用编译开关（见设计 §3 偏差-1）。
 set(CABE_SANITIZER "none" CACHE STRING "Sanitizer: none|address|thread|undefined")
 set_property(CACHE CABE_SANITIZER PROPERTY STRINGS none address thread undefined)
-# 以下 META_INDEX 项 M1 仅声明 + 校验，真实编译期分派在 P3·P9。
+# 以下 META_INDEX 项 M1 仅声明 + 校验，真实编译期分派在 P3·P10。
 # CABE_IO_BACKEND：自 P6 起取消默认后端、改为必填（P6M3-D16；见 ROADMAP P6 段「后端策略」/
 #   doc/P6/README.md D10）。检查须在 set(... CACHE ...) 之前——-D 传入时 CMake 已先建缓存项、
 #   DEFINED 为真；未传则此处未定义、直接 fail-fast。脚本经 --backend 传入。

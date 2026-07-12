@@ -52,8 +52,8 @@
 | 环形缓冲区（绕圈覆盖 + 头部回收 + 写满兜底） | P5M5 | 回收依赖快照；M2 只做线性追加，假定 WAL 不写满 |
 | 崩溃恢复 / WAL 重放 / `RebuildFromActive` | P5M6 | M2 的 WAL 是"只写"；读回重建索引在 M6 |
 | recover 模式下的 WAL（重放已有日志 + 续写） | P5M6 | M2 的 WAL 追加只做在 create 模式 |
-| 真正的 TRIM（异步批量 BLKDISCARD） | P7 | M2 沿用 `TrimDeviceBlock` 空桩；TRIM 是纯优化，不影响正确性 |
-| WAL 的 io_uring 异步化 / 零拷贝 | P7 | 需多线程并发让深队列/批量有意义；详见 §11 |
+| 真正的 TRIM（异步批量 BLKDISCARD） | 性能兑现阶段 | P7 沿用并迁移空桩，未实现实际 discard；TRIM 是纯优化，不影响正确性 |
+| WAL 深度异步化 | 性能兑现阶段 | P7 仍由 reactor 同步调用 WAL；P9M8/M9 先完成专用设备抽象和 SPDK 同步式 completion 轮询 |
 | 故障注入测试矩阵（断电、EINTR、熵失败） | 后续 | 需要故障注入基础设施 |
 
 ---
@@ -66,8 +66,10 @@
 - **`common/structs.h`**：`kValueSize`(1 MiB)、`kDataRegionOffset`(8K)、`BlockId`、`ValueMeta`；以及 P5 早期的 WAL 帧**占位**常量（注释写明"届时迁入 wal 模块"）——M2 替换之。
 - **`common/error_code.h`**：`kWalBase = -103000` 段**为空**，正是留给 WAL 运行期错误的。
 - **`engine/options.h`**：`WalLevel { Strict=1, ValueSync=2, WalSync=3, Async=4 }`；`Options.wal_level` 默认 `WalSync`（占位，按 P5M1 约定 **M3 起真正生效**）。
-- **`engine/engine.cpp`**：`Put`/`Delete` 当前**不写 WAL**；`TrimDeviceBlock` 是 P7 空桩。
-- **`io/*`**：`IoBackend::Write(block_idx, buf)` 写 1 MiB 块，物理偏移 `kDataRegionOffset + block_idx*kValueSize`，已加 `block_idx` 越界守卫；当前写无 FUA。
+- **`engine/engine.cpp`**：`Put`/`Delete` 当前**不写 WAL**；`TrimDeviceBlock` 当时预留给 P7，P7 迁入 reactor 后仍为空桩。
+- **`io/*`**：P5M2 时 `IoBackend::Write(block_idx, buf)` 写 1 MiB 块，物理偏移
+  `kDataRegionOffset + block_idx*kValueSize`，并有 `block_idx` 越界守卫；P8M4 后写参数已升级为
+  `IoWriteBuffer` 描述符，物理布局与越界语义不变。
 
 ---
 
@@ -84,7 +86,7 @@
 | **P5M2-D7** | value 持久写 | 级别 1 下 value 必须 FUA 持久后才返回;**"持久"是 `Write` 的语义保证**,机制随后端实现(M2:sync 与 io_uring 后端都用 `fdatasync`),不向 `Engine` 暴露独立的 `fdatasync` 方法 |
 | **P5M2-D8** | 写满兜底 | M2 **不判 WAL 满**(线性只增,假定不满);环形缓冲 + 头部回收 + 写满兜底 → M5。自然兜底:写过设备尾 `RawDevice` 返回 `kIoBase`(失败安全,不静默损坏) |
 | **P5M2-D9** | create/recover | WAL 追加只做在 **create 模式**(从偏移 8K 开空日志,`seq` 从 1);recover 的重放 + 续写 → M6 |
-| **P5M2-D10** | 块回收 | 沿用 `TrimDeviceBlock` 空桩(P7 做真 TRIM);**Put 的旧块在提交成功后才回收**(覆盖安全);Delete 的块在墓碑帧落盘后回收 |
+| **P5M2-D10** | 块回收 | 沿用 `TrimDeviceBlock` 空桩(P7 未实现真 TRIM，继续归性能兑现阶段);**Put 的旧块在提交成功后才回收**(覆盖安全);Delete 的块在墓碑帧落盘后回收 |
 | **P5M2-D11** | M2 的级别取值 | M2 只实装级别 1;`Options.wal_level` 的分级 **M3 起生效**,M2 阶段 WAL 统一按级别 1（最严格）运行 |
 
 ---
@@ -281,7 +283,7 @@ namespace cabe {
 > （提前刷出不再留块尾空洞）。详见 `P5M5_wal_ring_design.md` §5~§7。
 
 要点：
-- **公共只有 `Open` / `WriteWal` / `Close` / `Flush`**；`Append`/`Sync` 私有。级别策略封装在 `WriteWal` 内部——M2 即"`Append` + `Sync`"（级别 1）；P5M3 按级别分支（同步档每帧落盘；攒批档只 `Append`、靠攒满/Close/切档收紧触发 `Flush()`，后台刷出推迟 P7）。（P6M1 演进注：同步档分支改提交组路径——push + 当选裁决 + 批量落盘，公共接口与"落盘才返回"承诺不变；并发 `WriteWal` 自此受协议保护。）
+- **公共只有 `Open` / `WriteWal` / `Close` / `Flush`**；`Append`/`Sync` 私有。级别策略封装在 `WriteWal` 内部——M2 即"`Append` + `Sync`"（级别 1）；P5M3 按级别分支（同步档每帧落盘；攒批档只 `Append`、靠攒满/Close/切档收紧触发 `Flush()`，后台刷出在 P7 仍未实现，归性能兑现阶段）。（P6M1 演进注：同步档分支改提交组路径——push + 当选裁决 + 批量落盘，公共接口与"落盘才返回"承诺不变；并发 `WriteWal` 自此受协议保护。）
 - **职责划分**：调用方给逻辑内容（type/key/block/value_crc/timestamp）；`Wal` 拥有 `seq`、帧 CRC、设备偏移、4K 块缓冲——`Engine` 看不到裸设备（满足 D2）。
 - **移动语义**：`DeviceContext` 会被 `std::move` 进 `devices_`，故 `Wal` 必须可移动且移动时置空源 `dev_`/`cur_buf_`，避免双重 close / 双重 free（与 `RawDevice`/`IoBackend` 同款）。
 - （备注）公共 `Flush()` 在 **P5M3** 新增（攒批档刷出 / 切档收紧 / Close 用）；M4 快照前"强制刷净 WAL 缓冲"复用它;M2 不需要(级别 1 每帧即落盘)。
@@ -440,11 +442,11 @@ add_library(cabe::wal ALIAS cabe_wal)
 
 WAL 的 I/O 机制分两层:**底层机制**(P5:`RawDevice` 同步) 与 **上层语义**(`Wal`=4K 帧 / `IoBackend`=1MiB 块)。语义接口固定,机制随后端/时代可换。
 
-### 11.1 并行化（P7）
+### 11.1 并行化的后续落点（P7 实际结果与 P9 路线）
 
 - 现在 cabe 单线程同步:同一时刻最多一个写在飞,无并发可批量,所以 WAL 用同步 `RawDevice` 即可。
-- P7 多线程 + 深队列后,WAL 才值得 io_uring 异步化:**提交不阻塞 + 完成通知(cqe)告知落盘**,多写并发各自独立确认。
-- 届时"快内存操作与慢 WAL IO 重叠"才可能:异步发 WAL → 同时干别的 → 等 WAL 完成 → 返回。注意:即便异步,**改内存仍应在 WAL 确认落盘之后**(失败一致性)。
+- P7 建立了多线程 reactor，但每个 WAL 仍由所属 reactor 单线程同步调用，没有引入 io_uring 深队列或多请求在飞。
+- P9M8/M9 先把 WAL 迁移到专用设备抽象和 SPDK 适配，首轮使用 DMA 缓冲区 + 同步式 completion 轮询；I/O 重叠、多请求在飞与独立 poller 继续归性能兑现阶段。
 
 ### 11.2 持久机制随后端可换
 
@@ -453,19 +455,19 @@ WAL 的 I/O 机制分两层:**底层机制**(P5:`RawDevice` 同步) 与 **上层
 | 后端 | value 持久机制 | 顺带 |
 |---|---|---|
 | sync（M2） | `pwrite` + `fdatasync` | 简单、正确、与超级块一致 |
-| io_uring（P7） | 写 SQE 带 `RWF_DSYNC`(单笔 FUA) + 注册缓冲 | 并行 + 零拷贝 + 单 op 持久 |
-| spdk（更远） | NVMe Write + FUA 位 + hugepage DMA | 用户态、零拷贝、单命令持久 |
+| io_uring 深度异步（性能兑现阶段） | 写 SQE 持久化语义 + 注册缓冲 + 多请求在飞 | P7/P8 未实现 WAL 侧深度异步 |
+| SPDK（P9） | SPDK DMA 缓冲区 + NVMe Write / Flush；同步边界由 controller 的 Flush 与易失写缓存能力共同决定 | 用户态轮询；不能把 write completion 一概解释成持久化完成 |
 
 - `fdatasync` / NVMe Flush = 整盘刷、阻塞屏障,适合"攒一批再一次刷";`RWF_DSYNC` / NVMe FUA = 每笔自带持久、完成通知确认,天然配合并发。
-- **SPDK 不同点**(待接入 SPDK 时再确认):用户态 NVMe 驱动,无 fd / `pwrite` / `fdatasync`,直接发 NVMe 命令,落盘靠命令的 FUA 位或 Flush 命令。
-- WAL 的 io_uring 优化亦同:走**共享的底层异步原语**(`RawDevice` 的异步兄弟),**不经 IoBackend 块 API**(语义不匹配);`Wal` 公共接口不变,只换内部机制。
+- **P9 最新落点**：WAL 从 `RawDevice` 迁移到 WAL 专用设备抽象，Raw 与 SPDK 分别适配；不经 value/data 的 1 MiB `IoBackend`。SPDK 适配使用 DMA 可用缓冲区和 NVMe 命令，P9 初期采用同步式 completion 轮询。
+- **持久化能力判断**：设备支持 Flush 时发送 NVMe Flush；不支持 Flush 但明确没有易失写缓存时，可把 write completion 作为同步边界；否则同步 WAL 语义不成立，Open 或切档必须失败。
 
 ### 11.3 其它推迟项
 
-- **零拷贝**：io_uring 注册缓冲 / SPDK 的 DMA 缓冲;与持久机制正交,但 `RWF_DSYNC`/FUA 能与之融成一个 op。P7。
+- **零拷贝**：P8 先完成 value 路径的 `ValueBuffer` / 注册缓冲区协议；P9 再让 SPDK 下提交的 WAL payload 来自 Cabe 可识别的 DMA 可用内存。内存来源与持久化能力判断仍是两个独立维度。
 - **环形缓冲 + 头部回收 + 写满兜底**：依赖快照,P5M5。
 - **崩溃恢复 / WAL 重放 / recover 续写**：P5M6。重放用 `seq` 定边界、消环形区绕圈歧义。（P5M6 注：已设计落定——两遍扫描 + 走读单判据"下一槽=下一 seq"，见 P5M6 稿。）
-- **真正的 TRIM**：异步批量 `BLKDISCARD`,P7;M2 沿用空桩。
+- **真正的 TRIM**：异步批量 `BLKDISCARD`；P7 沿用空桩，继续归性能兑现阶段。
 - **WAL 缓冲区大小运行时可调**：P5M3 已定缓冲大小 Open 时定死、运行期固定；运行时改大小进一步推迟到未来 Options 维护接口。
 
 ---

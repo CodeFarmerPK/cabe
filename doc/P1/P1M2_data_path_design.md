@@ -53,8 +53,8 @@
 
 | 推迟项 | 落点 | 原因 |
 |---|---|---|
-| IoBackend 抽象层 | **P3** | P1 不做抽象——直接 pwrite / pread；P3 引入接口后 sync / io_uring / spdk 各自实现 |
-| RAII BufferHandle（零拷贝所有权） | **P8** | P1 用 Allocate / Free 原始指针即够；P8 零拷贝才需要所有权转移语义 |
+| IoBackend 抽象层 | **P3 / P4 / P9** | P1 直接 pwrite / pread；P3 引入抽象与 sync 实现，P4 接入 io_uring，P9 接入 `SpdkIoBackend`；WAL、snapshot 和超级块在 P9 使用各自设备抽象适配 SPDK |
+| RAII `ValueBuffer`（零拷贝所有权） | **P8** | P1 用 Allocate / Free 原始指针即够；P8 最终落地 value 专用 `ValueBuffer`，未采用旧占位名 `BufferHandle` |
 | BufferPool 容量可配 | **P2** | P1 硬编码 16 块；P2 冻结 Options 时按需加 `pool_blocks` 字段 |
 | FreeList / MetaIndex | **P1M3** | 本里程碑只做 buffer + I/O 层 |
 
@@ -80,8 +80,8 @@
 | **P1M2-D1** | 对齐策略：编译期常量 `kPageSize = 4096` | 运行时 `getpagesize()` | Fedora 43 x86_64 页大小固定 4096；运行时探测增加复杂度无收益 | 锁定 |
 | **P1M2-D2** | O_DIRECT 协作：所有 I/O 全走 BufferPool 分配的对齐 buffer | 部分小读绕过 pool | cabe 只有 1 MiB 整块 I/O，没有"小读"场景 | 锁定 |
 | **P1M2-D3** | 测试环境：loop 设备（128 GiB）+ `scripts/mkloop.sh`；测试读 `CABE_TEST_DEVICE` 环境变量，未设置时 GTEST_SKIP | 文件 + O_DIRECT（tmpfs 不支持）/ 真实 NVMe（需有空闲设备） | loop 设备支持 O_DIRECT + 不需要真实 NVMe + 容量充足（128 GiB = 131072 个 BlockId） | 锁定 |
-| **P1M2-D4** | BufferPool API：`Allocate() → std::byte*`（池满返 nullptr）/ `Free(buf)` | RAII BufferHandle（P1 过度）/ 返回 span（无所有权语义） | P1 最简；Engine 在同一函数里 Allocate→I/O→Free，不会忘记归还；P8 再引入 RAII | 锁定 |
-| **P1M2-D5** | BufferPool 容量：硬编码 `kDefaultPoolBlocks = 16`（16 块 × 1 MiB = 16 MiB） | Options 可配（P1 Options 还不冻结）/ 按设备大小算（过度） | P1 单线程同时最多用 1-2 块；16 块留足余量；P7 多线程时再调 | 锁定 |
+| **P1M2-D4** | BufferPool API：`Allocate() → std::byte*`（池满返 nullptr）/ `Free(buf)` | RAII `ValueBuffer`（P1 过度）/ 返回 span（无所有权语义） | P1 最简；Engine 在同一函数里 Allocate→I/O→Free，不会忘记归还；P8 另行引入 value 专用 RAII 对象 | 锁定 |
+| **P1M2-D5** | BufferPool 容量：硬编码 `kDefaultPoolBlocks = 16`（16 块 × 1 MiB = 16 MiB） | Options 可配（P1 Options 还不冻结）/ 按设备大小算（过度） | P1 单线程同时最多用 1-2 块；P7 最终通过 reactor 单线程所有权继续安全复用该池；P8 另建可配置 `ValueBufferPool` | 锁定 |
 
 ---
 
@@ -205,7 +205,8 @@ void BufferPool::Free(std::byte* buf) {
 
 - `Allocate()` 池满返回 `nullptr`——调用方（Engine）检查后返回错误码（不 abort）。
 - `Free()` 不做越界校验（P1 信任内部代码——设计原则"只在系统边界做校验"）。
-- P7 多线程时这两个方法需加锁或换无锁结构——P1 单线程不需要。
+- P7 最终没有给这两个方法加锁或改原子结构：每个 `BufferPool` 归所属 reactor 单线程独占，
+  通过所有权分区消除并发访问。P8 的公开值缓冲区另由无锁 `ValueBufferPool` 管理。
 
 **Move 语义**：
 ```cpp
@@ -458,19 +459,19 @@ sudo ./scripts/mkloop.sh create
 export CABE_TEST_DEVICE=/dev/loopN   # 按 mkloop 输出的设备名
 
 # 2. 快速验证（默认 Debug）
-./scripts/run-tests.sh
+./scripts/run-tests.sh --backend=sync
 
 # 3. 四档回归
-./scripts/run-tests.sh --asan
-./scripts/run-tests.sh --tsan
-./scripts/run-tests.sh --ubsan
-./scripts/run-tests.sh --release
+./scripts/run-tests.sh --backend=sync --asan
+./scripts/run-tests.sh --backend=sync --tsan
+./scripts/run-tests.sh --backend=sync --ubsan
+./scripts/run-tests.sh --backend=sync --release
 
 # 4. clang++ 交叉验证（可选）
-./scripts/run-tests.sh --compiler=clang++
+./scripts/run-tests.sh --backend=sync --compiler=clang++
 
 # 5. 覆盖率
-./scripts/run-coverage.sh --strict
+./scripts/run-coverage.sh --backend=sync --strict
 
 # 6. 清理 loop 设备
 sudo ./scripts/mkloop.sh cleanup
@@ -485,7 +486,7 @@ sudo ./scripts/mkloop.sh cleanup
 | loop 设备需要 root / sudo | `losetup` 需要特权；CI 容器可能受限 | `mkloop.sh` 用 `$SUDO` 自适应；CI 暂未接入（M6-D1 推迟）；本地开发时 sudo 可接受 |
 | O_DIRECT 对 tmpfs 不兼容 | `/tmp/` 通常是 tmpfs——P1M1 的测试路径不再可用 | 改用 `CABE_TEST_DEVICE` + GTEST_SKIP；BufferPool 纯内存测试不需要设备 |
 | BufferPool 分配失败 abort | 系统级故障（16 MiB 都分不出） | `CABE_LOG_FATAL` + `abort()`——比返回错误码更诚实（"分配不到内存继续跑不下去"） |
-| `Free()` 无越界校验 | 传入非 pool 分配的指针 → 未定义行为 | P1 信任内部代码；P7 多线程时加 debug assert |
+| `Free()` 无越界校验 | 传入非 pool 分配的指针 → 未定义行为 | P1 信任内部代码；P7 通过 reactor 私有所有权限制调用面，未新增 debug assert |
 | 128 GiB loop 设备镜像磁盘占用 | `fallocate` 创建稀疏文件——磁盘按需占用；但 P1M4 端到端写大量数据后可能占满 | `/var/tmp/` 通常在根分区；用户可通过 `IMG_PATH` 指定别的位置 |
 | short write / short read | O_DIRECT 对块设备不产生 short write；但如果设备故障或文件系统层出错可能 | 返回 `err::kIoBase` 错误码——P1 不重试 |
 
@@ -498,7 +499,7 @@ sudo ./scripts/mkloop.sh cleanup
 | **P1M3** | `BufferPool::Allocate()` 分配对齐 buffer → 供 FreeList / MetaIndex 做 I/O 操作用；`WriteBlock` / `ReadBlock` 供 Put / Get 路径调用 |
 | **P1M4** | 端到端路径：`pool.Allocate()` → 填 value → `WriteBlock(fd, block_idx, buf)` → `pool.Free(buf)` 完整链路可用 |
 | **P3** | `WriteBlock` / `ReadBlock` 可直接被 `IoBackend::Write` / `IoBackend::Read` 替代——接口签名一致（fd + block_idx + buf）；BufferPool 独立于 IoBackend，不受抽象层改造影响 |
-| **P8** | `BufferPool` 的 `Allocate / Free` 可被 `BufferHandle` RAII 包装替代——接口扩展而非重写 |
+| **P8** | 保留 reactor 私有 `BufferPool` 作为复制回退池，另行新增公开 RAII `ValueBuffer` 与内部 `ValueBufferPool`；不是对旧 `BufferPool` 的简单包装替代 |
 
 ---
 

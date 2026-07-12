@@ -137,9 +137,10 @@ M6 配码原则立为后续惯例：**码的粒度跟运维动作走（查设备
 
 | 推迟项 | 流向 | 出处 |
 |---|---|---|
-| WAL/快照 I/O 异步化（io_uring 化）、后台快照线程、定时刷出（`wal_flush_interval_ms`）、定时快照（`snapshot_interval_sec`） | **P7** | P5-D7 / M3 / M4 |
-| TRIM 统一设施（数据盘 `TrimDeviceBlock` + WAL `TrimReclaimedRange` 两处空桩；恢复侧"帧从不被清除"前提届时对账） | **P7** | P4.5 / M5-D15 / M6-D11 |
-| 模糊/无锁一致快照（消除冻结写者尖刺）、`covered_seq` 改"已提交水位"、并发恢复 | **P7** | M4-D10/D14 |
+| WAL / snapshot 设备机制迁移 | **P9M8~P9M11**：分别引入专用设备抽象和 SPDK 适配；盘上格式与恢复算法不变 | P5-D7 / M3 / M4；P9-D16~D18 |
+| 后台快照线程、定时刷出（`wal_flush_interval_ms`）、定时快照（`snapshot_interval_sec`） | 后续性能阶段 | P7 已建立 reactor，但未兑现这些性能债务 |
+| TRIM 统一设施（数据盘 `TrimDeviceBlock` + WAL `TrimReclaimedRange` 两处空桩；恢复侧"帧从不被清除"前提届时对账） | 后续性能阶段 | P4.5 / M5-D15 / M6-D11；P7-D13 继续推迟 |
+| 模糊/无锁一致快照（消除冻结写者尖刺）、`covered_seq` 改"已提交水位"、并发恢复 | 后续性能阶段 | M4-D10/D14；P7-D13 继续推迟 |
 | 运行时改 `wal_buffer_size` | 未来 Options 维护接口 | M3 |
 | 运维逃生口（强制丢 WAL 按快照恢复等灾难处置） | **P12 `cabe-fsck`** | M6 议题 7.2 |
 | 指标接口 | 推迟（P12 Metrics 导出自然承接） | P5-D6 |
@@ -155,9 +156,9 @@ M6 配码原则立为后续惯例：**码的粒度跟运维动作走（查设备
 | 1 | 三设备超级块 + create/recover + 校验 | ✅ M1（M6 起 recover 为完整恢复链） |
 | 2 | WAL 模块、128B 帧、四级全生效、默认级别 3 | ✅ M2+M3 |
 | 3 | MetaIndex 快照 + 设备布局 + 触发 | ✅ M4 |
-| 4 | 环形回收 + 写满兜底（`kWalFull` 救援契约；TRIM 留桩→P7） | ✅ M5 |
+| 4 | 环形回收 + 写满兜底（`kWalFull` 救援契约；TRIM 留桩，P7 后仍未实现） | ✅ M5 |
 | 5 | 崩溃恢复跑通——基础恢复 + 损坏注入测试全绿 | ✅ M6（30 例 + §8 全矩阵） |
-| 6 | Engine 集成、Options 扩展、`Engine::Snapshot()` | ✅ M3/M4/M6（恢复类占位字段全部清账，Options 仅余 P7 的两个定时字段存而不用） |
+| 6 | Engine 集成、Options 扩展、`Engine::Snapshot()` | ✅ M3/M4/M6（恢复类占位字段全部清账；两个定时字段在 P7 后仍存而不用，归性能兑现阶段） |
 | 7 | P2 文档更新（Options 破坏冻结说明） | ✅ 随各里程碑滚动完成（P2M1 含 M5/M6 两轮冻结追加注） |
 | 8 | P5M7 收敛稿审阅通过 + 状态同步 | ✅ 本稿 + §11 |
 

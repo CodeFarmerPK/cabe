@@ -77,8 +77,7 @@ P7 简单版**没有 io_uring 专属的异步并发面**——io_uring 后端还
 | M4 | 多设备 | `P7M4_multi_device_design.md` | M | ✅ 已实装 |
 | M5 | 故障隔离 + 收敛 | `P7M5_isolation_convergence_design.md` | S | ✅ 已实装 |
 
-> **里程碑命名为暂定**，最终标题随各里程碑 grill 时确定。M1 拆出"读路径"单独成一刀，是把 P7 最难调的
-> 异步机制隔离进最薄的一刀，也是最早可运行、可观察的产物（详见 P7-D12）。
+> 里程碑标题现已由 M1～M5 详细设计固定。M1 拆出“读路径”单独验证异步机制，详见 P7-D12。
 
 ## 里程碑依赖
 
@@ -114,6 +113,10 @@ P7M1 ──► P7M2 ──► P7M3 ──► P7M4 ──► P7M5      （严格�
 | P7-D12 | 里程碑划分 | **5 个严格串行**（M1 读路径机制 → M2 写路径 → M3 单设备多线程 → M4 多设备 → M5 隔离+收敛）。M1 拆出读路径单证异步机制：它是 P7 最难调的层、也是最早可运行可观察的产物；写路径 M2 再搬。 |
 | P7-D13 | P7 之外推迟 | 流水线及其债务（committed_seq / BufferPool 跨线程 / RWF_DSYNC / 模糊快照 / 同 key 乱序）、R>1（device 内再分区）、TRIM（用户确认 P7 不做）、钉核·NUMA·false-sharing·spin-then-wait、io_uring 真异步·SQPOLL·DEFER_TASKRUN、group commit 拆壳——全留**性能兑现轮**。 |
 
+> **P8/P9 生命周期演进**：P7 的 Open/Close 排他是当时调用方并发契约。P8 在此基础上增加严格
+> 资源边界：`Close()` 先阻止新资源请求并等待已分配 `ValueBuffer` 释放，完成后不得有旧打开周期
+> 的读写删、缓冲区分配、块分配或后端资源访问。P9 SPDK 生命周期继续遵守这一严格边界。
+
 ## 各里程碑范围
 
 ### P7M1（reactor 机制 · 读路径）—— N=1，单 reactor，单调用线程
@@ -131,7 +134,7 @@ P7M1 ──► P7M2 ──► P7M3 ──► P7M4 ──► P7M5      （严格�
 泄漏；④ **caller↔reactor 跨线程交接 race-free**（sync + TSAN）；⑤（观察）单线程 Get 的 p50，只记录、
 不卡门槛。
 
-**待梳理决策点**（留 M1 grill）：OpNode 精确字段布局；reactor 收尾序列与 wait 循环的精确写法；Reactor
+**设计前问题（已由 P7M1 定案）**：OpNode 精确字段布局；reactor 收尾序列与 wait 循环的精确写法；Reactor
 类接口；Open 失败 / 起线程失败的精确清理。
 
 ### P7M2（写路径入 reactor）—— N=1，单 reactor，单调用线程
@@ -149,7 +152,7 @@ Delete-then-Put、capacity exhaustion（`kEngineNoSpace`）、CRC 比对等现�
 ③ recover 后经 reactor 跑写路径 + 再 recover，数据一致；④ 写路径交接 race-free（sync+TSAN）；
 ⑤（观察）单线程 Put/Get/Delete p50。
 
-**待梳理决策点**：写路径搬迁时 buffer / 时间戳 / 旧块回收时序的精确照搬；`SetWalLevel` 的 per-reactor
+**设计前问题（已由 P7M2 定案）**：写路径搬迁时 buffer / 时间戳 / 旧块回收时序的精确照搬；`SetWalLevel` 的 per-reactor
 Options 副本布局与"收紧档先刷自己的 wal"的落点。
 
 ### P7M3（单设备多线程）—— N=1，单 reactor，多调用线程
@@ -169,7 +172,7 @@ Options 副本布局与"收紧档先刷自己的 wal"的落点。
 ③ 多线程下数据一致（并发 Put/Get/Delete + recover，盘面/索引一致）；④（观察）多 caller 单 reactor
 吞吐——R=1 单 reactor 就是串行、吞吐≈单线程，不指望扩展（扩展是 M4 加设备）。
 
-**待梳理决策点**：并发测试的形态（直打 reactor 还是经 Engine 公开 API）；§5.3 三竞态的具体测试场景。
+**设计前问题（已由 P7M3 定案）**：并发测试的形态（直打 reactor 还是经 Engine 公开 API）；§5.3 三竞态的具体测试场景。
 
 ### P7M4（多设备）—— N≥2，每 device 一个 reactor，R=1
 
@@ -188,7 +191,7 @@ recover 后数据一致（含跨重启 Put/Delete/Snapshot）；③ 运营口 fa
 聚合）；④ 三处一致化无错位（路由到设备 i 取到的块 `dev()==i`）；⑤（观察）QPS 随设备数扩展——只记录，
 loop 设备上这数不可信，真盘留 P11。
 
-**待梳理决策点**：三处一致化的具体改动顺序与断言落点；运营口 fan-out 的 scatter-gather 实现；多设备
+**设计前问题（已由 P7M4 定案）**：三处一致化的具体改动顺序与断言落点；运营口 fan-out 的 scatter-gather 实现；多设备
 恢复是串行驱动还是并行。
 
 ### P7M5（故障隔离 + 收敛）—— N≥2，R=1
@@ -204,7 +207,7 @@ share-nothing by-construction 保证（隔离演示）；
 ② 等待者不孤儿（reactor 停止必唤醒所有挂着的调用线程，Close 路径已证）；③ P7 全量回归（sync 四档 +
 io_uring；TSAN 在 sync）全绿；④ 收敛稿审阅通过 + 状态同步。
 
-**待梳理决策点**：隔离演示的具体明显故障手法；收敛稿形态（薄索引，参照 P5M7/P6M3）。
+**设计前问题（已由 P7M5 定案）**：隔离演示的具体明显故障手法；收敛稿形态（薄索引，参照 P5M7/P6M3）。
 
 ## P7 之外（留性能兑现轮）
 
@@ -224,8 +227,8 @@ io_uring；TSAN 在 sync）全绿；④ 收敛稿审阅通过 + 状态同步。
 4. 故障隔离：一个设备明显故障不连累其它；等待者不孤儿（M5）
 5. P7 全量回归全绿（sync 四档 + io_uring；TSAN 在 sync）+ 收敛稿落定（M5）
 
-> 两条性能红线（单线程 p50≤10%、多线程 QPS≥70%×N）作**观察项**，每里程碑测了记录、**不作退出门槛**
-> （P7-D2）；真盘上的规模/带宽度量留 P11。
+> 两条性能红线（单线程 p50≤10%、多线程 QPS≥70%×N）作**观察项**、不作退出门槛。
+> P7 原始 JSON 后续已归档到 `bench/baselines/p7/`，但来自 loop 设备，不据此验证红线；真盘规模与带宽度量留 P11。
 
 ## 验证策略
 
@@ -236,11 +239,12 @@ io_uring；TSAN 在 sync）全绿；④ 收敛稿审阅通过 + 状态同步。
 - 检测器矩阵沿用 cabe 既定：sync 四档（asan/tsan/ubsan/release）+ io_uring（asan/ubsan/release），
   io_uring + TSAN 排除。
 
-## 与 P11 的分界
+## 与 P11 / P12 的分界
 
-P7 = **把多设备做出来**（架构/能力，小 N、loop 设备、正确性优先）；P11 = **在真盘上大规模验证 + 运维**
-（N≥8、聚合带宽线性度、key 分布偏斜、深度故障隔离、运维文档），**不新增架构**。多设备的规模/性能度量
-天然属 P11（真盘上才有意义），与 P7 不纠结性能的取向一致。
+P7 = **把多设备做出来**（架构/能力，小 N、loop 设备、正确性优先）；P11 = **在真盘上做大规模、带宽和
+深度故障隔离验证**（N≥8、聚合带宽线性度、key 分布偏斜），并记录与这些验证直接相关的设备配置和
+故障处置。通用可观测性、命令行运维工具和完整运维手册归 P12。多设备的规模/性能度量天然属 P11，
+与 P7 不纠结性能的取向一致。
 
 ## 关键技术备忘
 

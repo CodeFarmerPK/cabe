@@ -452,8 +452,8 @@ static_assert(kEngineNotImplemented > kEngineBase - kSegmentSize);
 1. `cmake -S . -B build -G Ninja -DCMAKE_CXX_COMPILER=g++ -DCABE_BUILD_TESTS=ON && cmake --build build`
    —— 确认 `cabe_engine` 编译通过。
 2. `ctest --test-dir build` —— 确认新增的 `test_engine` / `test_status` 用例全绿。
-3. `./scripts/run-tests.sh --asan && ./scripts/run-tests.sh --tsan && ./scripts/run-tests.sh --ubsan && ./scripts/run-tests.sh --release` —— 四档回归。
-4. `./scripts/run-coverage.sh --strict` —— 覆盖率 ≥ 80%。
+3. `./scripts/run-tests.sh --backend=sync --asan && ./scripts/run-tests.sh --backend=sync --tsan && ./scripts/run-tests.sh --backend=sync --ubsan && ./scripts/run-tests.sh --backend=sync --release` —— 当前四档回归口径。
+4. `./scripts/run-coverage.sh --backend=sync --strict` —— 当前覆盖率口径，要求 ≥ 80%。
 
 ---
 

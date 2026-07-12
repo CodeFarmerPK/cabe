@@ -12,7 +12,7 @@
 | 项 | 值 |
 |---|---|
 | 阶段 / 里程碑 | P2 / M2 |
-| 状态 | **完成稿（待 owner 终审）** |
+| 状态 | **✅ 已锁定（P2M2 收敛）** |
 | 上游依赖 | P2M1（API 审查 + 冻结声明）完成 |
 | 下游依赖本里程碑 | P2 阶段出口；P3 启动闸门 |
 | 退出判定 | 见 §4 |
@@ -26,10 +26,10 @@ P2 阶段只有一个技术里程碑（P2M1），产出为冻结声明文档：
 | 主题 | 锁定结论 | 详见 |
 |---|---|---|
 | 冻结总原则 | 设计意图声明（尽量保持），非绝对约束；全部完工发布后才严格约束 | [P2M1](P2M1_api_freeze_design.md) §1 |
-| 公开 API 符号清单 | Engine 8 方法 + Options / Status / 数据层类型；内部类型（DeviceContext / BufferPool / FreeList / MetaIndex / IO）不在承诺范围（P5 注：按约定追加 `SetWalLevel`/`Snapshot()` 两公开方法；FreeList 已被 P4.5 块分配器取代——均见 P2M1 冻结追加注） | [P2M1](P2M1_api_freeze_design.md) §3 |
-| 错误码空间 | 6 段 × 1000 = 6000 容量，当前用 14 个——充足；尽量保持不改已分配码值（P5M4 注：按 §4.3 约定增设第七段 snapshot(-106000)；P5 终态七段共 36 码，容量依旧宽裕） | [P2M1](P2M1_api_freeze_design.md) §4 |
-| 返回值分层 | 公开 API 用 Status；内部用 int32_t；转换点在 Engine 方法体内 | [P2M1](P2M1_api_freeze_design.md) §5 |
-| Put 持久化承诺 | WAL 保证原子性（P5+）；当前无持久化保证 | [P2M1](P2M1_api_freeze_design.md) §3.1 |
+| 公开 API 符号清单 | P8 起 Engine 有 8 个操作入口，另有 `is_open()` 观察口；7 个操作返回 `Status`，`AllocateValueBuffer` 返回 `ValueBufferResult`。内部类型不在冻结承诺范围 | [P2M1](P2M1_api_freeze_design.md) §3 |
+| 错误码空间 | P2 以 6 段 × 1000 起步；P5M4 增设第七段 snapshot(-106000)，P9-D20 已决定由 P9M1 再增 SPDK 专属段；旧码值保持不变 | [P2M1](P2M1_api_freeze_design.md) §4 |
+| 返回值分层 | 公开状态操作用 `Status`；值缓冲区分配用 `ValueBufferResult`；内部组件用 `int32_t`；转换点在 Engine 方法体内 | [P2M1](P2M1_api_freeze_design.md) §5 |
+| Put 持久化承诺 | P5 起由 WAL 四级策略定义；P8 零拷贝路径不改变该语义，P9 SPDK 路径必须继续保持 | [P2M1](P2M1_api_freeze_design.md) §3.1 |
 
 ---
 
@@ -60,7 +60,7 @@ P2 段头部加 **状态**：✅ 已实施（P2M2 收敛通过）
 
 | 风险 | 缓解 |
 |---|---|
-| P2 无概念验证验证——冻结的 API 未经多 device / reactor / WAL 场景实证 | 各功能实装时（P3/P5/P7/P8）若发现 API 不够用，按冻结总原则改了同步更新文档 |
+| P2 冻结时尚无概念验证 | P3/P5/P7/P8 已分别完成抽象、持久化、reactor/多设备和零拷贝实证；P9 继续按“必要时追加、不破坏既有语义”扩展类型化 SPDK 配置 |
 
 ---
 

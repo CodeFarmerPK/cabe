@@ -19,7 +19,7 @@
 | 阶段 / 里程碑 | P8 / M4 |
 | 状态 | ✅ 已实装 |
 | 上游依赖 | P1 ~ P7 已完成；P8M1 公开 `ValueBuffer` API 已实装；P8M2 `ValueBufferPool` 已实装；P8M3 `Put` 路径选择已实装 |
-| 下游依赖本里程碑 | P8M5 bench、文档与收敛；P10 SPDK 后端 |
+| 下游依赖本里程碑 | P8M5 bench、文档与收敛；P9 SPDK 后端 |
 | 退出判定 | 见 §13 |
 
 ---
@@ -77,7 +77,7 @@
 | 复制回退缓冲区注册 | 不做 |
 | `IoBackend::Read` 描述符升级 | 不做 |
 | 读路径零拷贝公开 API | 后续独立阶段 |
-| SPDK 后端或 SPDK 大页内存真实接入 | P10 |
+| SPDK 后端或 SPDK DMA 可用内存真实接入 | P9 |
 | 批量提交 / 写入流水线化 | 后续性能阶段 |
 | bench 和性能档案归档 | P8M5 |
 
@@ -102,7 +102,7 @@
 | **P8M4-D13** | `io_uring` fixed write | `ValueBufferSlot` 且槽位索引、地址、长度均匹配已注册缓冲区时，使用 `io_uring_prep_write_fixed`；其他写入继续 `io_uring_prep_write`。 |
 | **P8M4-D14** | 资源释放和 move | `io_uring` 后端 `Close` 顺序为：注销注册缓冲区、注销注册文件、销毁 ring、关闭 fd；move 必须完整转移注册状态。 |
 | **P8M4-D15** | 可观测性 | 不新增公开路径统计接口，不新增高频路径日志；通过单测、后端测试、Engine 行为测试和 P8M5 bench 验证。 |
-| **P8M4-D16** | SPDK 预留 | 采用“槽位身份后端中立，后端内部映射”；`io_uring` 用 `slot_index` 映射 registered buffer index，未来 SPDK 用同一槽位身份映射大页 / DMA 可用内存资源。 |
+| **P8M4-D16** | SPDK 预留 | 采用“槽位身份后端中立，后端内部映射”；`io_uring` 用 `slot_index` 映射 registered buffer index，P9 SPDK 用同一槽位身份映射 DMA 可用内存资源。 |
 
 ---
 
@@ -847,8 +847,8 @@ P8M4 完成时必须满足：
 
 | 下游 | 承诺 |
 |---|---|
-| P8M5 | bench 可区分非对齐自备内存、对齐自备内存、Cabe `ValueBuffer` 三类 Put；`io_uring` Release 口径可观察主路径收益。 |
-| P10 SPDK | 可复用 `IoWriteBuffer` 的槽位身份；SPDK 后端内部建立 `slot_index -> 大页 / DMA 资源` 映射；无需改公开 `Put` API。 |
+| P8M5 | bench 可区分非对齐自备内存、对齐自备内存、Cabe `ValueBuffer` 三类 Put并保存原始数据；loop 设备结果不作性能优劣结论。 |
+| P9 SPDK | 可复用 `IoWriteBuffer` 的槽位身份；SPDK 后端内部建立 `slot_index -> DMA 可用内存资源` 映射；无需改公开 `Put` API。 |
 | 未来读路径零拷贝 | P8M4 不提前定义 `IoReadBuffer`；读路径可独立设计公开语义和生命周期。 |
 
 ---

@@ -10,6 +10,9 @@
 >
 > **本文为详细设计**；其中脚本片段为设计示意。
 
+> **P6 后续注**：本文中的命令行片段记录 P0M6 当时存在的默认 sync 后端。P6 已取消默认后端；
+> 当前复跑任何测试或覆盖率命令时都必须显式增加 `--backend=sync|io_uring`。
+
 ---
 
 ## 0. 元信息
@@ -45,7 +48,7 @@
 |---|---|---|
 | **持续集成（CI）工作流** | **不接，待仓库托管确定后单独立项**（不在 P0 路线图剩余里程碑内） | cabe 是实验性 demo，仓库托管未定；owner 拍板砍 CI（见 §3 D-1） |
 | `scripts/run-bench.sh`（微基准脚本） | **不在 M6 讨论**，未来独立交付（与 M7 微基准基线归档配套） | owner 明确"分脚本风格"，bench 用独立脚本；M6 聚焦测试与覆盖率 |
-| `io_uring` / `spdk` 后端实际接入 | **P3+（后端接入）/ P4（io_uring 实装）** | `--backend=` 参数与 TSAN + io_uring 前置拒绝已在脚本层预留；后端实际接入在 P3+（见 §7） |
+| `io_uring` / `spdk` 后端实际接入 | **P4（io_uring）/ P9（SPDK）** | P3 建立抽象和 sync 实现；P4 接入 io_uring；P9 直接基于 SPDK NVMe API 接入，P9M1 才把 `spdk` 接入主构建 |
 | `CMakePresets.json` | **不做（未来可选）** | 本里程碑用脚本即可达成单次调用测试 |
 | `make coverage` CMake custom target | **不做** | 用独立脚本（`run-coverage.sh`）替代；保持"脚本风格"统一 |
 
@@ -96,7 +99,7 @@
   --ubsan           开启 UndefinedBehaviorSanitizer
 
 后端:
-  --backend=NAME    指定 I/O 后端（sync / io_uring / spdk，P3+ 生效）
+  --backend=NAME    指定 I/O 后端（sync=P3 / io_uring=P4 / spdk：P9M1 接构建，P9M6 形成可工作路径）
 
 构建控制:
   --clean           清理对应构建目录后重建（默认增量构建）
@@ -256,7 +259,8 @@ REQUIRED_PKGS=(
 
 **本里程碑处理**：`--backend=NAME` 参数已预留（P3+ 生效），TSAN + io_uring 前置拒绝逻辑已在脚本层实现（P4 D19 预留）——
 
-- `run-tests.sh` 接受 `--backend=sync/io_uring/spdk`，当前阶段 io_uring / spdk 后端尚未接入，参数仅做预留。
+- `run-tests.sh` 接受 `--backend=sync/io_uring/spdk`，在 P0M6 当时 io_uring / spdk 都只是预留；
+  io_uring 后续由 P4 接入，SPDK 在 P9M1 接入构建与配置、到 P9M6 才形成 value/data 可工作后端。
 - 脚本检测到 `--tsan` 与 `--backend=io_uring` 同时传入时直接报错退出（退出码 2）。
 - P4 接入 io_uring 时由 CMake 层同步加 `FATAL_ERROR` 阻断。
 
@@ -312,4 +316,3 @@ REQUIRED_PKGS=(
 | **P1+ 业务模块** | 复用 `scripts/run-tests.sh`：新模块加测试到 `test/<module>/` 即被单次调用自动覆盖（前提是按 P0M5 的 `cabe_add_test` 模式注册）；`--filter REGEX` 可精确选跑新模块用例 |
 | **P4（`io_uring` 接入）** | `--backend=` 参数已预留（P3+ 生效）；脚本层已预留 TSAN + io_uring 前置拒绝（P4 D19）；P4 接入时由 CMake 层同步加 `FATAL_ERROR` 阻断 |
 | **未来接 CI**（不在 P0 路线图） | `run-tests.sh` 与 `run-coverage.sh --strict` 可直接在 CI 容器（Fedora 43 + `setup-dev.sh --ci`）中调用，无需重写；多格验证用多次调用组合即可 |
-

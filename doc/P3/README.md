@@ -1,8 +1,8 @@
 # P3 — IoBackend 与 MetaIndex 抽象层 · 设计文档索引
 
 > P3 阶段目标：把 P1 写死的 I/O 路径和索引实现抽象为 C++20 concept，让后续阶段可以
-> 替换后端（io_uring / SPDK / B+ 树等）而不改 Engine 代码。P3 自身只实装同步默认后端
-> （SyncIoBackend + HashMetaIndex），功能与 P2 等价。
+> 替换后端（io_uring / SPDK / B+ 树等）而不改 Engine 代码。P3 当时实装
+> `SyncIoBackend + HashMetaIndex`，功能与 P2 等价；P6 后 I/O 后端已取消构建默认值，必须显式选择。
 > 阶段总览见根目录 [ROADMAP.md](../../ROADMAP.md) "P3 — IoBackend 与 MetaIndex 抽象层"。
 
 ## 状态
@@ -11,15 +11,17 @@
 
 ## 范围摘要
 
-- `IoBackend` C++20 concept：同步接口 `Write(block_idx, buf)` / `Read(block_idx, buf)`
-- `SyncIoBackend` 默认实现：包装 P1 的 pwrite / pread + O_DIRECT
-- `MetaIndex` C++20 concept：7 个方法（Insert / Lookup / Delete / Size / Contains / ForEach / WriteSnapshot / LoadSnapshot）
-- `HashMetaIndex` 默认实现：包装 P1 的 `unordered_map`（ForEach / WriteSnapshot / LoadSnapshot 为空壳，P5 实装）
-- （P5M4 起 concept 收窄为 5 方法：移除 `WriteSnapshot` / `LoadSnapshot`，`ForEach` 改返回 `int32_t` 可中止——见 P5M4 设计稿）
+- `IoBackend` C++20 concept：P3 时为同步裸缓冲区接口；P8M4 已增加
+  `RegisterWriteBuffers(span<ValueBufferSlotView>)`，并将现行写接口升级为
+  `Write(block_idx, const IoWriteBuffer&)`；读接口保持普通可写缓冲区
+- `SyncIoBackend`：P3 当时的默认实现，包装 P1 的 pwrite / pread + O_DIRECT；P6 后仅作正确性回归
+- `MetaIndex` C++20 concept：P3 时为 8 个方法（Insert / Lookup / Delete / Size / Contains / ForEach / WriteSnapshot / LoadSnapshot）
+- `HashMetaIndex`：包装 P1 的 `unordered_map`；P5M4 已实装可中止 `ForEach`，并把 snapshot I/O 移出索引后端
+- （P5M4 起 concept 收窄为现行 6 方法：移除 `WriteSnapshot` / `LoadSnapshot`，`ForEach` 改返回 `int32_t` 可中止——见 P5M4 设计稿）
 - DeviceContext 改为持有抽象层实现
 - Engine 通过 concept 接口调用（功能不变）
 - CMake `CABE_IO_BACKEND` / `CABE_META_INDEX` 编译期分派生效
-- **不做**：BufferHandle（P8）/ 伪 SPDK（P10）/ 异步接口（P4）/ Snapshot 实装（P5）
+- **不做**：ValueBuffer（P8）/ 伪 SPDK（P9）/ 异步接口（P4）/ Snapshot 实装（P5）
 
 ## 里程碑文档清单
 
@@ -42,19 +44,19 @@ P3M1 ──► P3M2 ──► P3M3 ──► P3M4
 
 1. ✅ P2 全部完成（API 冻结声明通过）
 2. ✅ P3 决策 D1-D5 锁定
-3. ⏳ 用 `/grill-with-docs P3M1` 开第一个里程碑的文档设计
+3. ✅ P3M1～P3M4 详细设计、实现与收敛全部完成
 
 ## 已知决策（已锁定）
 
 | 编号 | 决策 | 结果 |
 |---|---|---|
 | P3-D1 | IoBackend 接口模型 | 同步 `Write` / `Read`；无 poll 模型；io_uring / SPDK 内部异步对 Engine 透明 |
-| P3-D2 | BufferHandle | 推到 P8；P3 继续用裸指针 |
-| P3-D3 | MetaIndex concept 方法列表 | 全部 7 个方法（含 ForEach / WriteSnapshot / LoadSnapshot 空壳） |
+| P3-D2 | `ValueBuffer` | 推到 P8；P3 继续用裸指针。P8 最终采用 value 专用 `ValueBuffer`，旧占位名 `BufferHandle` 废弃 |
+| P3-D3 | MetaIndex concept 方法列表 | P3 时全部 8 个方法（含 ForEach / WriteSnapshot / LoadSnapshot 空壳）；P5M4 后为 6 个 |
 | P3-D4 | 伪 SPDK / Mock | 不做；P3 只关注抽象层 + 默认实现 |
 | P3-D5 | 里程碑划分 | 4 个 milestone（IoBackend → MetaIndex → Engine 切换 → 收敛） |
 
-## 各里程碑待梳理的决策点
+## 各里程碑设计前梳理的决策点（均已在对应设计稿锁定）
 
 ### P3M1（IoBackend 抽象层）
 

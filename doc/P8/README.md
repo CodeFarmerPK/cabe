@@ -1,6 +1,6 @@
 # P8 - 零拷贝写入路径主路径化 · 设计文档索引
 
-状态：🚧 设计中（P8-D1 ~ P8-D11 已讨论锁定；M1 ~ M4 已实装，M5 待详细设计与实现）
+状态：✅ 已完成（P8-D1～P8-D11 已锁定；P8M1～P8M5 文档、代码、测试与 bench 归档均已完成）
 
 ## 1. 阶段目标
 
@@ -25,14 +25,17 @@ P8 同时支持两类 value 来源：
 | 应用端自行分配的 value 内存 | 条件式零拷贝 | 满足大小、地址、长度、对齐和后端能力要求时，直接写入；否则复制回退。 |
 | Cabe 通过公开分配接口返回的 `ValueBuffer` | 主零拷贝路径 | Cabe 负责分配满足当前后端要求的值缓冲区，应用填充后仍通过统一 `Put` 写入。 |
 
-P8 当前仍基于 `io_uring` 路线实施，但接口和内部抽象必须为未来 SPDK 做准备：
+P9 最新裁决进一步收紧 SPDK 语义：应用端自备普通内存在 SPDK 后端下一律复制到 Cabe 可识别的 DMA
+可用内存；只有 `AllocateValueBuffer(key)` 返回的 Cabe `ValueBuffer` 才是 SPDK 零拷贝主路径。
+
+P8 已基于 `io_uring` 过渡路线完成实施，同时接口和内部抽象按未来 SPDK 方向设计：
 
 - P8 不引入 SPDK 依赖；
 - P8 不实现 SPDK 后端；
 - P8 的 `ValueBuffer`、值缓冲区池和内部写入描述符不得绑定到 `io_uring` 专属概念；
-- 未来 P10 切换 SPDK 时，`ValueBuffer` 应当能够自然映射到 SPDK 大页内存池。
+- P9 接入 SPDK 时，`ValueBufferPool` 底层使用 Cabe 自管的 SPDK DMA 可用内存；应用端不感知 SPDK 分配细节。
 
-后续 Cabe 的零拷贝和高性能 I/O 开发将以 SPDK 为主要方向；`io_uring` 是当前阶段的过渡实现。
+P9 起 Cabe 的零拷贝和高性能 I/O 开发以 SPDK 为主要方向；`io_uring` 是 P8 的过渡实现和 P9 收敛前的回归后端。
 因此 P8M4 只应借 `io_uring` 注册缓冲区验证后端写入描述符和 Cabe 自管值缓冲区主路径，
 不得围绕 `io_uring` 的临时能力扩大公开接口或绑定长期架构。
 
@@ -65,7 +68,7 @@ P8 包含：
 P8 不包含：
 
 - SPDK 后端实现；
-- SPDK 大页内存真实接入；
+- SPDK DMA 可用内存真实接入；
 - 跨进程外部内存导入；
 - 公开“强制零拷贝”写入接口；
 - 公开写入路径统计接口；
@@ -81,7 +84,7 @@ P8 不包含：
 | P8-D2 公开写入接口 | `Put` 语义保持统一，不拆分公开写入接口；路径选择在 Cabe 内部完成，主要落在 `reactor` 写入执行层。 |
 | P8-D3 应用端自备值内存 | 应用端自行分配的 value 进入条件式零拷贝；不满足条件时复制回退，不把“不能零拷贝”暴露为写入错误。 |
 | P8-D4 Cabe 值缓冲区 | 新增 Cabe 分配的 `ValueBuffer`，作为主零拷贝路径；应用填充后仍调用统一 `Put`。 |
-| P8-D5 值缓冲区池抽象 | 新增内部 `ValueBufferPool` 抽象层，负责分配、释放、来源识别、设备归属和后端私有信息。 |
+| P8-D5 值缓冲区池抽象 | 新增内部 `ValueBufferPool` 抽象层，负责分配、释放、来源识别、设备归属和后端中立槽位身份。 |
 | P8-D6 键绑定与设备归属 | `ValueBuffer` 按 key 分配并绑定该 key；后续 `Put` 只有使用同一个 key 且目标设备匹配时才命中主零拷贝路径，否则复制回退。 |
 | P8-D7 后端写入协议 | 内部后端写入协议升级为写入缓冲区描述符，公开 API 不暴露该描述符。 |
 | P8-D8 SPDK 预留边界 | P8 不引入 SPDK，但所有公开接口和内部抽象必须保持后端中立。 |
@@ -113,7 +116,7 @@ flowchart LR
 | P8M2 | `P8M2_value_buffer_pool_design.md` | ✅ 已实装 | 建立内部值缓冲区池抽象，实现每设备 1 MiB 对齐缓冲区管理。 |
 | P8M3 | `P8M3_put_path_design.md` | ✅ 已实装 | 在 `Engine::Put` 到 `Reactor::ExecutePut` 路径中接入零拷贝判断和复制回退。 |
 | P8M4 | `P8M4_backend_write_protocol_design.md` | ✅ 已实装 | 升级后端写入协议，并在 `io_uring` 后端接入注册缓冲区写入。 |
-| P8M5 | `P8M5_bench_convergence_design.md` | ⏳ 待设计 | 补齐 bench、文档、回归测试和 P8 性能档案。 |
+| P8M5 | `P8M5_bench_convergence_design.md` | ✅ 已实装并收敛 | 补齐 bench、文档、回归测试和 P8 原始性能数据归档。 |
 
 ## 7. P8M1 - 公开接口与术语落地
 
@@ -176,9 +179,9 @@ P8M1 退出条件：
 - 支持固定 1 MiB 值缓冲区；
 - 支持 1 MiB 对齐；
 - 支持分配、释放、来源识别、设备归属校验；
-- 支持携带后端私有信息，但不泄漏到公开 API。
+- 支持导出后端中立的设备、池、槽位和代次身份，不向公开 API 泄漏内部信息。
 
-建议职责：
+最终职责：
 
 | 职责 | 说明 |
 | --- | --- |
@@ -186,9 +189,9 @@ P8M1 退出条件：
 | 释放 | `ValueBuffer` 析构或移动赋值时归还池。 |
 | 来源识别 | `Put` 收到 `DataView` 后可判断它是否来自 Cabe 值缓冲区。 |
 | 设备归属 | 判断 `ValueBuffer` 的归属设备是否与本次 `Put` 的目标设备一致。 |
-| 后端信息 | 为 `io_uring` 注册缓冲区和未来 SPDK 大页内存保留内部私有字段。 |
+| 后端身份 | 导出设备、池、槽位和代次；`io_uring` 以槽位索引注册固定缓冲区，P9 再替换底层内存来源，不保存后端私有指针。 |
 
-P8M2 需要明确当前 `BufferPool` 与新 `ValueBufferPool` 的关系。当前 `BufferPool` 仍可保留为复制回退路径的内部临时数据块池；`ValueBufferPool` 是面向零拷贝主路径的新抽象，不应被当前 4 KiB 对齐实现限制。
+`BufferPool` 与 `ValueBufferPool` 的关系最终明确为：`BufferPool` 保留为复制回退路径的内部临时数据块池；`ValueBufferPool` 是面向零拷贝主路径的独立抽象，不受前者 4 KiB 对齐实现限制。
 
 P8M2 详细设计见 `doc/P8/P8M2_value_buffer_pool_design.md`。当前已锁定的补充边界：
 
@@ -222,7 +225,7 @@ P8M3 详细设计见 `doc/P8/P8M3_put_path_design.md`。当前已锁定的补充
 - 路径选择采用两段式：`Engine::Put` 做全局值内存来源预识别，`Reactor::ExecutePut` 做最终写入计划和执行；
 - Cabe `ValueBuffer` 采用键绑定，只有分配 key 与 `Put` key 完全一致时才进入主零拷贝路径；
 - key 不匹配、跨设备 `ValueBuffer`、池内无效地址均复制回退，不作为公开写入错误；
-- 应用端自备内存是否条件式直接写入由后端能力判断；当前 sync / `io_uring` 普通写可按 4 KiB 对齐判断，未来 SPDK 必须验证 DMA 可用内存来源；
+- 应用端自备内存是否直接写入由后端能力判断；当前 sync / `io_uring` 普通写可按 4 KiB 对齐判断；P9 SPDK 下自备普通内存复制回退，Cabe `ValueBuffer` 必须来自可验证的 DMA 可用内存；
 - P8M3 不新增公开路径统计接口，路径规则通过内部单元测试和 Engine 行为测试验证。
 
 路径选择规则：
@@ -272,29 +275,37 @@ P8M4 详细设计见 `doc/P8/P8M4_backend_write_protocol_design.md`。当前已�
 - `Read` 路径不升级，不新增公开路径统计接口，不引入 SPDK 依赖；
 - `Close` 保持严格打开周期边界，完成后不得再接受旧周期资源请求。
 
-建议内部描述符包含：
+P8M4 最终落地的内部描述符为：
 
 ```cpp
-struct WriteBuffer {
-  const std::byte* data;
-  std::size_t size;
-  WriteBufferKind kind;
-  DeviceId device_id;
-  std::uint32_t pool_slot;
-  void* backend_private;
+enum class IoWriteBufferKind : std::uint8_t {
+  ExternalMemory = 0,
+  ValueBufferSlot = 1,
+  CopyFallbackBuffer = 2,
+};
+
+struct IoWriteBuffer {
+  const std::byte* data = nullptr;
+  std::size_t size = 0;
+  IoWriteBufferKind kind = IoWriteBufferKind::ExternalMemory;
+  DeviceId device_id = 0;
+  std::uint64_t pool_id = 0;
+  std::uint32_t slot_index = 0;
+  std::uint32_t slot_generation = 0;
 };
 ```
 
-字段名称可在详细设计中调整，但必须覆盖以下信息：
+该描述符覆盖：
 
 - 数据地址；
 - 数据长度；
 - 内存来源；
-- 目标设备或池归属；
-- 注册缓冲区槽位；
-- 后端私有信息。
+- 目标设备和缓冲区池归属；
+- 注册缓冲区槽位及其代次。
 
-`io_uring` 后端需要支持：
+后端注册阶段通过 `ValueBufferSlotView` 接收槽位地址、长度和索引；运行期写入描述符不暴露后端私有指针。
+
+`io_uring` 后端已支持：
 
 - 普通写入路径；
 - 注册缓冲区写入路径；
@@ -333,7 +344,7 @@ bench 要求：
 - 数据填充成本不计入主写入耗时；
 - 继续覆盖 WAL level 1 / 2 / 3 / 4；
 - 使用 `io_uring` Release 口径归档；
-- 与 P7 基线对比；
+- 与 P7 使用一致的 JSON 归档格式，便于解析；不据 loop 设备数据作性能优劣比较；
 - 输出中明确标注 value 来源和路径预期。
 
 文档要求：
@@ -351,11 +362,11 @@ P8M5 退出条件：
 - bench 数据归档；
 - 文档完整；
 - P8 roadmap 条目可标记完成；
-- 后续 P9 / P10 依赖边界清晰。
+- 后续 P9 SPDK / P10 B+树依赖边界清晰。
 
 ## 12. 总依赖关系
 
-P8 推荐按以下顺序推进：
+P8 实际按以下顺序完成：
 
 1. P8M1 固定公开 API 和术语。
 2. P8M2 建立值缓冲区池和来源识别能力。
@@ -363,7 +374,7 @@ P8 推荐按以下顺序推进：
 4. P8M4 升级后端写入协议并接入 `io_uring` 注册缓冲区。
 5. P8M5 完成 bench、文档和回归收敛。
 
-其中 P8M3 和 P8M4 之间存在实现耦合：P8M3 可以先接入逻辑判断和复制回退，P8M4 再把后端真实注册缓冲区写入补齐。详细设计中应避免一次性改动过大。
+其中 P8M3 先接入路径判断和复制回退，P8M4 再补齐后端真实注册缓冲区写入，从而控制单个里程碑的改动范围。
 
 ## 13. P8 总退出条件
 
@@ -379,7 +390,7 @@ P8 完成时必须满足：
 - WAL、CRC、索引更新和 block 回收语义不退化；
 - `io_uring` 后端支持注册缓冲区写入；
 - 同步后端仍可用于测试；
-- P8 bench 能与 P7 基线比较；
+- P8 bench 数据可解析和归档；loop 设备结果不作性能优劣结论；
 - SPDK 未来接入边界清晰，不需要推翻 P8 公开 API。
 
 ## 14. 风险清单
@@ -389,15 +400,15 @@ P8 完成时必须满足：
 | `ValueBuffer` 生命周期误用 | `Put` 执行期间 value 内存失效 | P8 当前 `Put` 保持同步等待语义；文档明确生命周期约束。 |
 | 应用自备内存被误认为一定零拷贝 | 用户性能预期错误 | 文档强调应用自备内存是条件式零拷贝。 |
 | 键绑定或设备归属不匹配 | 错误使用 Cabe 值缓冲区主路径 | 分配接口记录绑定 key；`Put` 再次校验绑定 key 和目标设备，不匹配时复制回退。 |
-| `io_uring` 注册缓冲区协议改动扩大 | 后端抽象被污染 | 使用内部写入描述符隔离后端私有字段。 |
+| `io_uring` 注册缓冲区协议改动扩大 | 后端抽象被污染 | 使用后端中立写入描述符；注册索引映射只保存在 `io_uring` 后端。 |
 | 复制回退路径被破坏 | 现有测试和普通用户写入失败 | P8M3 必须保留普通 `std::vector` value 测试。 |
 | 池容量配置不合理 | 资源占用过大或频繁耗尽 | 默认保守配置；池耗尽返回明确错误。 |
 | SPDK 预留过度设计 | P8 实现复杂度失控 | P8 只保留抽象边界，不引入 SPDK 依赖。 |
 | bench 误把填充成本算入写入成本 | 性能数据失真 | bench 预先填充 value，计时区间只覆盖 `Put`。 |
 
-## 15. 后续文档编写顺序
+## 15. 详细文档实际编写顺序
 
-接下来建议按以下顺序编写详细设计：
+P8 已按以下顺序完成详细设计：
 
 1. `doc/P8/P8M1_value_buffer_api_design.md`
 2. `doc/P8/P8M2_value_buffer_pool_design.md`
@@ -405,7 +416,7 @@ P8 完成时必须满足：
 4. `doc/P8/P8M4_backend_write_protocol_design.md`
 5. `doc/P8/P8M5_bench_convergence_design.md`
 
-每个里程碑文档应继续沿用 P6 / P7 的写法：
+各里程碑文档均沿用 P6 / P7 的写法：
 
 - 先说明目标和非目标；
 - 再列出涉及文件；

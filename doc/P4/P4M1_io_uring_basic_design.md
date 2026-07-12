@@ -13,9 +13,9 @@
 | 项 | 值 |
 |---|---|
 | 阶段 / 里程碑 | P4 / M1 |
-| 状态 | **设计稿** |
+| 状态 | **✅ 已锁定（P4M4 收敛）** |
 | 上游依赖 | P3（IoBackend concept + CMake 分派机制 + SyncIoBackend 参考实现） |
-| 下游依赖本里程碑 | P4M2（性能优化——registered buffers + FIXED ops） |
+| 下游依赖本里程碑 | P4M2（预注册文件描述符 + FIXED_FILE）；registered buffers 后续在 P8 完成 |
 | 退出判定 | 见 §9 |
 
 ---
@@ -43,9 +43,9 @@
 
 | 推迟项 | 落点 | 原因 |
 |---|---|---|
-| registered buffers + IOSQE_FIXED_FILE | **P4M2** | M1 先跑通基础路径 |
+| IOSQE_FIXED_FILE / registered buffers | **P4M2 / P8** | P4M2 完成预注册文件描述符；registered buffers 因接口边界调整延至 P8 |
 | TSAN 兼容性处理 | **P4M3** | M1 不处理检测器兼容 |
-| 性能基准对比 | **P4M3** | M1 只保证功能正确 |
+| 性能基准对比 | **P6 起** | P4 最终未归档性能基线；P6 建立首个正式 io_uring 历史锚点 |
 | 多线程 / 多 ring | **P7** | P4 全程 R=1 单线程 |
 
 ---
@@ -66,7 +66,7 @@
 |---|---|---|---|
 | **P4M1-D1** | liburing 接入方式 | 硬性系统依赖（≥ 2.9），CMake `pkg_check_modules` 校验版本，不做源码内嵌或降级 | 与 Fedora 43 / GCC 15 / Clang 20 同级约束；`setup-dev.sh` 已负责安装 |
 | **P4M1-D2** | ring 初始化时机 | 与 SyncIoBackend 对称——`Open(path)` 内初始化 ring + 打开设备，`Close()` 内销毁 ring + 关闭设备 | 空构造 → Open 模式一致；ring 生命周期绑定设备 |
-| **P4M1-D3** | 队列深度 | P4 内部常量 64；P7 由系统内部自动推算；发版前不暴露到公开 API | 单线程同步模型实际只用 1 个槽位，64 绰绰有余 |
+| **P4M1-D3** | 队列深度 | P4 内部常量 64；P7/P8 仍保持 64，自动推算和深队列调优继续归性能兑现阶段；不暴露到公开 API | 提交即等待模型实际只用少量槽位，64 足够 |
 | **P4M1-D4** | O_DIRECT | 保持——`O_RDWR \| O_DIRECT` 打开设备 | 面向裸设备极致性能，与 SyncIoBackend 一致 |
 | **P4M1-D5** | 错误码映射 | io_uring CQE 失败时统一返回 `err::kIoBase`，与 SyncIoBackend 一致 | 当前阶段假定硬件正常运行；细粒度错误码留后续扩展 |
 
@@ -405,9 +405,9 @@ gtest_discover_tests(test_io_uring_backend DISCOVERY_TIMEOUT 60)
 
 | 下游 | 接入点 |
 |---|---|
-| **P4M2** | 在 `IoUringIoBackend` 基础上加 registered buffers + IOSQE_FIXED_FILE 优化 |
-| **P4M3** | TSAN 兼容处理 + 性能基准对比 |
-| **P7** | per-reactor 独立 ring + 队列深度自动推算 |
+| **P4M2 / P8** | P4M2 增加预注册文件描述符和 IOSQE_FIXED_FILE；P8 再通过 `IoWriteBuffer` 与 `ValueBufferPool` 完成 registered buffers |
+| **P4M3** | TSAN 兼容处理 + 部署文档；最终不做性能基准归档 |
+| **P7 / 后续** | P7 实现 per-reactor 独立 ring，但队列深度仍固定 64；自动推算归性能兑现阶段 |
 
 ---
 

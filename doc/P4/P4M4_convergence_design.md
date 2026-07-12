@@ -14,7 +14,7 @@
 | 项 | 值 |
 |---|---|
 | 阶段 / 里程碑 | P4 / M4 |
-| 状态 | **设计稿** |
+| 状态 | **✅ 已锁定（P4M4 收敛）** |
 | 上游依赖 | P4M1（io_uring 基础实现）、P4M2（预注册文件描述符）、P4M3（TSAN 兼容 + 部署文档 + 脚本改进） |
 | 下游依赖本里程碑 | P4 阶段出口；P4.5 启动闸门 |
 | 退出判定 | 见 §6 |
@@ -61,10 +61,10 @@
 
 ### 3.1 io_uring 基础实现（详 [P4M1_io_uring_basic_design.md](P4M1_io_uring_basic_design.md)）
 
-- **IoUringIoBackend**：满足 IoBackend concept 的 5 个方法（Open / Close / BlockCount / Write / Read），`static_assert` 编译期验证。
+- **IoUringIoBackend**：P4 时满足 IoBackend concept 的 5 个方法（Open / Close / BlockCount / Write / Read）；P8M4 后增加 `RegisterWriteBuffers` 并把 `Write` 参数升级为 `IoWriteBuffer`，现行 concept 共 6 个方法。
 - **liburing ≥ 2.9 硬性依赖**：CMake `pkg_check_modules` + `setup-dev.sh` 双重校验。
 - **ring 生命周期**：与 SyncIoBackend 对称——Open 内初始化，Close 内销毁。
-- **队列深度**：内部常量 64，P7 由系统自动推算，发版前不暴露到公开 API。
+- **队列深度**：内部常量 64；P7/P8 仍保持该值，自动推算和深队列调优继续归性能兑现阶段，不暴露到公开 API。
 - **O_DIRECT**：保持，面向裸设备极致性能。
 - **错误码**：统一 `err::kIoBase`，与 SyncIoBackend 一致。
 - **决策锁定**：P4M1-D1~D5。
@@ -72,16 +72,16 @@
 ### 3.2 预注册文件描述符优化（详 [P4M2_io_uring_optimize_design.md](P4M2_io_uring_optimize_design.md)）
 
 - **预注册文件描述符**：Open 时 `io_uring_register_files` 注册 fd，Write / Read 使用固定文件标志（`IOSQE_FIXED_FILE`），Close 时注销。减少每次 I/O 的内核文件描述符查找和引用计数开销。
-- **预注册缓冲区推到 P8**：当前 IoBackend 接口只传内存地址不传索引号，P8 重新设计缓冲区管理时统一处理。
+- **预注册缓冲区推到 P8**：P4 时接口只传内存地址；P8M4 已通过 `RegisterWriteBuffers`、`IoWriteBuffer` 和 Cabe 值缓冲区槽位身份完成实现。
 - **决策锁定**：P4M2-D1~D3。
 
 ### 3.3 TSAN 兼容 + 部署 + 脚本改进（详 [P4M3_tsan_deploy_design.md](P4M3_tsan_deploy_design.md)）
 
-- **TSAN 兼容**：维持 `run-tests.sh` 已有的互斥检查（io_uring + TSAN 直接拒绝）。sync 后端 + TSAN 可覆盖 cabe 全部并发逻辑。TSAN 注解留 P7 评估。
+- **TSAN 兼容**：维持 `run-tests.sh` 已有的互斥检查（io_uring + TSAN 直接拒绝）。P7 最终以 sync + TSAN 覆盖后端无关并发逻辑，没有增加 io_uring TSAN 注解。
 - **部署文档**：`doc/P4/deploy.md`——系统要求、io_uring 启用检查、内存锁定限制、推荐设备路径、TSAN 说明、常见问题排查。
 - **脚本改进**：`run-tests.sh` / `run-coverage.sh` 加 `--device=PATH` 参数，取代环境变量传入设备路径。
 - **内核版本检查**：`setup-dev.sh` 加内核 ≥ 6.16 硬性校验。
-- **设备超级块方案记录**：推到 P5——每个设备第 0 块写入身份标识，Open 时校验设备顺序。
+- **设备超级块方案记录**：P4 把身份校验需求推到 P5；P5M1 最终采用设备头部双份 4K 超级块，而非占用完整“第 0 块”。
 - **决策锁定**：P4M3-D1~D4。
 
 ### 3.4 已锁定决策汇总
@@ -90,7 +90,7 @@
 |---|---|---|
 | M1 | D1 | liburing 硬性系统依赖（≥ 2.9） |
 | M1 | D2 | ring 在 Open 内初始化，与 SyncIoBackend 对称 |
-| M1 | D3 | 队列深度 P4 固定 64，P7 自动推算 |
+| M1 | D3 | 队列深度 P4 固定 64；P7/P8 保持，自动推算归性能兑现阶段 |
 | M1 | D4 | 保持 O_DIRECT |
 | M1 | D5 | 错误码统一 `kIoBase` |
 | M2 | D1 | 只做预注册文件描述符，预注册缓冲区推到 P8 |
@@ -98,7 +98,7 @@
 | M2 | D3 | 注册失败统一返回错误 |
 | M3 | D1 | TSAN 维持互斥检查 |
 | M3 | D2 | 测试设备 `--device=` 参数化 |
-| M3 | D3 | 性能基准发版后再补 |
+| M3 | D3 | P4 不做性能基准；首个正式 io_uring 锚点由 P6 建立 |
 | M3 | D4 | 设备超级块推到 P5 |
 
 ---
@@ -148,13 +148,13 @@ P4 期间产生的三项决策变更需要同步到 ROADMAP：
 
 ROADMAP P4 范围中原文提到"registered buffer 注册"——实际实现中只做了预注册文件描述符，预注册缓冲区推到 P8（P4M2-D1 决策）。ROADMAP P4 段需更新措辞。
 
-### 5.2 性能基准发版后再补
+### 5.2 P4 不做性能基准（P6 后续建立锚点）
 
 ROADMAP 阶段间衔接约定中要求"bench 归档到 `bench/baselines/pN_xxx.json`"。P4 决策不做性能基准归档（P4M3-D3），bench 框架保留但不强制跑。需在 P4 段注明。
 
 ### 5.3 设备超级块加入 P5
 
-P5 范围中原文未提及设备超级块。P4M3-D4 决策将其加入 P5——每个设备第 0 块写入身份标识（引擎 UUID + 设备编号），Open 时校验顺序。需在 ROADMAP P5 段补充。同时 D2（"数据设备只放原始 value 字节"）和 D3（"数据设备不存任何元数据"）需加注"第 0 块为超级块例外"。
+P5 范围中原文未提及设备超级块。P4M3-D4 决策把身份校验需求加入 P5，P4 当时提出“每个设备第 0 块写入身份标识”的候选形态。P5M1 最终改为设备头部主、备各 4K 的双份超级块，数据区从物理偏移 8K 起，逻辑 block 仍从 0 编号；ROADMAP 已按最终形态同步。
 
 ---
 
@@ -173,8 +173,8 @@ P5 范围中原文未提及设备超级块。P4M3-D4 决策将其加入 P5——
    - ✅ P4M4 收敛稿审阅通过 + ROADMAP / README 状态同步
 3. **回归实证**：
    - `run-tests.sh --backend=io_uring --release --device=/dev/loop0` 全绿
-   - `run-tests.sh --release --device=/dev/loop0`（sync 不退步）全绿
-   - `run-coverage.sh --strict`（默认 sync 后端）覆盖率 ≥ 80%
+   - `run-tests.sh --backend=sync --release --device=/dev/loop0`（sync 不退步）全绿
+   - `run-coverage.sh --backend=sync --strict` 覆盖率 ≥ 80%
 4. **状态同步全完**：设计稿 / P4 README / 根 README / ROADMAP 全部更新。
 5. **owner 终审**：本设计稿 + 全部改动审阅通过；通过即 P4 整体出口。
 
@@ -187,10 +187,10 @@ P5 范围中原文未提及设备超级块。P4M3-D4 决策将其加入 P5——
 ./scripts/run-tests.sh --backend=io_uring --ubsan --device=/dev/loop0
 
 # sync 后端不退步
-./scripts/run-tests.sh --release --device=/dev/loop0
+./scripts/run-tests.sh --backend=sync --release --device=/dev/loop0
 
 # 覆盖率
-./scripts/run-coverage.sh --strict --device=/dev/loop0
+./scripts/run-coverage.sh --backend=sync --strict --device=/dev/loop0
 ```
 
 ---
@@ -201,7 +201,7 @@ P5 范围中原文未提及设备超级块。P4M3-D4 决策将其加入 P5——
 |---|---|
 | **P4.5 启动** | `doc/P4.5/README.md` 已就位 |
 | **P5** | 设备超级块方案在 P4M3 §6 已记录，P5 设计时参照实现；ROADMAP 已同步 |
-| **P7** | 队列深度自动推算 + TSAN 注解评估 |
+| **P7 / 性能兑现阶段** | P7 实现 per-reactor 独立 ring 和 sync+TSAN 证据迁移；队列深度自动推算、io_uring 真异步与深度调优继续推迟 |
 | **P8** | 预注册缓冲区 + 缓冲区管理重新设计 |
 
 ---

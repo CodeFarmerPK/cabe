@@ -6,6 +6,9 @@
 >
 > **本文为详细设计**。收敛稿采用薄索引形态（与 P0M7 一致）。
 
+> **P6 后续注**：`p1_single_thread.json` 是 P1M5 当时真实归档，P6 建立正式历史锚点后已经
+> 删除、不再作为当前比较基准；下文保留其生成方案作为阶段历史。
+
 ---
 
 ## 0. 元信息
@@ -13,7 +16,7 @@
 | 项 | 值 |
 |---|---|
 | 阶段 / 里程碑 | P1 / M5 |
-| 状态 | **完成稿（待 owner 终审）** |
+| 状态 | **✅ 已锁定（P1M5 收敛）** |
 | 上游依赖 | P1M1–M4 全部完成（Engine 骨架 + BufferPool + I/O + FreeList + MetaIndex + Put/Get/Delete 端到端） |
 | 下游依赖本里程碑 | P1 阶段出口；P2 启动闸门 |
 | 退出判定 | 见 §8（六条） |
@@ -43,7 +46,7 @@
 
 | 推迟项 | 落点 | 原因 |
 |---|---|---|
-| P1 厚整合稿 | 未来全部完工后 | 与 P0 同策略——薄索引够用 |
+| P1 厚整合稿 | 发布收敛阶段（当前至少在 P12 之后） | 与 P0 同策略——薄索引够用 |
 | Engine 并发 bench | P7 | P1 单线程 |
 
 ---
@@ -204,17 +207,17 @@ P1 段头部加 **状态**：✅ 已实施
 export CABE_TEST_DEVICE=/dev/loopN
 
 # 四档回归
-./scripts/run-tests.sh --asan
-./scripts/run-tests.sh --tsan
-./scripts/run-tests.sh --ubsan
-./scripts/run-tests.sh --release
+./scripts/run-tests.sh --backend=sync --asan
+./scripts/run-tests.sh --backend=sync --tsan
+./scripts/run-tests.sh --backend=sync --ubsan
+./scripts/run-tests.sh --backend=sync --release
 
-# 微基准 + 基线归档
+# P1M5 当时的微基准 + 基线归档接口；当前脚本已移除 --baseline，改为人工归档
 ./scripts/run-bench.sh --baseline=bench/baselines/p1_single_thread.json
 
 # 覆盖率
 unset CABE_TEST_DEVICE
-./scripts/run-coverage.sh --strict
+./scripts/run-coverage.sh --backend=sync --strict
 
 # JSON 校验
 jq -e . bench/baselines/p1_single_thread.json
@@ -230,7 +233,7 @@ jq -e . bench/baselines/p1_single_thread.json
 | 下游 | 本里程碑提供的接入点 |
 |---|---|
 | **P2 启动** | `doc/P1/README.md` 退出条件全满足；Engine 公开 API 签名已定型（P2 冻结只调细节） |
-| **P2+ 微基准回归** | `bench/baselines/p1_single_thread.json` 作为 P1 基线；`run-bench.sh` 自动发现新 bench 目标 |
+| **后续微基准基础设施** | `run-bench.sh` 自动发现新 bench 目标；P1 原始基线已在 P6 删除，正式历史锚点以 P6 为准 |
 | **未来厚整合稿** | 本收敛稿 §2 薄索引各链接可直接被厚稿展开 |
 
 ---

@@ -130,6 +130,10 @@ caller 在读 `reactors_`,vector 竞争和 UAF 都不发生。
 > (通过 join 工作线程或等价同步建立 happens-before)。**数据/运营 op(Put/Get/Delete/SetWalLevel/
 > Snapshot)彼此之间可自由并发**——只有 Open/Close 排他。
 
+> **P8 强化注**：上述是 P7 时点的调用方并发契约。P8 进一步把资源生命周期收紧为严格打开周期：
+> `Close()` 开始后拒绝新的资源请求，并等待已分配 `ValueBuffer` 释放；返回后不允许任何旧周期资源
+> 继续访问。该强化不改变 P7 的 reactor drain/join 正确性。
+
 场景压测:8 工作线程循环 Put/Get,主线程要 Close。**正确**:主线程令工作线程停、`join`(所有 Put/Get
 已返回),再 Close。**错误**:工作线程还在循环时主线程直接 Close = 契约违反 = UB。
 

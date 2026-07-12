@@ -8,6 +8,9 @@
 > **本文为详细设计**。技术细节采用薄索引形态：每章只列锁定结论 + 链回 P0M1–M6 对应章节，
 > 不复制 schema、错误码、CMake 选项等具体定义（详见各上游设计稿）。
 
+> **P6 后续注**：本文关于 `p0_utilities.json` 的内容记录 P0M7 当时真实交付。P6 建立正式
+> 性能锚点后该文件已删除，不再作为当前比较基准；`run-bench.sh` 基础能力继续保留。
+
 ---
 
 ## 0. 元信息
@@ -15,7 +18,7 @@
 | 项 | 值 |
 |---|---|
 | 阶段 / 里程碑 | P0 / M7 |
-| 状态 | **完成稿（待 owner 终审）** —— 七项决策经拷问式追问拍板（见 §3） |
+| 状态 | **✅ 已锁定（P0M7 收敛）** —— 七项决策经拷问式追问拍板（见 §3） |
 | 上游依赖 | M1–M6 全部完成（骨架 / schema / 错误码 / hash / 测试与微基准框架 / 本地组合矩阵脚本） |
 | 下游依赖本里程碑 | P0 阶段出口；P1 / P2 启动闸门 |
 | 关联约束 | ROADMAP M7 字面范围；M1–M6 各稿留给 M7 的同步钩子；M6-D1（持续集成推迟）已锁定 |
@@ -117,7 +120,7 @@
 - **`DataView` / `DataBuffer`**：`std::span<const std::byte>` / `std::span<std::byte>`，设备上裸字节
   视图（D2 / D4）。
 - **`ValueMeta`**：`sizeof == 24`，`alignof == 8`，字段顺序 `block(8) / timestamp(8) / crc(4) / state(1) / reserved[3]`
-  ——为达成 24 字节布局并保证 memcpy 序列化的确定性而非 ROADMAP 字面顺序；论证详见
+  ——为达成 24 字节布局并保证平凡复制的确定性而非 ROADMAP 字面顺序；P5 盘上格式后来采用显式字段编码，论证详见
   [P0M2 §3 / §6](P0M2_schema_design.md)。
 - **`ValueState`**：`uint8_t` 枚举，`Active = 0` / `Deleted = 1`。
 - **WAL 帧头占位**：8 字节布局常量（`kWalFrameHeaderSize` 等）。（P5M2 已完成：真实 128 字节帧入 `wal/wal_frame.h`，占位常量已从 `structs.h` 移除。）
@@ -172,8 +175,8 @@
   | 选项 | 默认 | 取值 | 引入里程碑 |
   |---|---|---|---|
   | `CABE_SANITIZER` | `none` | `none / address / thread / undefined` | M1 |
-  | `CABE_IO_BACKEND` | `sync` | `sync / io_uring / spdk`（M1 仅声明，分派在 P3 / P4 / P10） | M1 |
-  | `CABE_META_INDEX` | `hashmap` | `hashmap / bplustree`（M1 仅声明，分派在 P3 / P9） | M1 |
+  | `CABE_IO_BACKEND` | `sync` | `sync / io_uring / spdk`（M1 仅声明，分派在 P3 / P4 / P9） | M1 |
+  | `CABE_META_INDEX` | `hashmap` | `hashmap / bplustree`（M1 仅声明，分派在 P3 / P10） | M1 |
   | `CABE_BUILD_TESTS` | `OFF` | `ON / OFF` | M1 声明 / M5 启用 |
   | `CABE_BUILD_BENCH` | `OFF` | `ON / OFF` | M1 声明 / M5 启用 |
   | `CABE_WERROR` | `OFF` | `ON / OFF`（全量 `-Werror`） | M1 |
@@ -211,10 +214,10 @@
 |---|---|
 | **Cabe** | 项目代号 / 命名空间 `cabe`，固定 value 长度的键值存储引擎，直接操作 NVMe 裸块设备 |
 | **kValueSize** | 单 value 固定大小 = 1 MiB，全局编译期常量，跨阶段不可改 |
-| **BlockId** | 物理块地址，`uint64_t` 高 8 位 `device_id` + 低 56 位 `block_idx` |
+| **BlockId** | 设备内逻辑块地址，`uint64_t` 高 8 位 `device_id` + 低 56 位 `block_idx`；物理数据偏移由 I/O 后端再加设备头部 8K |
 | **DeviceId** | 设备编号，`uint8_t`，取值 [0, 256) |
 | **DataView / DataBuffer** | 只读 / 可写裸字节视图，`std::span<const std::byte>` / `std::span<std::byte>` |
-| **ValueMeta** | value 元数据（block / timestamp / crc / state / reserved），24 字节，可 memcpy 序列化 |
+| **ValueMeta** | value 元数据（block / timestamp / crc / state / reserved），24 字节、可平凡复制；P5 盘上格式显式编码字段，不直接写入整个对象 |
 | **ValueState** | value 状态枚举（Active / Deleted），`uint8_t` |
 | **CRC32C** | Castagnoli 多项式 CRC32，硬件路径 SSE4.2，软件 fallback 256 表 |
 | **XXH3** | 路由 hash 算法（64-bit），固定 seed 0 |
@@ -225,7 +228,7 @@
 | **行覆盖率** | gcov / llvm-cov 算出的"被执行行数 / 总可执行行数" |
 | **覆盖率门槛** | 80%，cabe P0 退出条件第 3 条 |
 | **持续集成（CI）** | M6-D1 决策推迟，不在 P0 范围 |
-| **IoBackend** | I/O 抽象层（P3+ 引入），同步 / `io_uring` / SPDK |
+| **IoBackend** | I/O 抽象层：P3 引入 sync，P4 接入 `io_uring`，P9 接入 SPDK value/data 后端 |
 | **MetaIndex** | 索引抽象层（P3+ 引入），哈希 / B+ 树 |
 | **WAL** | 写前日志，P5+ 引入 |
 | **Snapshot** | 快照与 WAL 截断，P5+ 引入 |
@@ -398,6 +401,9 @@ clang++ RELEASE  : OK
 ---
 
 ## 7. P1 / P2 占位稿规划（M7-D5 详细）
+
+> **后续兑现注**：本章保留 P0M7 当时创建占位索引的原始规划。P1 与 P2 现均已完成并收敛，
+> 其中的“未启动 / 待梳理”不再表示项目当前状态。
 
 ### 7.1 目录与命名
 
@@ -586,7 +592,7 @@ grep 残留 `P0_infra_design.md` / `p0_infra_design.md` —— 全部改为 `P0M
 | **P1 启动** | `doc/P1/README.md` 已就位（启动条件 + 决策点候选）；`/grill-with-docs P1` 即可启动第一个里程碑 |
 | **P2 启动** | `doc/P2/README.md` 已就位；P1 完成后启动 |
 | **P1+ 业务模块复用 cabe 基础设施** | M1–M6 全部锁定结论（schema / 错误码 / hash / 日志 / 矩阵 / 覆盖率 / 微基准）+ 本设计稿 §4 作为统一入口 |
-| **P1+ 微基准回归** | `scripts/run-bench.sh` 可一键复跑；`bench/baselines/p0_utilities.json` 作为 P0 基线参考（**不**强制后续阶段不退步——优化重心在 P3+） |
+| **P1+ 微基准基础设施** | `scripts/run-bench.sh` 的基础能力被后续阶段复用；P0 原始基线已在 P6 删除，不再作为比较基准，历史性能锚点以 P6 为准 |
 | **未来接持续集成** | `scripts/setup-dev.sh --ci` 与 `run-tests.sh` / `run-coverage.sh --strict` 三者在 CI 容器内可直接调用，无需重写（仓库托管确定后单独立项） |
 | **未来厚整合稿** | 本设计稿 §4 各章已留好"链回上游"接口；厚整合稿替换薄索引、保留结构即可 |
 
@@ -599,7 +605,7 @@ P0 收敛此刻采用薄索引形态。**未来全部完工后**会单独立项�
 - 把 schema / 错误码段位 / 术语 / CMake 选项 / 测试与微基准约定全部内联展开
 - 替换本设计稿 §4 的薄索引部分；§3 决策 / §5 微基准方案 / §8 状态同步动作 等仍归档于本设计稿
 
-立项时机：全部完工后最后一个里程碑（按 ROADMAP 当前规划为 P7 末或专门 release 里程碑）。
+立项时机：全部功能阶段完成后的发布收敛；按当前路线至少在 P12 完成之后，不再绑定早期预测的 P7。
 
 ---
 

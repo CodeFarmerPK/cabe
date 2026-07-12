@@ -43,7 +43,7 @@
 | WAL 帧头的真实编解码（读写、双 CRC、4 KiB 对齐） | **P5** | M2 只放布局占位常量，WAL 模块在 P5 |
 | WAL 持久化字节序（magic / 多字节字段的端序） | **P5** | M2 的 struct 是内存表示，端序属持久化层 |
 | `entry_type` 取值枚举（`PutCommit` / `Delete` …） | **P5** | 帧语义在 P5 定义 |
-| `ValueMeta` 的序列化/反序列化函数 | **P5（WAL）/ P3（snapshot）** | M2 只定型内存布局 |
+| `ValueMeta` 的盘上编码/解码 | **P5（WAL + snapshot）** | M2 只定型内存布局；P5 最终由 `WalFrame` / `SnapshotRecord` 显式编码各字段，不直接写入整个 `ValueMeta` 对象 |
 | `BlockId` 的 `std::hash` 特化 | 需要时（P4.5 FreeList / 索引若用哈希容器） | 当前 FreeList 用 `vector`+排序，未用哈希 |
 | `kValueSize` 校验逻辑（`value.size()!=kValueSize` 拒绝） | **P1（Put 路径）/ P2（API）** | M2 只定义常量，校验在调用路径 |
 
@@ -75,14 +75,14 @@ struct ChunkMeta { BlockId blockId; uint32_t crc; uint64_t timestamp; DataState 
 
 ---
 
-## 3. 待 owner 终审的决策（review 时优先裁决）
+## 3. 收敛前待终审的决策（P0M7 已锁定）
 
 ### 决策-1：为 schema 类型引入 `cabe` 命名空间
 
 | 维度 | 内容 |
 |---|---|
 | ROADMAP 字面 | 仅给出类型/字段，未提命名空间；当前 `structs.h` 在**全局命名空间** |
-| 本设计裁决 | **建议采纳**：把 `kValueSize` / `DeviceId` / `DataView` / `DataBuffer` / `BlockId` / `ValueState` / `ValueMeta` / WAL 常量统一纳入 `namespace cabe`（与 `cabe::util` 分层一致） |
+| 本设计裁决 | **已采纳**：把 `kValueSize` / `DeviceId` / `DataView` / `DataBuffer` / `BlockId` / `ValueState` / `ValueMeta` / WAL 常量统一纳入 `namespace cabe`（与 `cabe::util` 分层一致） |
 | 理由 | `DataView` / `BlockId` 等是通用名，留在全局命名空间有符号冲突隐患；`util/` 已在 `cabe::util`，schema 进 `cabe::` 顶层形成清晰分层 |
 | 影响 | `crc32.{h,cpp}` 在 `cabe::util` 内引用 `DataView`，名称查找会向上落到 `cabe::DataView`，无需改写引用；外部将以 `cabe::BlockId` 等限定访问（当前无外部调用方） |
 | 回退代价 | 低：去掉 `namespace cabe { }` 包裹即可；但**建议作为全工程约定**（schema→`cabe::`，工具→`cabe::util`），与 M3 的 `error_code` / `logger` 命名空间策略一并锚定 |
@@ -241,7 +241,8 @@ inline constexpr std::size_t   kWalOffReserved  = 7;
 - **顺序为 `{ block, timestamp, crc, state, reserved }`**（8/8/4/1/3 = 24），自然对齐下
   `sizeof==24`；字段重排的出入及论证见 §3 决策-2 与 §6。
 - **`reserved[3] = {}` 把隐式 padding 显式化（M2-D8）**：`ValueMeta` 断言 `is_trivially_copyable`，
-  意味着 P5 会 `memcpy` 整体序列化它到 WAL/snapshot。但隐式 padding 在聚合初始化
+  使对象可以确定地平凡复制。P0 当时曾以 P5 直接复制整个对象作为风险模型；P5 最终改为
+  `WalFrame` / `SnapshotRecord` 显式字段编码，不直接把整个 `ValueMeta` 写盘。但隐式 padding 在聚合初始化
   （`ValueMeta{block, ts, crc, state}`）下是**不确定值**，会致序列化字节流不确定、CRC 不可复现、
   内存残留泄露。改为带默认成员初始化器 `= {}` 的 `reserved` 字段后，任何初始化路径下这 3 字节
   都确定为 0，并兼作后续小字段（flags 等）的扩展位。
@@ -316,8 +317,8 @@ static_assert(std::is_trivially_copyable_v<ValueMeta>);
 static_assert(std::is_standard_layout_v<ValueMeta>);
 ```
 
-- `trivially_copyable` + `standard_layout`：保证 `ValueMeta` 可被 WAL/snapshot 按
-  `memcpy` 直接序列化（D3：元数据落 WAL），是 P5 的前置契约。
+- `trivially_copyable` + `standard_layout`：保证 `ValueMeta` 可安全地平凡复制并保持布局稳定。
+  P5 的 WAL / snapshot 最终显式编码字段，没有把整个结构体直接作为盘上格式。
 
 ---
 
@@ -349,8 +350,8 @@ static_assert(std::is_standard_layout_v<ValueMeta>);
 
 | # | 决策 | 备选 | 理由 | 状态 |
 |---|---|---|---|---|
-| M2-D1 | schema 类型纳入 `namespace cabe` | 保持全局命名空间 | 避免 `DataView`/`BlockId` 全局名冲突；与 `cabe::util` 分层一致 | **建议采纳，待终审**（见 §3 决策-1） |
-| M2-D2 | `ValueMeta` 字段重排为 `{block,timestamp,crc,state}` | ROADMAP 字面 `{block,crc,timestamp,state}` | 字面顺序自然对齐为 32 字节；重排是达成 `sizeof==24` 且不破坏对齐的唯一方案 | **建议采纳，待终审**（见 §3 决策-2、§6） |
+| M2-D1 | schema 类型纳入 `namespace cabe` | 保持全局命名空间 | 避免 `DataView`/`BlockId` 全局名冲突；与 `cabe::util` 分层一致 | **✅ 已锁定（P0M7 收敛）** |
+| M2-D2 | `ValueMeta` 字段重排为 `{block,timestamp,crc,state}` | ROADMAP 字面 `{block,crc,timestamp,state}` | 字面顺序自然对齐为 32 字节；重排是达成 `sizeof==24` 且不破坏对齐的唯一方案 | **✅ 已锁定（P0M7 收敛）** |
 | M2-D3 | `BlockId` 作单成员 `struct` + 访问器 + `<=>` | 保持裸 `using uint64_t` | 带语义访问、防误用；`sizeof==8`、可平凡复制不变 | 锁定 |
 | M2-D4 | `DataView`/`DataBuffer` 切 `std::byte`，连带改 `crc32.cpp` | 保留 `char` | `std::byte` 明确"裸字节"语义，契合裸设备 I/O（D2） | 锁定 |
 | M2-D5 | 加 `is_trivially_copyable`/`standard_layout` 断言 | 不加 | 锚定"可 `memcpy` 序列化"契约，为 P5 WAL/snapshot 兜底 | 锁定 |
@@ -371,9 +372,9 @@ static_assert(std::is_standard_layout_v<ValueMeta>);
 | `BlockId` 8/56 编码 + `Make`/`dev`/`block_idx`/`logical_byte_offset`（D5） | §5.4 | ✅ |
 | 新增 `DeviceId=uint8_t`、`enum ValueState` | §5.2 / §5.5 | ✅ |
 | 旧 `ChunkMeta`/`DataState` 改名删除 | §5.8 | ✅ |
-| `ValueMeta` 24 字节 + `static_assert(==24)` 与 `sizeof(BlockId)==8` | §5.6 / §6 | ⚠️ 达成 24，但**字段顺序与字面不同**（§3 决策-2，待终审） |
+| `ValueMeta` 24 字节 + `static_assert(==24)` 与 `sizeof(BlockId)==8` | §5.6 / §6 | ✅ 达成 24；字段重排已由 P0M7 锁定 |
 | WAL 帧头 8 字节占位常量 | §5.7 | ✅ |
-| 命名空间 | 引入 `cabe::` | ⚠️ **超出字面，待终审**（§3 决策-1） |
+| 命名空间 | 引入 `cabe::` | ✅ P0M7 已锁定 |
 | 退出：编译通过 / 无旧名残留 / 断言通过 | §11 | ✅ |
 
 ---
@@ -387,7 +388,7 @@ static_assert(std::is_standard_layout_v<ValueMeta>);
 | `is_trivially_copyable` 被未来字段破坏 | 后续若给 `ValueMeta` 加构造/虚函数 | `static_assert` 常驻，破坏即编译失败 |
 | 命名空间引入面 | 若 M3/M4 不跟进，命名空间割裂 | 决策-1 建议作为全工程约定，M3 一并锚定 |
 | `kWalMagic` 端序未定 | M2 占位值，P5 才定端序 | 注释标注；M2 不依赖其字节表示 |
-| `ValueMeta` 序列化含不确定 padding | 隐式 padding 经 `memcpy` 写入 WAL → 字节流不确定 / CRC 不可复现 / 信息泄露 | 已用显式 `reserved[3] = {}` 消除（M2-D8）；P5 序列化前仍建议整体值初始化 |
+| `ValueMeta` 序列化含不确定 padding | 若直接复制整个对象，隐式 padding 会造成字节流不确定 / CRC 不可复现 / 信息泄露 | 已用显式 `reserved[3] = {}` 消除（M2-D8）；P5 最终还通过显式字段编码避免把对象内存布局直接固化到盘上 |
 
 ---
 
@@ -415,4 +416,4 @@ static_assert(std::is_standard_layout_v<ValueMeta>);
 | M4 | `Hash(DataView)` 直接复用 `cabe::DataView`(std::byte)；`RouteToDevice` 返回 `DeviceId` |
 | M5 | `BlockId`/`ValueMeta` 的断言已就位，M5 补行为单测（编解码往返、字段对齐、enum 取值） |
 | P1 | `Engine` 全程使用 `kValueSize`/`BlockId`/`ValueMeta`/`ValueState`；`value.size()==kValueSize` 校验在 Put 路径 |
-| P5 | `ValueMeta` 可平凡复制 + `reserved` 已清零（无不确定 padding），可直接 `memcpy` 序列化；WAL 帧头占位常量（`kWal*`，届时可迁入 wal 模块）供写入/恢复落地 |
+| P5 | `ValueMeta` 可平凡复制且 `reserved` 已清零；P5 最终以 `WalFrame` / `SnapshotRecord` 显式编码字段，未直接序列化整个对象；早期 WAL 占位常量已由真实 128 字节帧取代 |

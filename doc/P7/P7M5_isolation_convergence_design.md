@@ -18,7 +18,7 @@
 | 阶段 / 里程碑 | P7 / M5(收官) |
 | 状态 | ✅ **已实装**(P7 收官) |
 | 上游依赖 | P7M1~M4 全部完成;P7 阶段计划(doc/P7/README.md,P7-D1~D13、退出条件、与 P11 分界) |
-| 下游依赖本里程碑 | 性能兑现轮(流水线 / 并行广播 / group commit 拆壳 / 红线变门槛);P11(真盘大规模验证 + 深度故障隔离 + 运维) |
+| 下游依赖本里程碑 | 性能兑现轮(流水线 / 并行广播 / group commit 拆壳 / 红线变门槛);P11(真盘大规模验证 + 深度故障隔离);P12(通用可观测性和运维工具) |
 | 退出判定 | 见 §11 |
 
 ---
@@ -40,7 +40,7 @@
 | `doc/P7/P7M5_isolation_convergence_design.md`(本文) | 文档 |
 | `doc/P7/P7M1~M4_*.md` 状态 ⏳→✅;`doc/P7/README.md` 状态/里程碑表 | 文档状态 |
 | 根 `README.md` P7 行 ⏳→✅;`ROADMAP.md` P7 段状态(项目级,B4 默认纳入) | 文档状态 |
-| `bench/baselines/p7/engine.io_uring.gcc.json` + `bench/baselines/README.md` p7 说明 | **留 P11**(M5 未生成,见 §4.1/§10) |
+| `bench/baselines/p7/` 三份原始 JSON + `bench/baselines/README.md` | M5 当天未生成，后续已人工归档 loop 路径样本；真盘结论仍留 P11 |
 
 **零改动**:`engine.cpp`/`reactor.cpp` 等**产品代码不动**;**无新增错误码**;无新增 bench 代码(QPS② 推 P11)。
 
@@ -117,11 +117,11 @@ M5 对此角落:确认正常 Close 不变量(§3.1 ③),收敛稿把现行为封
 
 ### 4.1 bench 观察(红线,P7-D2 观察项、非门槛)
 
-- **红线①(单线程 p50 ≤10% 劣化)**:bench 基建就绪(`run-bench.sh --backend=io_uring` + `bench_engine`,P6 基线在
-  `bench/baselines/p6/`)。**M5 未跑形式化 bench**:loop/sparse 盘上数值定性、不可信(README 明示真盘留 P11),
-  且 P7 取向不纠结性能(P7-D2)。按论证预期 <10%(OpNode CAS + futex 一跳 µs 级 vs 1MiB I/O 数百 µs)。
-  **形式化 p7 基线 + 真盘 p50 度量随 P11**(观察项、非门槛,P7 收官不卡此项)。
-- **红线②(多线程 QPS ≥70%×N)**:`bench_engine` 单设备 fixture + loop 盘不可信(A3)→ 不加 bench 代码,真盘度量随 P11。
+- **红线①(单线程 p50 ≤10% 劣化)**:M5 当天只确认 bench 基建就绪，没有用 loop 数值作结论。
+  后续已将单线程原始数据归档到 `bench/baselines/p7/engine.io_uring.gcc.json`；该数据仍只作路径样本，
+  不用于证明 `<10%`。真盘 p50 度量留 P11。
+- **红线②(多线程 QPS ≥70%×N)**:M5 当天未用 loop 设备核验。后续已归档
+  `engine_mt.io_uring.gcc.json` 与 `wal_concurrency.io_uring.gcc.json`，仍不据此判断线性扩展；真盘度量留 P11。
 
 ### 4.2 7 配置全量回归(P7 退出条件 ③,门槛)
 
@@ -200,18 +200,20 @@ io_uring asan/ubsan/release 各 **189/189**(io_uring 多 10 个 backend 用例);
 | R>1(device 内再分区)、钉核 / NUMA / spin-then-wait、io_uring 真异步 / SQPOLL / DEFER_TASKRUN | 性能兑现轮 |
 | 两条红线变退出门槛 | 性能兑现轮 |
 | 深度故障隔离(部分打开/降级、is_dead + 路由绕开)、异常死亡优雅降级 | P11 |
-| N≥8 真盘大规模、聚合带宽线性度、key 分布偏斜、QPS 真度量、运维文档 | P11 |
+| N≥8 真盘大规模、聚合带宽线性度、key 分布偏斜、QPS 真度量及配套验证记录 | P11 |
+| 通用可观测性、命令行运维工具、完整运维手册 | P12 |
 
 产品代码内现存 TODO 仅 2 处(`reactor.cpp` TrimDeviceBlock、`wal.cpp` ReclaimUpTo 后 TRIM),均 P7-D13 明确推后,
 **P7 范围内无未了债**。
 
 ---
 
-## 9. 与 P11 分界
+## 9. 与 P11 / P12 分界
 
-(原文)P7 = **把多设备做出来**(架构/能力,小 N、loop 设备、正确性优先);P11 = **真盘上大规模验证 + 运维**
-(N≥8、聚合带宽线性度、key 分布偏斜、**深度故障隔离**、运维文档),**不新增架构**。多设备的规模/性能度量天然属
-P11(真盘上才有意义)。M5 的"深度故障隔离归 P11"(§3.3)、"QPS 真度量归 P11"(§4.1)与此分界一致。
+P7 = **把多设备做出来**(架构/能力,小 N、loop 设备、正确性优先);P11 = **真盘上大规模验证**
+(N≥8、聚合带宽线性度、key 分布偏斜、**深度故障隔离**)并留下与验证直接相关的配置/处置记录，
+**不新增架构**。通用可观测性、命令行运维工具和完整运维手册归 P12。M5 的“深度故障隔离归 P11”
+(§3.3)、“QPS 真度量归 P11”(§4.1)与此分界一致。
 
 ---
 
@@ -227,7 +229,7 @@ P11(真盘上才有意义)。M5 的"深度故障隔离归 P11"(§3.3)、"QPS 真
 | `doc/P7/README.md` 整体状态 + 里程碑表 | M1~M5 标完成 |
 | 根 `README.md` P7 行 | ⏳ → ✅(项目级,B4 默认纳入) |
 | `ROADMAP.md` P7 段 | 加"状态:✅ 已实施"(项目级) |
-| `bench/baselines/` | p7 形式化基线随真盘 p50 度量留 P11(M5 未生成,见 §4.1) |
+| `bench/baselines/p7/` | M5 后续已人工归档三份 loop 原始 JSON；只作路径样本，真盘结论仍留 P11 |
 
 落盘用 cp、不碰 git(沿用 cabe 既有约束)。
 
@@ -240,10 +242,10 @@ P11(真盘上才有意义)。M5 的"深度故障隔离归 P11"(§3.3)、"QPS 真
 2. 等待者不孤儿(reactor 停止唤醒全等待者,现有 Close/析构测试已证)
 3. P7 全量回归 7 配置全绿(sync 四档 + io_uring 三档;TSAN 在 sync;两组设备)
 4. 收敛稿(本文)审阅通过 + §10 状态同步落实
-5. (观察,非门槛)p50① 记录;覆盖率 ≥80% 记录
+5. (观察,非门槛)bench 路径可运行;覆盖率 ≥80% 记录
 
 **退出判定(2026-06-29 已核销)**:`OpenFailsCleanlyOnBadDevice` 绿 ✅ + 7 配置全量回归全绿(sync 179×4 /
-io_uring 189×3)✅ + 行覆盖率 88.0% ✅ + p50 观察(基建就绪、真盘留 P11)✅ + 状态同步落实(M1~M5 ✅、
+io_uring 189×3)✅ + 行覆盖率 88.0% ✅ + bench 路径确认(原始 JSON 后续已归档、真盘结论留 P11)✅ + 状态同步落实(M1~M5 ✅、
 doc/P7/README、根 README、ROADMAP)✅ → **P7 收官**。
 
 ---
@@ -256,6 +258,6 @@ doc/P7/README、根 README、ROADMAP)✅ → **P7 收官**。
    污染好设备 + by-construction 运行时隔离论证 + no-orphan。部分打开/降级是深度隔离、归 P11。
 3. **异常死亡 fail-stop 优于半截 try/catch**:半截 try/catch 留死 reactor 让后续 op 永久挂、更糟;现行 fail-stop
    是干净响亮失败;优雅降级(is_dead + 路由绕开)归 P11。
-4. **红线是观察项**:p50① M5 记录(预期 <10%),QPS② loop 盘不可信、真盘度量归 P11;两者变门槛归性能轮(P7-D2)。
+4. **红线是观察项**:P7 的 p50/QPS 原始 JSON 后续已归档，但 loop 盘不可信，不据此验证阈值；真盘度量归 P11。
 5. **TSAN 证据无空洞**:P7 简单版无 io_uring 专属异步并发面(仍"提交即等待"),并发面全是后端无关的 reactor
    投递/唤醒,sync+TSAN 完整覆盖(验证策略既定)。

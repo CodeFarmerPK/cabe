@@ -20,7 +20,7 @@
 | 阶段 / 里程碑 | P8 / M3 |
 | 状态 | ✅ 已实装 |
 | 上游依赖 | P1 ~ P7 已完成；P8M1 公开 `ValueBuffer` API 已实装；P8M2 `ValueBufferPool` 已实装 |
-| 下游依赖本里程碑 | P8M4 后端写入协议与 `io_uring` 注册缓冲区；P8M5 bench 与收敛；P10 SPDK 后端 |
+| 下游依赖本里程碑 | P8M4 后端写入协议与 `io_uring` 注册缓冲区；P8M5 bench 与收敛；P9 SPDK 后端 |
 | 退出判定 | 见 §14 |
 
 ---
@@ -68,7 +68,7 @@
 | 新增公开路径统计接口 | 不做 |
 | `IoBackend` 写入描述符升级 | P8M4 |
 | `io_uring` 注册缓冲区注册、注销和 fixed buffer 写入 | P8M4 |
-| SPDK 后端或 SPDK DMA 内存接入 | P10 |
+| SPDK 后端或 SPDK DMA 内存接入 | P9 |
 | bench 和性能档案归档 | P8M5 |
 | 写入流水线化 | 后续性能阶段 |
 | 通用 `BufferHandle` 基础设施 | 不做；当前仍是 value 专用 `ValueBuffer` |
@@ -85,7 +85,7 @@
 | **P8M3-D4** | Cabe 值缓冲区匹配规则 | `ValueBuffer` 采用键绑定：只有分配键与 `Put` 键完全一致，且槽位有效、设备归属匹配，才进入主直接写入路径。 |
 | **P8M3-D5** | 键不匹配 / 跨设备行为 | 键不匹配和设备不匹配都不返回错误；有效 Cabe 值缓冲区不满足主路径条件时复制回退。 |
 | **P8M3-D6** | 池内无效地址 | 地址落在值缓冲区池内但槽位未分配或不完整时，分类为 `PoolAddressNotAllocated`，复制回退；文档标记为生命周期误用。 |
-| **P8M3-D7** | 应用端自备内存规则 | 采用后端能力判断；P8M3 当前 sync / `io_uring` 普通写按 4 KiB 对齐判断；未来 SPDK 必须是 Cabe 可验证的 DMA 可用内存。 |
+| **P8M3-D7** | 应用端自备内存规则 | 采用后端能力判断；P8M3 当前 sync / `io_uring` 普通写按 4 KiB 对齐判断；P9 SPDK 下应用端自备普通内存复制回退，只有 Cabe 可验证的 DMA 可用内存进入直接写入。 |
 | **P8M3-D8** | 后端接口 | P8M3 复用现有 `IoBackend::Write(block_idx, const std::byte*)`；写入描述符留给 P8M4。 |
 | **P8M3-D9** | 写入顺序 | 不改变 `ExecutePut` 事务顺序；只把 “BufferPool + memcpy” 替换为“写入源选择”。 |
 | **P8M3-D10** | CRC 与生命周期 | `Put` 调用期间 value 必须存活且内容不可变；CRC 基于实际写入源计算；Cabe 不做运行时防护。 |
@@ -588,19 +588,21 @@ P8M4 再升级为写入描述符，表达：
 - 设备归属；
 - 池编号；
 - 槽位编号；
-- 注册缓冲区索引；
-- 后端私有信息。
+- 槽位代次。
+
+`io_uring` 后端把槽位编号映射为注册缓冲区索引；该映射不进入 `IoWriteBuffer`，也不以私有指针
+传回 engine 或 reactor。
 
 ### 10.3 与 SPDK
 
 P8M3 不引入 SPDK。但 D7 已为 SPDK 留出边界：
 
 ```text
-应用端自备普通内存即使 1 MiB 对齐，也不自动成为 SPDK 直接写入候选。
+应用端自备普通内存即使 1 MiB 对齐，在 P9 SPDK 后端下仍走复制回退。
 ```
 
-未来 SPDK 直接写入要求内存来自 Cabe 可验证的 DMA 可用来源。P10 可以把 `ValueBufferPool` 底层分配替换为
-SPDK / DPDK DMA 内存池，而不推翻 `ValueBuffer` 公开语义。
+P9 SPDK 直接写入要求内存来自 Cabe 可验证的 DMA 可用来源。P9M7 把 `ValueBufferPool` 底层分配替换为
+SPDK DMA 可用内存，而不推翻 `ValueBuffer` 公开语义；P9 不提供应用端普通内存的 DMA 导入接口。
 
 ---
 
@@ -734,11 +736,11 @@ P8M3:
   PutValueSource -> PutWritePlan -> IoBackend::Write(block, const byte*)
 
 P8M4:
-  PutValueSource -> WriteBuffer 描述符 -> 后端普通写 / 注册缓冲区写
+  PutValueSource -> IoWriteBuffer -> 后端普通写 / 注册缓冲区写
 ```
 
 P8M4 应复用 P8M3 的来源分类结果，把 `TargetKeyValueBuffer` 映射到 `io_uring` 注册缓冲区槽位，并继续让
 `OtherKeyValueBuffer`、`OtherDeviceValueBuffer`、`PoolAddressNotAllocated` 和不满足后端能力的外部内存走复制回退。
 
-P10 SPDK 后端应把 Cabe 值缓冲区池底层分配替换为 DMA 可用内存，应用端自备普通内存即使对齐也不自动进入
-SPDK 直接写入。
+P9 SPDK 后端把 Cabe 值缓冲区池底层分配替换为 DMA 可用内存；应用端自备普通内存即使对齐也明确走
+复制回退，不进入 SPDK 直接写入。

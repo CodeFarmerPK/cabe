@@ -66,7 +66,7 @@ public:
     Status Close();                                     // Opened → Closed
 
     Status Put(std::string_view key, DataView value);   // value.size() == kValueSize
-    ValueBufferResult AllocateValueBuffer(std::string_view key); // P8M1：分配 Cabe 值缓冲区；M1 占位，M2 起真实分配
+    ValueBufferResult AllocateValueBuffer(std::string_view key); // P8 起：分配 Cabe 值缓冲区
     Status Get(std::string_view key, DataBuffer value); // value.size() == kValueSize
     Status Delete(std::string_view key);
 
@@ -91,16 +91,16 @@ public:
 > 与 P5M6 稿 §11（§4 的分配表保持 P2 时点快照不回写）。
 >
 > **冻结追加注（P8M1）**：零拷贝阶段按 P8-D2 保持 `Put` 统一入口，但追加
-> `ValueBuffer` / `ValueBufferResult` 与 `AllocateValueBuffer(key)` 分配接口。M1 只落 API 和
-> 前置校验，占位返回 `kEngineNotImplemented`；真实分配从 P8M2 接入。
+> `ValueBuffer` / `ValueBufferResult` 与 `AllocateValueBuffer(key)` 分配接口。P8M1 先落 API 和
+> 前置校验，P8M2 接入真实值缓冲区池，P8M3～P8M4 完成 Put 路径选择和后端零拷贝写入。
 
 **承诺语义**：
 
 | 方法 | 承诺 |
 |---|---|
-| `Open` | 已 Opened 时返回 `kEngineAlreadyOpen`（幂等防护）；P1 限单 device，未来多 device 时 `opts.devices.size() > 1` 将被支持。**P5M6 起 `create=false`（recover）= 完整恢复链**：超级块校验 → 加载最新快照 → 重放 WAL 活帧 → 重建空闲块，启动后数据与崩溃/关闭前一致（级别契约内的丢失除外）；恢复**要么完整成功要么干净失败**（任一环错 → Open 失败、引擎不上线，不交付部分恢复的实例）；Open 成功后 create/recover 两种来路行为无差别 |
-| `Close` | 未 Opened 时返回 `kEngineNotOpen`；释放所有资源 |
-| `Put` | key 非空 + `value.size() == kValueSize`；覆盖写（同 key 最后一次 Put 生效）；**持久化原子性由 WAL 保证（P5+），当前无持久化保证**。P5M5 起可能返回 `kWalFull`（仅 WAL 环空间耗尽且快照救援无效时——失败干净：索引未动、旧值可读；属运维信号） |
+| `Open` | 已 Opened 时返回 `kEngineAlreadyOpen`（幂等防护）；P1 限单 device，P7 已支持多设备并保持全开或全失败。**P5M6 起 `create=false`（recover）= 完整恢复链**：超级块校验 → 加载最新快照 → 重放 WAL 活帧 → 重建空闲块，启动后数据与崩溃/关闭前一致（级别契约内的丢失除外）；恢复**要么完整成功要么干净失败**（任一环错 → Open 失败、引擎不上线，不交付部分恢复的实例）；Open 成功后 create/recover 两种来路行为无差别 |
+| `Close` | 未 Opened 时返回 `kEngineNotOpen`；P8 起先阻止新资源请求，再等待已分配 `ValueBuffer` 和分配线程归零，随后停止并回收全部 reactor/设备资源，禁止资源跨越 Close/Open 周期。P9 的 SPDK runtime 继续遵守同一严格周期边界 |
+| `Put` | key 非空 + `value.size() == kValueSize`；覆盖写（同 key 最后一次 Put 生效）。P5 起由 WAL 四级策略定义持久化与返回语义；P8 的零拷贝或复制路径不改变该语义。P5M5 起可能返回 `kWalFull`（仅 WAL 环空间耗尽且快照救援无效时——失败干净：索引未动、旧值可读；属运维信号） |
 | `Get` | 返回最后一次 Put 的 value；CRC32 校验不匹配返回 `kEngineDataCorrupted` |
 | `Delete` | 标记删除 + 立即回收块号；删后 Get 返回 `kIndexKeyNotFound`。P5M5 起可能返回 `kWalFull`（同 Put：失败时索引/块全不动） |
 | 析构 | 若仍 Opened → 自动 Close + `CABE_LOG_WARN` |
@@ -134,7 +134,8 @@ struct ValueBufferResult {
 
 > **冻结追加注（P8M1）**：`ValueBuffer` 是 Cabe 值缓冲区的公开 RAII 资源对象，移动专属、
 > 默认无效、析构自动归还资源。`ValueBufferResult` 用于返回分配结果，错误语义仍以 `Status`
-> 为准。M1 暂不产生有效 `ValueBuffer`；真实值缓冲区池从 P8M2 接入。
+> 为准。P8M2 起由真实 `ValueBufferPool` 分配有效缓冲区；P8M4 的 io_uring 后端将其注册为
+> 固定缓冲区，P9 则在同一公开接口内把池的内存来源替换为 SPDK DMA 内存。
 
 #### `cabe::Options`（`engine/options.h`）
 
@@ -190,7 +191,7 @@ struct Status {
 
 | 类型 | 头文件 | 用途 |
 |---|---|---|
-| `BlockId` | `common/structs.h` | 物理块地址（8 字节，D5 编码） |
+| `BlockId` | `common/structs.h` | 设备编号与逻辑块号的 8 字节编码；物理数据偏移由 I/O 后端加设备头部 8K 后得到 |
 | `DeviceId` | `common/structs.h` | 设备编号（`uint8_t`） |
 | `DataView` | `common/structs.h` | 只读字节视图（`std::span<const std::byte>`） |
 | `DataBuffer` | `common/structs.h` | 可写字节视图（`std::span<std::byte>`） |
@@ -212,11 +213,15 @@ struct Status {
 > （演进注——本表为 P2 时点快照，恰因"不在冻结承诺内"而自由演进：P3 起 I/O 与索引抽象化
 > （IoBackend/MetaIndex concept）、`WriteBlock/ReadBlock` 被吸收；P4.5 起 `FreeList` →
 > `BlockAllocator`（`slots/`）；P5 起 `DeviceContext` = `{io, wal, snapshot, pool,
-> block_allocator, meta_index, super_block}`。）
+> block_allocator, meta_index, super_block}`；P7 再由每设备 reactor 独占 `DeviceContext`，P8
+> 增加独立的 `ValueBufferPool`。P9 将继续在这些内部边界内接入 SPDK，不扩大公开冻结面。）
 
 ---
 
 ## 4. 错误码空间审查
+
+> 本节的数量和清单保留 P2 冻结时点快照。P5 已新增 snapshot 段及后续错误码；P9-D20
+> 已锁定再增 SPDK 专属段，现行完整清单始终以 `common/error_code.h` 为准。
 
 ### 4.1 段位划分（尽量保持）
 
@@ -265,7 +270,9 @@ P1 期间确立的约定，P2 冻结确认：
 
 | 层 | 返回类型 | 示例 |
 |---|---|---|
-| 公开 API（Engine 5 个方法；P5 起 7 个——追加 `SetWalLevel`/`Snapshot()`，见 §3.1 冻结追加注） | `cabe::Status` | `return Status::Ok();` |
+| 公开状态操作（P8 起为 `Open` / `Close` / `Put` / `Get` / `Delete` / `SetWalLevel` / `Snapshot`） | `cabe::Status` | `return Status::Ok();` |
+| 公开值缓冲区分配（P8 起） | `cabe::ValueBufferResult` | `{Status, ValueBuffer}` |
+| 公开状态观察 | `bool` | `is_open()` |
 | 内部组件（IO / FreeList / MetaIndex） | `int32_t` 错误码 | `return err::kSuccess;` |
 | 转换点 | Engine 方法体内 | `if (rc != err::kSuccess) return Status::Error(rc);` |
 
@@ -275,8 +282,8 @@ P1 期间确立的约定，P2 冻结确认：
 
 | 内容 | 原因 | 何时定型 |
 |---|---|---|
-| 零拷贝 `BufferHandle` 接口 | 尚未实装 | P8 |
-| 多 device 路由策略 | P1 写死单 device | P3（IoBackend 抽象层引入时） |
+| 零拷贝 `ValueBuffer` 接口 | P2 当时尚未实装；P8 已以 value 专用 RAII 对象落地 | P8 |
+| 多 device 路由策略 | P2 时尚未实装；P7 已按 `hash(key) % N` 落地 | P7 |
 | WAL 帧格式 / recovery 接口 | 尚未实装 | P5 |
 | Reactor 并发接口 | 尚未实装 | P7 |
 | `IoBackend` / `MetaIndex` concept | 尚未引入抽象层 | P3 |
@@ -288,9 +295,9 @@ P1 期间确立的约定，P2 冻结确认：
 | 风险 | 说明 | 缓解 |
 |---|---|---|
 | 冻结太早 | P3-P12 可能发现公开 API 不够用——需要改签名 | 冻结是意图声明非绝对约束；改了同步更新文档 |
-| Options 扩展 | P5 已按"末尾追加"约定扩展：`DeviceConfig` 改三路径（data/wal/snapshot）、`Options` 增 `create` + WAL/快照/恢复字段 | 追加字段未改既有字段语义；DeviceConfig 由单路径变三路径属被迫改动，已同步本文 |
-| 错误码扩展 | P5M1 已在 wal_recovery 段分配超级块校验码（`kSuperBlock*`，-105000 起）；io / wal 段仍按需追加 | 6000 容量充足；段内追加即可 |
-| Put 无持久化保证 | 当前 power loss 丢全部数据 | P5 WAL 解决；API 承诺语义已声明"P5+ 才有持久化原子性" |
+| Options 扩展 | P5 已按"末尾追加"约定扩展 data/WAL/snapshot 路径和恢复字段；P8 追加值缓冲区池配置；P9 将追加独立的类型化 `spdk_devices` 配置 | 新字段不改变既有 Raw 路径语义；SPDK 使用 `BDF + namespace id`，不把伪设备路径塞入旧字段 |
+| 错误码扩展 | P5 已增加 snapshot 段；P9-D20 决定新增 SPDK 专属错误码段 | 沿用“不够用则追加新段且保持旧码值不变”的扩展纪律；具体 SPDK 段由 P9M1 定义 |
+| Put 持久化语义被后端演进破坏 | P2 时尚无 WAL；P5 已建立四级持久化语义，P8 零拷贝未改变该契约 | P9 的 SPDK value/WAL 路径必须继续通过恢复与故障测试证明四级语义不退化 |
 
 ---
 

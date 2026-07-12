@@ -7,11 +7,16 @@
 
 ## 状态
 
-🚧 **未启动**（P3 全部完成；待 owner 确认启动）
+✅ **已完成**（P4M1～P4M4 已实装并由 P4M4 收敛）
+
+> 后续兑现：P7 在该后端上完成 reactor / 多线程 / 多设备框架迁移，但 io_uring 仍采用提交即等待；
+> P8 完成 registered buffers。P9 将 SPDK 作为长期 I/O 方向，io_uring 保留为过渡与回归后端。
+> P6 起所有测试脚本都必须显式传入 `--backend`。
 
 ## 范围摘要
 
-- `IoUringIoBackend` 完整实现：满足 `IoBackend` concept 的 5 个方法（Open / Close / BlockCount / Write / Read）
+- `IoUringIoBackend` 在 P4 完成当时的 5 方法接口；P8M4 后已适配新增的
+  `RegisterWriteBuffers` 和 `IoWriteBuffer` 写入协议
 - liburing ≥ 2.9 硬性系统依赖（CMake `pkg_check_modules` 校验版本）
 - 每 `(device, reactor)` 一个独立 ring（P4 阶段 R=1，实际只有一个 ring）
 - 预注册文件描述符（`io_uring_register_files` + `IOSQE_FIXED_FILE`）
@@ -20,7 +25,7 @@
 - 部署文档：ulimit / RLIMIT_MEMLOCK / sysctl `kernel.io_uring_disabled`
 - 测试脚本改进：`--device=` 参数化传入设备路径
 - CMake `-DCABE_IO_BACKEND=io_uring` 编译期切换生效
-- **不做**：预注册缓冲区（P8）/ 性能基准（发版后补）/ 多线程（P7）/ 零拷贝（P8）/ SPDK（P10）
+- **不做**：预注册缓冲区（P8 已兑现）/ P4 独立性能基准（首个正式锚点在 P6）/ 多线程（P7 已兑现）/ 零拷贝（P8 已兑现）/ SPDK（P9 正在推进）
 
 ## 里程碑文档清单
 
@@ -42,15 +47,15 @@ P4M1 ──► P4M2 ──► P4M3 ──► P4M4
 ## 启动条件
 
 1. ✅ P3 全部完成（IoBackend concept + CMake 分派已生效）
-2. ⏳ owner 确认启动
-3. ⏳ 用 `/grill-with-docs P4M1` 开第一个里程碑的文档设计
+2. ✅ owner 已确认启动
+3. ✅ P4M1～P4M4 详细设计、实现与收敛全部完成
 
-## 各里程碑范围与待梳理决策点
+## 各里程碑范围与设计前决策点（均已锁定）
 
 ### P4M1（liburing 接入 + 基础实现）
 
 **范围**：
-- CMake 接入 liburing（`find_package` / `pkg-config` / `FetchContent` 策略待定）
+- CMake 通过 `pkg-config` 接入系统 `liburing >= 2.9`；版本不满足时直接配置失败，不做 `FetchContent` 降级
 - 新建 `io/uring/` 子目录，实现 `IoUringIoBackend`
 - 基础 submit / wait 模型：每次 Write / Read 提交一个 SQE → `io_uring_submit` → `io_uring_wait_cqe` 等待单个 CQE
 - `static_assert(IoBackend<IoUringIoBackend>)` 编译期验证
@@ -58,7 +63,7 @@ P4M1 ──► P4M2 ──► P4M3 ──► P4M4
 - 单元测试：复用 SyncIoBackend 的测试结构（需 loop 设备）
 - `engine/CMakeLists.txt` 加 `elseif(CABE_IO_BACKEND STREQUAL "io_uring")` 分支
 
-**待梳理决策点**：
+**设计前问题（答案见 P4M1 详细稿）**：
 1. liburing 接入方式：系统库 `pkg-config` 优先 + `FetchContent` 兜底？还是只依赖系统库？
 2. ring 大小（队列深度）：固定值（如 64 / 128）还是可配置？
 3. Open 时机：ring 在 `Open(path)` 内初始化还是构造时？
@@ -69,7 +74,7 @@ P4M1 ──► P4M2 ──► P4M3 ──► P4M4
 
 **范围**：
 - 预注册文件描述符（`io_uring_register_files`）：Open 时注册 fd，Write / Read 使用固定文件标志（`IOSQE_FIXED_FILE`）
-- 预注册缓冲区（registered buffers）推到 P8——当前 IoBackend 接口不传缓冲区索引，P8 重新设计缓冲区管理时统一处理
+- 预注册缓冲区在 P4 时推到 P8；P8M4 后已通过 `RegisterWriteBuffers`、`IoWriteBuffer` 和槽位身份完成实现
 
 **已锁定决策**：
 1. P4M2-D1：只做预注册文件描述符，预注册缓冲区推到 P8
@@ -87,7 +92,7 @@ P4M1 ──► P4M2 ──► P4M3 ──► P4M4
 **已锁定决策**：
 1. P4M3-D1：TSAN 维持现状——互斥检查 + 文档说明
 2. P4M3-D2：测试设备通过 `--device=` 参数传入
-3. P4M3-D3：性能基准发版后再补，P4 不做
+3. P4M3-D3：P4 不做性能基准；P6 随后建立首个正式 io_uring 历史锚点
 
 ### P4M4（收敛）
 

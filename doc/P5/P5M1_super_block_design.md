@@ -223,6 +223,7 @@ namespace cabe {
 - `ReadAt` / `WriteAt` 的 offset、len、buf 都要求 4K 对齐——O_DIRECT 硬约束。超级块 4K、WAL 帧凑 4K、快照大块都满足。
 - 放 `util/`——它是无业务语义的基础工具，util 模块依赖最少。
 - RawDevice 服务于超级块的 4K 粒度读写；数据设备的 1M 块 I/O 仍由 IoBackend 负责（方案 B 下 IoBackend 内部加 `kDataRegionOffset` 偏移）。
+- P9 同步注：上述内容是 P5 Raw 路径的历史实现。P9M5 将超级块读写迁移到轻量设备视图，Raw 与 SPDK 共用一份格式和身份校验逻辑；SPDK Open 阶段可使用临时 qpair。
 
 ---
 
@@ -313,13 +314,13 @@ namespace cabe {
         // WAL 配置（全局统一；M3 起生效，M1 占位）
         WalLevel wal_level = WalLevel::WalSync;        // 默认级别 3
         std::size_t wal_buffer_size = 32 * 1024;       // 攒批缓冲，默认 32K（P5M3：同步/攒批共用单块、Open 时定死，运行时改大小留未来）
-        std::uint32_t wal_flush_interval_ms = 1000;    // 定时刷出兜底，默认 1s（P5M3 不读；定时刷出需后台线程，推迟 P7）
+        std::uint32_t wal_flush_interval_ms = 1000;    // 定时刷出兜底，默认 1s（P5M3/P7 均未读取；归性能兑现阶段）
 
         // 快照配置（全局统一；M4 起生效，M1 占位）
         std::uint64_t snapshot_threshold_bytes = 512ull * 1024 * 1024; // WAL 达 512M 触发快照
         // （P5M4 新增 snapshot_buffer_size = 1M：快照流式写的临时缓冲，每次快照现读、可动态改——
         //   M1 的"完整字段清单"未含此项，M4 按需补入快照配置块）
-        std::uint32_t snapshot_interval_sec = 600;     // 定时快照兜底，默认 10 分钟（P5M4 注：M4 不读、P7 起生效）
+        std::uint32_t snapshot_interval_sec = 600;     // 定时快照兜底，默认 10 分钟（P5M4/P7 均未读取；归性能兑现阶段）
                                                        // 触发 = 大小阈值 OR 定时，任一满足
 
         // 恢复配置（M6 起生效，M1 占位）
@@ -383,6 +384,8 @@ Status Engine::Open(const Options& opts) {
 ```
 
 `CreateDeviceGroup` / `RecoverDeviceGroup` 为 `engine/super_block.*` 的自由函数，内部用 RawDevice 读写三设备头部 8K 的双份超级块。超级块读写走 RawDevice（4K 粒度），不经过 IoBackend。
+
+P9 同步注：P9 不把超级块强塞进 1 MiB value/data `IoBackend`。P9M5 引入超级块轻量设备视图，保留上述自由函数中的格式、CRC 和身份校验主逻辑，底层分别适配 Raw 和 SPDK namespace。
 
 ### 9.3 IoBackend 加数据区偏移 + BlockAllocator 保持 block 0
 
@@ -504,6 +507,7 @@ test/engine/super_block_test.cpp     # 新建
 |---|---|
 | **P5M2（WAL）** | 复用 `RawDevice` 读写 WAL 设备；WAL 环形区从 @8K 起；超级块已校验设备身份 |
 | **P5M4（快照）** | 复用 `RawDevice`；快照区从 @8K 起 |
+| **P9M5（超级块设备视图）** | 将 P5 的 RawDevice 访问点迁移到轻量设备视图；Raw / SPDK 共用格式与身份校验逻辑 |
 | **P5M6（恢复）** | recover 流程已搭好超级块校验骨架，M6 在校验通过后追加"加载快照 + 重放 WAL + 重建 BlockAllocator" |
 | **P7（多设备）** | 超级块 device_id 字段已就位，多设备时校验顺序；解除单设备限制 |
 

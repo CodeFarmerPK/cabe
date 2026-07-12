@@ -56,7 +56,7 @@
 
 - **P3M1–M3 全部完成并已工作区落盘**：
   - P3M1（`6d05e0e` 之前）：`io/io_backend.h`（5 方法 C++20 concept）+ `io/sync/sync_io_backend.*`（SyncIoBackend 实装）+ 10 个单元测试
-  - P3M2（`a78f484`）：`index/meta_index.h`（7 方法 C++20 concept）+ `index/hash/hash_meta_index.*`（HashMetaIndex 实装）+ 10 个契约测试
+  - P3M2（`a78f484`）：`index/meta_index.h`（8 方法 C++20 concept）+ `index/hash/hash_meta_index.*`（HashMetaIndex 实装）+ 10 个契约测试
   - P3M3（`6d05e0e`）：`engine/backend_config.h`（配置头）+ DeviceContext / Engine 改造 + CMake 分派生效 + 旧代码清理（6 个文件删除）
 - **全部测试通过**：P3M3 提交后四档（release / asan / tsan / ubsan）全绿
 - **P3 README / ROADMAP / 根 README 状态字段尚未更新**：
@@ -71,19 +71,24 @@
 
 ### 3.1 IoBackend 抽象层（详 [P3M1_io_backend_design.md](P3M1_io_backend_design.md)）
 
-- **IoBackend C++20 concept**：5 个同步方法——`Open(path)` / `Close()` / `BlockCount()` / `Write(block_idx, buf)` / `Read(block_idx, buf)`，全部返回 `int32_t` 错误码（`BlockCount` 例外，返回 `uint64_t`）。
+- **IoBackend C++20 concept**：P3 时点为 5 个同步方法——`Open(path)` / `Close()` / `BlockCount()` /
+  `Write(block_idx, const byte*)` / `Read(block_idx, byte*)`。P8M4 后现行 `Write` 参数已升级为
+  `const IoWriteBuffer&`，并新增 `RegisterWriteBuffers(span<ValueBufferSlotView>)`；读接口和同步返回
+  边界不变。
 - **SyncIoBackend**：包装 `::open(O_DIRECT)` + `ioctl(BLKGETSIZE64)` + `pwrite` / `pread` + `::close`，管理完整设备生命周期。
-- **目录结构**：`io/io_backend.h`（接口）+ `io/sync/sync_io_backend.*`（实现）——P4 加 `io/uring/`，P10 加 `io/spdk/`。
+- **目录结构**：`io/io_backend.h`（接口）+ `io/sync/sync_io_backend.*`（实现）——P4 加 `io/uring/`，P9 加 `io/spdk/`。
 - **编译期验证**：`static_assert(IoBackend<SyncIoBackend>)` 在头文件中。
 - **决策锁定**：P3M1-D1（完整生命周期方法）、P3M1-D2（空构造 + Open）、P3M1-D3（子目录分层）。
 
 ### 3.2 MetaIndex 抽象层（详 [P3M2_meta_index_design.md](P3M2_meta_index_design.md)）
 
-- **MetaIndexBackend C++20 concept**：7 个方法——`Insert` / `Lookup` / `Delete` / `Size` / `Contains` / `ForEach` / `WriteSnapshot` / `LoadSnapshot`（后两个空壳，P5 实装）。**（P5M4 起收窄为 5 方法：移除 `WriteSnapshot` / `LoadSnapshot`，`ForEach` 改返回 `int32_t` 可中止——见 P5M4 设计稿。）**
+- **MetaIndexBackend C++20 concept**：P3 时为 8 个方法——`Insert` / `Lookup` / `Delete` / `Size` /
+  `Contains` / `ForEach` / `WriteSnapshot` / `LoadSnapshot`（后两个为空壳）。P5M4 移除后两个，
+  并把 `ForEach` 改为返回 `int32_t` 可中止；现行 concept 共 6 个方法。
 - **HashMetaIndex**：包装 `unordered_map<string, ValueMeta>`；`ForEach` 已实装遍历逻辑，`WriteSnapshot` / `LoadSnapshot` 返回 `kEngineNotImplemented`。
 - **MetaIndexVisitor**：`std::function<void(string_view, const ValueMeta&)>`。
-- **目录结构**：`index/meta_index.h`（接口）+ `index/hash/hash_meta_index.*`（实现）——P9 加 `index/bplustree/`。
-- **契约测试**：`TYPED_TEST` 形态——P9 加 B+ 树只需改 `Types<>` 列表。
+- **目录结构**：`index/meta_index.h`（接口）+ `index/hash/hash_meta_index.*`（实现）——P10 加 `index/bplustree/`。
+- **契约测试**：`TYPED_TEST` 形态——P10 加 B+ 树只需改 `Types<>` 列表。
 - **决策锁定**：P3M2-D1（与 io/ 对称的目录布局）、P3M2-D2（`TYPED_TEST` 契约测试）。
 
 ### 3.3 Engine 切换 + CMake 分派（详 [P3M3_engine_switch_design.md](P3M3_engine_switch_design.md)）
@@ -100,8 +105,8 @@
 | 阶段级 | 里程碑级 | 简述 |
 |---|---|---|
 | P3-D1 | — | 同步接口，无 poll 模型 |
-| P3-D2 | — | BufferHandle 推到 P8 |
-| P3-D3 | — | 7 个方法（含空壳） |
+| P3-D2 | — | value 专用 `ValueBuffer` 推到 P8（旧占位名 `BufferHandle` 不再使用） |
+| P3-D3 | — | P3 时为 8 个方法（含两个空壳）；P5M4 后为 6 个 |
 | P3-D4 | — | 不做伪 SPDK / Mock |
 | P3-D5 | — | 4 个里程碑串行 |
 | — | P3M1-D1~D3 | 完整生命周期 / 空构造 + Open / 子目录分层 |
@@ -166,6 +171,10 @@ P3 段头部加状态标注：
 3. **范围摘要**：`IoUringIoBackend` 完整实现、liburing ≥ 2.9 接入、per-(device, reactor) 一个独立 ring、submit / wait 模型。
 4. **里程碑文档清单**（占位）：待决策梳理划分。
 5. **启动条件**：P3M4 收敛稿审阅通过 + owner 确认 + 用 `/grill-with-docs P4M1` 开第一个里程碑。
+
+> **后续兑现注**：本节是 P3M4 当时创建 P4 占位索引的历史内容。P4 最终只完成 registered files，
+> registered buffers 延至 P8；P4 未做性能基线。P7 建立 reactor 但 io_uring 仍为提交即等待，
+> 真异步和批量提交继续归性能兑现阶段。
 6. **已知决策点候选**：
    - io_uring ring 大小与队列深度
    - registered buffers 与 BufferPool 的交互
@@ -179,7 +188,7 @@ P3 段头部加状态标注：
 
 | 风险 | 说明 | 缓解 |
 |---|---|---|
-| P3 未做性能基线归档 | P4 io_uring 没有 P3 sync 基线做对照 | P3 功能等价于 P2；P4 设计稿中可先跑 sync 基线再对比 io_uring |
+| P3 未做性能基线归档 | P4 最终也未建立阶段对比基线 | P6 建立首个正式 io_uring 历史锚点；P3/P4 不补做性能结论 |
 | 编译定义 PUBLIC 传播 | `CABE_USE_IO_SYNC` 等定义传播到所有链接 `cabe_engine` 的目标 | cabe 是独立项目，不作为第三方库发布 |
 | 旧代码已删除，无法对比 | `engine/io.*` / `engine/meta_index.*` 已删 | git 历史可追溯 |
 
@@ -194,11 +203,11 @@ P3 段头部加状态标注：
    - ✅ IoBackend concept 定义 + SyncIoBackend 实装 + 10 个单元测试全绿
    - ✅ MetaIndex concept 定义 + HashMetaIndex 实装 + 10 个契约测试全绿
    - ✅ Engine 通过 concept 调用——测试不退步 + 覆盖率 ≥ 80%
-   - ✅ CMake `CABE_IO_BACKEND=sync` / `CABE_META_INDEX=hashmap` 编译期分派生效；设置其他值 `FATAL_ERROR`
+   - ✅ P3 时点 CMake `CABE_IO_BACKEND=sync` / `CABE_META_INDEX=hashmap` 编译期分派生效，未实现值快速失败；P4 后 `io_uring` 已成为合法后端，P9 再增加 `spdk`
    - ✅ P3M4 收敛稿审阅通过 + ROADMAP / README 状态同步
 3. **回归实证**：
-   - `run-tests.sh --release` / `--asan` / `--tsan` / `--ubsan` 四档全绿
-   - `run-coverage.sh --strict` 覆盖率 ≥ 80%
+   - `run-tests.sh --backend=sync --release/--asan/--tsan/--ubsan` 四档全绿
+   - `run-coverage.sh --backend=sync --strict` 覆盖率 ≥ 80%
 4. **状态同步全完**：
    - 各 P3M1–M3 设计稿 → "✅ 已锁定（P3M4 收敛）"
    - `doc/P3/README.md` → "✅ 已完成" + 里程碑清单更新
@@ -210,16 +219,17 @@ P3 段头部加状态标注：
 
 ```bash
 # 四档测试
-scripts/run-tests.sh --release
-scripts/run-tests.sh --asan
-scripts/run-tests.sh --tsan
-scripts/run-tests.sh --ubsan
+scripts/run-tests.sh --backend=sync --release
+scripts/run-tests.sh --backend=sync --asan
+scripts/run-tests.sh --backend=sync --tsan
+scripts/run-tests.sh --backend=sync --ubsan
 
 # 覆盖率
-scripts/run-coverage.sh --strict
+scripts/run-coverage.sh --backend=sync --strict
 
-# CMake 分派验证
-cmake -S . -B /tmp/cabe-uring-check -DCABE_IO_BACKEND=io_uring 2>&1 | grep "FATAL_ERROR"
+# P3M4 当时用下一阶段的 io_uring 验证未实现值快速失败；P4 后该命令应成功，不再执行旧断言
+# cmake -S . -B /tmp/cabe-uring-check -DCABE_IO_BACKEND=io_uring 2>&1 | grep "FATAL_ERROR"
+# B+树在 P10 实现前仍应快速失败
 cmake -S . -B /tmp/cabe-btree-check -DCABE_META_INDEX=bplustree 2>&1 | grep "FATAL_ERROR"
 
 # 状态同步验证
@@ -234,7 +244,8 @@ grep -rn "🚧\|待设计\|待 owner 终审\|⏳" doc/P3/ README.md ROADMAP.md |
 |---|---|
 | **P4 启动** | `doc/P4/README.md` 已就位（启动条件 + 决策点候选）；`/grill-with-docs P4M1` 即可启动 |
 | **P4 io_uring 后端** | `engine/backend_config.h` 加 `#elif CABE_USE_IO_URING` 分支 + `engine/CMakeLists.txt` 加 `elseif` 即可接入 |
-| **P9 B+ 树索引** | `engine/backend_config.h` 加 `#elif CABE_USE_META_BPLUSTREE` 分支 + 契约测试 `Types<>` 加类型即可接入 |
+| **P9 SPDK 后端** | value/data 通过 `SpdkIoBackend` 接入；WAL、snapshot 和超级块使用各自设备抽象，保持 P3 的 1 MiB `IoBackend` 边界清晰 |
+| **P10 B+ 树索引** | `engine/backend_config.h` 加 `#elif CABE_USE_META_BPLUSTREE` 分支 + 契约测试 `Types<>` 加类型即可接入 |
 | **P4+ 模块复用 P3 抽象层** | IoBackend / MetaIndexBackend concept 作为稳定接口；新后端只需实现 concept 并 `static_assert` 验证 |
 
 ---

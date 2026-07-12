@@ -30,6 +30,10 @@
 4. 编写 SyncIoBackend 单元测试（需 loop 设备）。
 5. P1 的 `engine/io.h` / `engine/io.cpp`（裸函数 WriteBlock / ReadBlock）在 P3M3 Engine 切换后可删除——本里程碑先保留（并行存在）。
 
+> **P8M4 演进注**：上述五方法是 P3 时点接口。现行 concept 已新增
+> `RegisterWriteBuffers(span<ValueBufferSlotView>)`，并把 `Write` 参数升级为 `IoWriteBuffer`；
+> `Open` / `Close` / `BlockCount` / `Read` 语义保持不变。
+
 ### 1.2 交付范围
 
 1. **`io/io_backend.h`**：IoBackend concept 定义。
@@ -45,7 +49,7 @@
 |---|---|---|
 | Engine 切换到 IoBackend | **P3M3** | 本里程碑只做 concept + 实现；Engine 还用旧的 WriteBlock |
 | io_uring 后端 | **P4** | P3 只做 SyncIoBackend |
-| SPDK 后端 | **P10** | 同上 |
+| SPDK 后端 | **P9** | 同上 |
 | 删除 engine/io.h / io.cpp | **P3M3** | Engine 切换后旧裸函数不再需要 |
 
 ---
@@ -66,7 +70,7 @@
 |---|---|---|---|---|
 | **P3M1-D1** | IoBackend concept 含 Open / Close / BlockCount / Write / Read 五个方法——管理完整设备生命周期 | 只含 Write / Read（Open / Close 留 Engine） | 不同后端打开设备方式不同；Engine 不应知道后端类型 | 锁定 |
 | **P3M1-D2** | SyncIoBackend 空构造 + Open 方法（与 Engine 状态机一致） | 构造时打开（无法返回错误码） | Open 返回 int32_t 错误码；与 Engine 空构造 → Open 模式对称 | 锁定 |
-| **P3M1-D3** | 目录：`io/io_backend.h`（concept）+ `io/sync/sync_io_backend.*`（实现子目录） | 全放 engine/ / 平铺 io/ | 子目录分层：P4 加 `io/io_uring/`、P10 加 `io/spdk/`——层次清晰 | 锁定 |
+| **P3M1-D3** | 目录：`io/io_backend.h`（concept）+ `io/sync/sync_io_backend.*`（实现子目录） | 全放 engine/ / 平铺 io/ | 子目录分层：P4 实际增加 `io/uring/`，P9 计划增加 `io/spdk/` | 锁定 |
 
 ---
 
@@ -104,7 +108,7 @@ namespace cabe {
 - 全部返回 `int32_t` 错误码（按返回值分层约定——IoBackend 是内部组件）。
 - `BlockCount()` 用 `std::convertible_to`（允许返回 `uint64_t` 或 `size_t`）。
 - 无异步方法（D1 锁定——同步接口）。
-- 无 BufferHandle 参数（D2 推到 P8——继续用裸 `byte*`）。
+- P3 不引入 `ValueBuffer` 参数（D2 推到 P8——本阶段继续用裸 `byte*`）；P8 最终通过内部 `IoWriteBuffer` 升级写入协议，公开 `Put` 仍保持统一。
 
 ---
 
@@ -326,7 +330,7 @@ cabe_flags (INTERFACE)
 2. **SyncIoBackend 实装**：`io/sync/sync_io_backend.*` 编译通过 + `static_assert(IoBackend<SyncIoBackend>)` 通过。
 3. **单元测试**：9 + 1 = 10 个用例（需设备 9 个 + 无设备 1 个）全绿。
 4. **不影响现有测试**：原 65 个用例不退步。
-5. **四档全绿**：run-tests.sh --asan / --tsan / --ubsan / --release。
+5. **四档全绿**：当前复跑使用 `run-tests.sh --backend=sync --asan/--tsan/--ubsan/--release`。
 6. **覆盖率** ≥ 80%。
 
 ---
@@ -337,8 +341,8 @@ cabe_flags (INTERFACE)
 |---|---|
 | **P3M2** | IoBackend concept 定义可作为 MetaIndex concept 设计的参考模板 |
 | **P3M3** | `SyncIoBackend` 可直接替换 DeviceContext 里的 `int fd` + Engine 里的 WriteBlock / ReadBlock 调用 |
-| **P4** | `io/io_uring/` 子目录下新增 `IoUringBackend` 实现同一 concept |
-| **P10** | `io/spdk/` 子目录下新增 `SpdkBackend` 实现同一 concept |
+| **P4** | 已在 `io/uring/` 子目录新增 `IoUringIoBackend` 实现同一 concept |
+| **P9** | `io/spdk/` 子目录下新增 `SpdkIoBackend` 适配 value/data；WAL、snapshot 和超级块分别通过专用设备抽象适配 SPDK，不强塞进 1 MiB `IoBackend` 接口 |
 
 ---
 

@@ -8,6 +8,10 @@
 
 ✅ **已实施**（P0M7 收敛通过；详见 [P0M7_convergence_design.md](P0M7_convergence_design.md)）
 
+> 当前脚本口径（P6 起）：`run-tests.sh`、`run-coverage.sh` 和 `run-bench.sh` 必须显式传入
+> `--backend=sync|io_uring`。P0 设计稿中未带 `--backend` 的命令是当时默认 sync 的历史实证，
+> 不代表当前命令行接口。
+
 ## 里程碑文档清单
 
 | 里程碑 | 主题 | 设计稿 | 状态 |

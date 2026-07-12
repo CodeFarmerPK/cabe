@@ -1,12 +1,12 @@
 # Cabe P3-M2 设计：MetaIndex 抽象层
 
-> 本里程碑定义 MetaIndex 的 C++20 concept（7 个方法），实装 `HashMetaIndex`（包装 P1 的
-> `unordered_map`；ForEach / WriteSnapshot / LoadSnapshot 为空壳，P5 实装），并编写契约
-> 测试套件（`TYPED_TEST`——未来 P9 B+ 树实现加入 `Types<>` 即可复用同一套用例）。
+> 本里程碑定义 MetaIndex 的 C++20 concept（8 个方法），实装 `HashMetaIndex`（包装 P1 的
+> `unordered_map`；P3 时 ForEach / WriteSnapshot / LoadSnapshot 为空壳），并编写契约
+> 测试套件（`TYPED_TEST`——未来 P10 B+ 树实现加入 `Types<>` 即可复用同一套用例）。
 >
 > **本文为详细设计**；其中 C++ 片段为设计示意，代码实装阶段以此为准。
 >
-> **⚠️ P5M4 起本 concept 已收窄（以 [P5M4 设计稿](../P5/P5M4_snapshot_design.md) 为准）**：移除 `WriteSnapshot` / `LoadSnapshot`（快照读写 I/O 上移到独立 `snapshot/` 模块，后端只保留 `ForEach` + `Insert`）；`ForEach` 改为**返回 `int32_t`、可中途报错中止**（原 `void`）。下文"7 个方法 / `ForEach` 返回 void / `WriteSnapshot` / `LoadSnapshot` 空壳"等描述保留作历史记录。
+> **⚠️ P5M4 起本 concept 已收窄（以 [P5M4 设计稿](../P5/P5M4_snapshot_design.md) 为准）**：移除 `WriteSnapshot` / `LoadSnapshot`（快照读写 I/O 上移到独立 `snapshot/` 模块，后端只保留 `ForEach` + `Insert`）；`ForEach` 改为**返回 `int32_t`、可中途报错中止**（原 `void`）。现行 concept 共 6 个方法。下文“8 个方法 / `ForEach` 返回 void / `WriteSnapshot` / `LoadSnapshot` 空壳”等描述保留作历史记录。
 
 ---
 
@@ -26,8 +26,9 @@
 
 ### 1.1 目标
 
-1. 定义 MetaIndex 的 C++20 concept：7 个方法（Insert / Lookup / Delete / Size / Contains / ForEach / WriteSnapshot / LoadSnapshot）。
-2. 实装 `HashMetaIndex`：包装 P1 的 `unordered_map<string, ValueMeta>`；ForEach / WriteSnapshot / LoadSnapshot 为空壳（返回 `kEngineNotImplemented`），P5 实装。
+1. 定义 MetaIndex 的 C++20 concept：8 个方法（Insert / Lookup / Delete / Size / Contains / ForEach / WriteSnapshot / LoadSnapshot）。
+2. 实装 `HashMetaIndex`：包装 P1 的 `unordered_map<string, ValueMeta>`；P3 时 ForEach / WriteSnapshot /
+   LoadSnapshot 为空壳。P5M4 后只实装可中止 ForEach，后两者从 concept 删除。
 3. 建立 `index/` 目录结构（与 `io/` 对称：接口在顶层、实现在子目录）。
 4. 编写契约测试套件（`TYPED_TEST`——任何 MetaIndex 实现都跑同一套用例）。
 5. P1 的 `engine/meta_index.h` / `engine/meta_index.cpp` 在 P3M3 Engine 切换后可删除——本里程碑先保留。
@@ -46,8 +47,8 @@
 | 推迟项 | 落点 | 原因 |
 |---|---|---|
 | Engine 切换到 MetaIndex concept | **P3M3** | 本里程碑只做接口 + 实现 |
-| ForEach / WriteSnapshot / LoadSnapshot 实装 | **P5** | P3 写空壳占位 |
-| B+ 树实现 | **P9** | 加 `index/bplustree/` 子目录 + 改 `Types<>` |
+| ForEach / WriteSnapshot / LoadSnapshot 后续处理 | **P5M4** | ForEach 实装；WriteSnapshot / LoadSnapshot 删除，I/O 上移 snapshot 模块 |
+| B+ 树实现 | **P10** | 加 `index/bplustree/` 子目录 + 改 `Types<>` |
 | 删除 engine/meta_index.h / .cpp | **P3M3** | Engine 切换后旧代码不再需要 |
 
 ---
@@ -57,7 +58,7 @@
 | 编号 | 决策 | 结果 |
 |---|---|---|
 | **P3M2-D1** | 目录布局 | `index/meta_index.h`（接口）+ `index/hash/hash_meta_index.*`（实现）——与 `io/` 对称 |
-| **P3M2-D2** | 契约测试 | `TYPED_TEST`——同一套用例覆盖所有实现；P9 加 B+ 树只需改 `Types<>` 列表 |
+| **P3M2-D2** | 契约测试 | `TYPED_TEST`——同一套用例覆盖所有实现；P10 加 B+ 树只需改 `Types<>` 列表 |
 
 ---
 
@@ -142,7 +143,7 @@ namespace cabe {
         std::size_t Size() const noexcept;
         bool Contains(std::string_view key) const;
 
-        // 空壳——P5 实装
+        // P3 时为空壳；P5M4 后 ForEach 实装，后两个方法从接口删除
         void ForEach(MetaIndexVisitor visitor) const;
         int32_t WriteSnapshot(const std::string& path) const;
         int32_t LoadSnapshot(const std::string& path);
@@ -249,7 +250,7 @@ using MetaIndexImpls = ::testing::Types<cabe::HashMetaIndex>;
 TYPED_TEST_SUITE(MetaIndexContractTest, MetaIndexImpls);
 ```
 
-**用例清单**（全部用 `TYPED_TEST`——P9 加 B+ 树自动复用）：
+**用例清单**（全部用 `TYPED_TEST`——P10 加 B+ 树自动复用）：
 
 | 用例 | 验证 |
 |---|---|
@@ -270,15 +271,15 @@ TYPED_TEST_SUITE(MetaIndexContractTest, MetaIndexImpls);
 
 | 风险 | 缓解 |
 |---|---|
-| ForEach 用 `std::function` 有间接调用开销 | P1-P4 单线程不是瓶颈；P9 B+ 树性能敏感时可改模板回调 |
-| WriteSnapshot / LoadSnapshot 空壳——签名 P5 可能要调 | 接口可扩展（冻结是相对的） |
+| ForEach 用 `std::function` 有间接调用开销 | 现行 concept 保持统一访问器；P10 先实测，只有形成真实瓶颈才统一修订所有后端契约 |
+| WriteSnapshot / LoadSnapshot 层次归属不当 | P5M4 已将二者移出索引后端，snapshot 模块独立管理盘上格式和 I/O |
 | 与 P1 `engine/meta_index.*` 并行存在 | P3M3 切换后删旧的 |
 
 ---
 
 ## 8. 退出条件
 
-1. **接口定义就位**：`index/meta_index.h` 含 7 个方法的 C++20 concept。
+1. **接口定义就位**：P3 时点的 `index/meta_index.h` 含 8 个方法的 C++20 concept；P5M4 后现行为 6 个。
 2. **HashMetaIndex 实装**：`index/hash/hash_meta_index.*` + `static_assert(MetaIndexBackend<HashMetaIndex>)` 通过。
 3. **契约测试**：10 个用例全绿。
 4. **原有 75 个用例不退步**。
@@ -293,7 +294,7 @@ TYPED_TEST_SUITE(MetaIndexContractTest, MetaIndexImpls);
 |---|---|
 | **P3M3** | `HashMetaIndex` 替换 DeviceContext 里的 `MetaIndex`；Engine 通过 MetaIndexBackend concept 调用 |
 | **P5** | ForEach + WriteSnapshot + LoadSnapshot 实装 |
-| **P9** | `index/bplustree/` 子目录 + 改契约测试 `Types<>` |
+| **P10** | `index/bplustree/` 子目录 + 改契约测试 `Types<>` |
 
 ---
 

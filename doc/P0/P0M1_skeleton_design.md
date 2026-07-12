@@ -19,7 +19,7 @@
 | 下游依赖本里程碑 | M2 / M3 / M4 均依赖 M1 产出的可构建骨架 |
 | 关联架构决策 | D20–D23（CMake 选项预留）、贯穿约束（仅 Linux / C++20 / GCC 15+ / Clang 20+） |
 | 退出判定 | `cmake -S . -B build && cmake --build build` 在 GCC 15 与 Clang 20 下均通过 |
-| 不生成代码 | 本里程碑当前阶段只产出**设计稿**；CMake 片段为设计示意，落地实现待终审通过后单独提交 |
+| 设计稿边界 | 本文中的 CMake 片段用于说明 P0M1 的锁定设计；对应工程骨架已经按该设计完成实现并通过 P0 收敛 |
 
 ---
 
@@ -53,7 +53,7 @@
 | `CABE_SANITIZER` 的脚本（`run-tests.sh` / `run-coverage.sh`）与本地组合矩阵；CI 推迟 | **M6** | M1 仅声明并应用编译开关（见 §3 偏差-1） |
 | `CABE_IO_BACKEND` / `CABE_META_INDEX` 的真实编译期分派 | **P3** | 此时尚无后端 / 索引源码（见 §8 M1-D3） |
 | `CMakePresets.json` | 不做（M6 决策） | M6 用脚本即可达成"一行命令跑完矩阵"，与 `run-tests.sh` 重复 |
-| `engine/` `io/` `index/` `wal/` `reactor/` 子目录 | 各自起始阶段（P1/P3/P5/P7） | 当前无源码 |
+| `engine/` `io/` `index/` `wal/` 与 reactor 实现 | 各自起始阶段（P1/P3/P5/P7） | P7 最终把 `reactor.{h,cpp}` 放在 `engine/`，没有建立根目录 `reactor/` |
 | 源码 schema 改造（`structs.h` 等） | **M2** | M1 一行源码不改 |
 | CMake 必需 POSIX 头探测（`sys/mman.h` / `fcntl.h` / `unistd.h`） | **P1** | M1 的 util/common 不用 O_DIRECT/mmap/pread，引擎 I/O 起于 P1 |
 | CMake 内核版本软校验（6.16+ `WARNING`） | **P4** | 内核新特性门槛由 io_uring 阶段触发 |
@@ -96,7 +96,7 @@ M1 在 CMake 层再加一道（配置期快速失败），与源码级兜底互�
 
 ---
 
-## 3. 待 owner 终审的偏差（review 时优先裁决）
+## 3. 收敛前待终审的偏差（P0M7 已锁定）
 
 本设计在两处与路线图（ROADMAP）的字面表述存在出入。二者技术上均已做出明确裁决并采纳，
 但因涉及里程碑范围划分，列于此处供终审一票定夺。其余决策见 §8 决策表。
@@ -302,7 +302,7 @@ if(NOT CABE_IO_BACKEND STREQUAL "sync")
     message(STATUS "CABE_IO_BACKEND='${CABE_IO_BACKEND}' recorded; real dispatch lands in P3.")
 endif()
 if(NOT CABE_META_INDEX STREQUAL "hashmap")
-    message(STATUS "CABE_META_INDEX='${CABE_META_INDEX}' recorded; real dispatch lands in P3/P9.")
+    message(STATUS "CABE_META_INDEX='${CABE_META_INDEX}' recorded; real dispatch lands in P3/P10.")
 endif()
 ```
 
@@ -410,8 +410,8 @@ compile_commands.json
 
 | # | 决策 | 备选 | 理由 | 状态 |
 |---|---|---|---|---|
-| M1-D1 | `CABE_SANITIZER` 在 M1 即声明 + 校验 + 应用编译开关 | 仅声明、M6 才接开关 | 见 §3 偏差-1 | **建议采纳，待终审** |
-| M1-D2 | `test/` `bench/` 推迟到 M5，M1 只留接缝 | M1 即建占位目录 | 见 §3 偏差-2 | **建议采纳，待终审** |
+| M1-D1 | `CABE_SANITIZER` 在 M1 即声明 + 校验 + 应用编译开关 | 仅声明、M6 才接开关 | 见 §3 偏差-1 | **✅ 已锁定（P0M7 收敛）** |
+| M1-D2 | `test/` `bench/` 推迟到 M5，M1 只留接缝 | M1 即建占位目录 | 见 §3 偏差-2 | **✅ 已锁定（P0M7 收敛）** |
 | M1-D3 | `CABE_IO_BACKEND` / `CABE_META_INDEX` 在 M1 仅声明 + 校验，不接分派 | M1 即写编译期分支 | 当前无后端/索引源码，接分派无对象可选 | 锁定 |
 | M1-D4 | 单一 include 根 = 工程根 | 每子目录各自暴露 include dir | 现有 `crc32.h → "common/structs.h"` 即此假设；零歧义 | 锁定 |
 | M1-D5 | `cabe_util` 用 STATIC | OBJECT / SHARED | 单机静态链接、利于 LTO、避免 PIC 复杂度 | 锁定 |
@@ -436,10 +436,10 @@ compile_commands.json
 | C++20 标准 | §6.4 | ✅ |
 | 预留 `CABE_IO_BACKEND`/`CABE_META_INDEX`/`CABE_SANITIZER` | §6.6 | ✅ |
 | 现有 `util/*`、`cpu_features`、`crc32` 纳入 build | §6.9 `cabe_util` | ✅ |
-| 子目录含 `test/` `bench/` | 推迟到 M5（§3 偏差-2） | ⚠️ **偏差，待终审** |
+| 子目录含 `test/` `bench/` | 推迟到 M5（§3 偏差-2） | ✅ 偏差已由 P0M7 锁定 |
 | 退出条件 configure+build 双工具链通过 | §11 | ✅ |
 | README 默认 Release + Ninja | §6.5 | ✅ |
-| README 默认 sync 后端 + hashmap 索引 | §6.6 默认值 | ✅ |
+| P0 时点 README 默认 sync 后端 + hashmap 索引 | §6.6 默认值 | ✅ 历史交付；P6 起 I/O 后端已取消默认值 |
 | Sanitizer 矩阵归在 M6 | M1 提前应用编译开关，脚本与本地矩阵仍在 M6；CI 在 M6 推迟（§3 偏差-1） | ✅（M6 已落地） |
 
 ---

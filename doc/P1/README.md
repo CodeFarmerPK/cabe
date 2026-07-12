@@ -7,6 +7,9 @@
 
 ✅ **已实施**（P1M5 收敛通过）
 
+> 当前脚本口径（P6 起）：历史示例中省略的 `--backend` 现在必须显式给出；复跑 P1 的 sync
+> 路径时使用 `--backend=sync`。P1 原始性能基线后来已删除，历史性能锚点以 P6 为准。
+
 ## 范围摘要（出自 ROADMAP）
 
 - `cabe::Options` / `cabe::Status` 公开类型骨架（P2 才冻结）
@@ -47,11 +50,11 @@ P1M1 ──► P1M2 ──► P1M3 ──► P1M4 ──► P1M5
 1. ✅ P0M7 收敛稿审阅通过（见 [doc/P0/P0M7_convergence_design.md](../P0/P0M7_convergence_design.md)）
 2. ✅ owner 确认 P1 启动
 3. ✅ P1-D1 里程碑划分锁定（5 个里程碑，方案 A）
-4. ⏳ 用 `/grill-with-docs P1M1` 开第一个里程碑的文档设计
+4. ✅ P1M1～P1M5 详细设计、实现与收敛全部完成
 
-## 已知决策点候选（按里程碑分配）
+## 设计前候选决策点（均已由对应里程碑定案）
 
-> 候选清单**仅作梳理参考**，不预判答案；每个里程碑的文档设计阶段仍要逐条梳理。
+> 本清单保留 P1 启动前的问题原貌，用于追溯设计动机；最终答案以 P1M1～P1M5 详细稿为准。
 
 ### P1M1 承接（引擎骨架 + 公开类型）
 
@@ -85,10 +88,10 @@ P1M1 ──► P1M2 ──► P1M3 ──► P1M4 ──► P1M5
 > 详细退出条件在 P1M5 收敛稿（`P1M5_convergence_design.md`）中定稿。下列为阶段概要。
 
 1. GCC 15+ 与 Clang 20+ 双工具链 build 通过
-2. ASAN / TSAN / UBSAN / Release 四档本地 ctest 全绿（含 P1 新增的 engine 用例；各档独立调用 `run-tests.sh --asan` / `--tsan` / `--ubsan` / `--release`）
+2. ASAN / TSAN / UBSAN / Release 四档本地 ctest 全绿（历史验收已完成；当前复跑需在各命令中显式加 `--backend=sync`）
 3. Put / Get / Delete 端到端路径完整跑通（单线程 / 文件或回环块设备 / 1 个 device）
 4. `value.size() != kValueSize` 拒绝路径有正式用例覆盖
-5. `bench/baselines/p1_single_thread.json` 归档（Put / Get / Delete 吞吐）
+5. `bench/baselines/p1_single_thread.json` 曾按 P1 方案归档，P6 建立正式锚点后已删除、不再作为参考
 6. P1M5 收敛稿审阅通过 + ROADMAP / README 状态同步
 
 ## 命名与目录约定

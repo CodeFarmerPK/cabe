@@ -3,10 +3,10 @@
 > 把内存里的 `MetaIndex`（key → `ValueMeta`）全量落到独立快照设备上，形成一份**检查点**。
 > 恢复（M6）= 加载最新快照 + 重放快照之后的 WAL 尾；回收（M5）凭快照记录的 `covered_seq`
 > 截断 WAL。本里程碑**只做"写一份快照"这条路**——格式、设备布局、双缓冲两槽、触发、
-> 原子替换与崩溃安全；**加载/恢复留 M6，WAL 回收留 M5，后台/异步/定时留 P7**。
+> 原子替换与崩溃安全；**加载/恢复留 M6，WAL 回收留 M5；后台/异步/定时在 P7 未实现，继续归性能兑现阶段**。
 >
 > 延续 M3 的同步原型基调：单线程、同步实现，**不为性能做权衡**（延迟尖峰、并发一致性
-> 全部留 P7 异步化）；正确性（崩溃安全、数据一致）现在就做对。
+> 全部留后续性能兑现阶段）；正确性（崩溃安全、数据一致）现在就做对。
 >
 > **本文为详细设计**；C++ 片段为设计示意，代码实装以此为准。
 
@@ -45,7 +45,7 @@
 4. **`engine/engine.{h,cpp}`**（修改）：`Open`（create 模式开快照设备 + 算布局 + 容量校验 + 清空槽 + `next_gen=1`）；新增 `Engine::Snapshot()` + 内部 `RequestSnapshot` / `MaybeRequestSnapshot` / `DoSnapshot`；`Put`/`Delete` 收尾插触发检查；`Close` 加 `snapshot.Close()`。
 5. **`wal/wal.{h,cpp}`**（修改）：加只读 `last_seq()`（返回 `seq_next_ - 1`）与 `SizeBytes()`（M5 容量校验用）；空 Options 错误码统一为 `kEngineInvalidOpts`、缓冲规整改用共享函数（见第 11 条）。
 6. **`index/meta_index.h` + `index/hash/hash_meta_index.{h,cpp}`**（修改）：concept **收窄**——移除 `WriteSnapshot`/`LoadSnapshot`；`ForEach` 改为**返回 `int32_t`、可中止**（`MetaIndexVisitor` 也返回 `int32_t`）；同步改那唯一一处 `ForEach` 测试。
-7. **`engine/options.h`**（修改）：新增 `snapshot_buffer_size`（默认 1 MiB）；订正快照配置注释（阈值 M4 生效、定时 P7、缓冲 M4 生效）。
+7. **`engine/options.h`**（修改）：新增 `snapshot_buffer_size`（默认 1 MiB）；订正快照配置注释（阈值 M4 生效、缓冲 M4 生效；定时字段在 P7 后仍未生效）。
 8. **`common/error_code.h`**（修改）：新增 `kSnapshotWriteFailed` / `kDeviceTooSmall`。
 9. **测试**：新建 `test/snapshot/`（格式往返 + 端到端写快照读盘核对 + 解码逐字段比对 + A/B 选槽 + 代际 + 触发正/负半边 + 容量校验拒绝 + `ForEach` 可中止）。
 10. **关联文档**：新写本稿；同步历史文档（§15）。
@@ -60,10 +60,10 @@
 | 推迟项 | 落点 | 原因 |
 |---|---|---|
 | 加载快照 `Load` + 完整恢复编排（recover 模式 Open + 重放 WAL + `RebuildFromActive`） | **P5M6** | M4 只做写流程；恢复是 M6 （P5M6 注：已设计落定——九步恢复流水线 + `Load(MetaIndexVisitor)` 对称镜像，见 P5M6 稿） |
-| WAL 环形回收 / 截断 TRIM / 写满兜底 | **P5M5** | M4 的 WAL 仍线性只增，回收凭快照 `covered_seq`（M5）。（P5M5 注：环形回收与写满兜底已设计落定；**TRIM 实施再推 P7**——M5 仅在 `ReclaimUpTo` 内留空桩钉挂点） |
-| 定时触发（`snapshot_interval_sec` 生效） | **P7** | 定时要后台线程；定时的真正归宿是 P7 后台快照 |
-| 后台 / 异步快照（非阻塞）、并发合并、真实锁 | P7 | 单线程下快照同步内联；无并发 |
-| 模糊快照（读写均不阻塞） | P7 + B+树 | M4 用"冻结写者"的一致快照；无锁一致快照要 COW/MVCC 结构 |
+| WAL 环形回收 / 截断 TRIM / 写满兜底 | **P5M5 / 性能兑现阶段** | M5 完成环形回收与写满兜底；TRIM 只留空桩，P7 未实现 |
+| 定时触发（`snapshot_interval_sec` 生效） | **性能兑现阶段** | P7 未增加定时器；需要超时唤醒或独立执行体 |
+| 后台 / 异步快照（非阻塞）、并发合并 | 性能兑现阶段 | P7 继续在 reactor 内同步串行执行快照 |
+| 模糊快照（读写均不阻塞） | 性能兑现阶段 | P7 未实现；可结合 P10 B+树的 COW/MVCC 能力重新设计 |
 | 结构保留式快照盘上格式（如 B+树落页 + mmap 加载） | 未来可选 | M4 走通用记录流，可移植、简单 |
 | 介质级冗余（RAID / 多副本 / 巡检）抵御静默位翻转 | 下层 / 未来 | M4 靠校验和检测 + WAL 重建兜底；不静默上当即可 |
 
@@ -94,11 +94,11 @@
 | **P5M4-D7** | 写时选槽 + 写序 | 写**非恢复槽**（"最新可恢复槽"的另一个），保好覆坏；写序 = **数据 → 槽头 → 一次 `fdatasync`**；原子切换靠**代际 + `data_crc`**，无盘上"当前槽指针" |
 | **P5M4-D8** | 读时选槽 | 读两槽头 → 校验 → **代际最大且双校验通过**者选中；坏则回退另一槽；都不行则 `covered_seq=0` 纯 WAL 重放（选槽逻辑本里程碑定，灌索引集成在 M6）。（**P5M6 细化**："都不行 → covered=0" 仅适用于**双槽头皆无效**——这是合法的"从未快照"证据；**存在合法槽头但数据全坏 = 拒开不降级**（`kSnapshotCorrupted`），按 covered=0 假装从未快照是编造历史。另：槽头**读 I/O 错**与"内容无效"二分——前者证据不可得、直接拒开。见 P5M6-D6/D7） |
 | **P5M4-D9** | 落盘机制 | 每次快照**临时 `AllocAligned`** 一块 `snapshot_buffer_size`（默认 1 MiB、Options 可改、**不进池**、4K 对齐），攒满整块写、末尾补零到 4K、**全程一次 `fdatasync`** |
-| **P5M4-D10** | `covered_seq` | M4 = `wal.last_seq()`（单线程下"已分配 = 已提交"）；**绝不报大**；`DoSnapshot` 顺序 **先 `Flush()` → 取 `covered_seq` → 写快照**；P7 须换"已提交水位" |
+| **P5M4-D10** | `covered_seq` | M4 = `wal.last_seq()`（单线程下"已分配 = 已提交"）；**绝不报大**；`DoSnapshot` 顺序 **先 `Flush()` → 取 `covered_seq` → 写快照**；P7 仍逐 op 串行无需改，未来流水线化时才需“已提交水位” |
 | **P5M4-D11** | 模块 + 接口 | 新建 `snapshot/`（平级 `wal`/`io`）；`Snapshot` 类持设备句柄，**回调解耦**（不认识索引后端）；`MetaIndex` concept **收窄**：删 `WriteSnapshot`/`LoadSnapshot`，`ForEach` 改返回 `int32_t` 可中止 |
-| **P5M4-D12** | 触发 | 手动 `Engine::Snapshot()`（**同步、返回结果**）+ 大小阈值（**自动、发后不管**：不连累 Put、出错记日志）；汇总入口 `RequestSnapshot()`；失败退避（`last_trigger_seq`）；**定时 → P7** |
+| **P5M4-D12** | 触发 | 手动 `Engine::Snapshot()`（**同步、返回结果**）+ 大小阈值（**自动、发后不管**：不连累 Put、出错记日志）；汇总入口 `RequestSnapshot()`；失败退避（`last_trigger_seq`）；定时触发在 P7 未实现 |
 | **P5M4-D13** | 容量约束 | **部署 Open 时校验、运行期不查**；快照设备 `slot_size ≥ 槽头 + ⌈block_count×128⌉₄ₖ`，WAL 设备 `≥ 阈值×2`；不足返回 `kDeviceTooSmall`。（P5M5 细化：WAL 侧落地为 `ring_size ≥ max(阈值×2, wal_buffer_size + 4K)`，见 §11 注） |
-| **P5M4-D14** | 一致性模型 | M4 = **冻结写者的一致快照**（单线程下"冻结"为语义占位、不上真锁）；模糊/无锁一致快照 → P7 + B+树（结构相关、下沉后端） |
+| **P5M4-D14** | 一致性模型 | M4 = **冻结写者的一致快照**；P7 通过 reactor 串行继续沿用。模糊/无锁一致快照归性能兑现阶段，可结合 P10 B+树重评 |
 | **P5M4-D15** | 改动面 | 新建 `snapshot/`（3 文件）+ `test/snapshot/` + `test/common/test_env.h`；改 9 处现有文件（含 `util/crc32` 流式 CRC、`util/util.h` 缓冲规整）+ 3 个测试文件收敛 `GetEnv`；新增 2 个错误码（实装对账后的最终口径，见 §1.2/§12） |
 
 ---
@@ -298,7 +298,8 @@ int32_t Engine::DoSnapshot(DeviceContext& dc) {
 
 - **M4 = `wal.last_seq()`**（= `seq_next_ − 1`，空时 0），单线程下"已分配 = 已提交"（每个 Put 整条做完才轮到下一个），用它不会报大。
 - **顺序：先 `Flush()` → 取 `covered_seq` → 遍历写**（§6.1）。先刷 WAL 保证盖 `covered_seq=S` 那刻 WAL 真落到 S，给 M5/M6 一条干净不变量（任何已落地快照的 `covered_seq` 都指向真实在盘的 WAL 位置），消掉"覆盖了却没落盘"的边角；默认级别 3 下 `Flush()` 是空操作。
-- **P7**：并发下"已分配序号"与"已提交到索引的水位"会分叉（`WriteWal` 分配 seq 与 `Insert` 之间有窗口）；`covered_seq` 须改用**已提交水位**，否则丢数据。M4 靠单线程独占白捡这份一致性。
+- **P7 实际结果**：reactor 一次完整执行一个 op，`WriteWal` 与 `Insert` 不并行，因而仍可使用
+  `wal.last_seq()`。只有未来引入多请求在飞和流水线时，“已分配序号”与“已提交水位”才会分叉。
 
 ### 8.3 回收与恢复的锁步铁律（M4 只记录、M5/M6 消费）
 
@@ -348,7 +349,7 @@ private:
 - **`Snapshot` 自持 `RawDevice`、move-only**（移动时置空源设备句柄，避免双重释放），可随 `DeviceContext` 一起移动。
 - **M4 实现 `Open`/`Write`/`Close`**；`Load` 接口形状留位、**实装在 M6**。（P5M6 兑现：定形为 `int32_t Load(const MetaIndexVisitor&)`——与 `Write` 合成对称镜像（写注遍历器/读注接收器），无独立 `covered_seq_out` 参数（走既有 `last_covered_seq()` 读数口）。）
 
-### 9.2 `MetaIndex` concept 收窄（P5M4-D11，推翻 P3 的 7 方法版）
+### 9.2 `MetaIndex` concept 收窄（P5M4-D11，推翻 P3 的 8 方法版）
 
 - **从 concept 与 `HashMetaIndex` 移除 `WriteSnapshot`/`LoadSnapshot`**（它们被错放在后端：让一个内存结构去懂裸设备/盘上格式/`covered_seq` 是层次错位）。快照读写 I/O 全归 `snapshot` 模块。
 - 后端只保留快照真正需要的两件，且都已存在：**`ForEach`（一致扫描源）+ `Insert`（加载落点）**。
@@ -357,7 +358,8 @@ private:
   using MetaIndexVisitor = std::function<int32_t(std::string_view, const ValueMeta&)>;
   // concept: { cidx.ForEach(visitor) } -> std::same_as<int32_t>;
   ```
-- **`ForEach` 的一致扫描契约**：遍历所有活键，由后端保证视图一致——M4 单线程下就是直接遍历（"冻结写者"为语义占位、不上真锁）；P7 并发时由后端内部锁/拷贝/MVCC 保证不漏稳定键（结构相关、下沉后端，§14）。
+- **`ForEach` 的一致扫描契约**：遍历所有活键，由后端保证视图一致。P7 通过 reactor 串行调用，
+  仍可直接遍历；锁/拷贝/MVCC 只有在未来快照与写入真正并行时才需要。
 - **`Clear()`**（M6 真恢复时"槽坏 → 清空索引回退"用）留 M6。（P5M6 注：**作废**——M6 改两遍读方案，裁决收口在 Open、索引永不被污染，`Clear()` 无人需要，concept 维持收窄后的六方法不变。见 §7.2 否决注。）
 
 ### 9.3 `DeviceContext` + `Engine` 编排
@@ -381,9 +383,9 @@ private:
 |---|---|---|
 | **手动 `Engine::Snapshot()`** | M4 | **语义 + 实现都同步**——做完返回成败（测试 + 手动刷用）；不走自动入口。recover 模式（M4 未打开快照设备）返回 `kEngineNotImplemented`（恢复编排在 M6），与自动路径的 `is_open` 守卫对称 |
 | **大小阈值**（`snapshot_threshold_bytes`） | M4 | **语义 = 发后不管**（不返回结果、不让 Put 因快照失败而失败、出错记日志）；实现 = 同步内联（M4 限制） |
-| **定时**（`snapshot_interval_sec`） | **P7** | 定时要后台线程；P7 后台快照的一部分 |
+| **定时**（`snapshot_interval_sec`） | **性能兑现阶段** | P7 未实现定时器；字段仍存而不用 |
 
-**汇总入口 `RequestSnapshot()`**：三个触发源（手动除外，手动直调）都汇到这一个内部入口。M4 里它**同步执行** `DoSnapshot`、出错记日志（发后不管）；P7 只改它内部为"唤醒快照线程"。**抽象（入口）现在立好，机器（线程、并发合并）留 P7**，不造死代码。P7 加定时，就是给这个入口多接一个调用方。
+**汇总入口 `RequestSnapshot()`**：三个触发源（手动除外，手动直调）都汇到这一个内部入口。M4 里它**同步执行** `DoSnapshot`、出错记日志（发后不管）。P7 将该入口迁入 reactor 后仍同步执行；未来后台快照可在不改调用边界的前提下替换内部实现。定时器、线程和并发合并继续归性能兑现阶段。
 
 ### 10.2 大小阈值的度量与触发点
 
@@ -395,14 +397,14 @@ private:
   Engine::Snapshot()  ─────────────────────────────────────────────────→  DoSnapshot(dc)[手动，返回结果]
   ```
 - **`covered_seq` = 触发它那次写的 `seq`**（单线程下从检查到取序号无别的写插入）。
-- 同步内联会让踩中阈值的那次写阻塞着把快照做完——**原型如此，性能留 P7 后台化**，不展开。
+- 同步内联会让踩中阈值的那次写阻塞着把快照做完；P7 沿用该行为，后台化继续归性能兑现阶段。
 
 ### 10.3 失败处理 + 退避（P5M4-D12）
 
 - **铁定**：自动触发的快照失败**不连累 Put**（Put 已按级别成功落盘）、**只记日志**。
 - **退避（避免设备坏时每写都白扫索引）**：加 `last_trigger_seq`，**每次尝试都推进**（成功/失败都推）；触发条件用它——失败也算"试过",下次要 WAL 再涨一个阈值才重试。`last_covered_seq`（恢复/回收用的"上次已落地覆盖点"）**仍只成功才推进**，两者职责分开、成功时相等。手动触发不受退避影响；持续失败 → WAL 涨,交 M5。（P5M5 注：M5 新增的**撞墙救援**路径也不受此退避约束——撞墙后写入失败、WAL 不再增长,闸门若拦它会卡死且无法自愈;见 P5M5 §8.2。）
   （实装注：推进点 = `Engine::DoSnapshot` **入口**的 `Snapshot::NoteTriggerAttempt`——记账放在"一次尝试的起点"，连"刷 WAL 失败"等还没到 `Write` 就失败的路径也被记账；否则攒批档（2/4）+ WAL 设备故障时每次写都会重试一遍注定失败的刷盘。）
-- **重入**：M4 单线程下 `DoSnapshot` 不调 Put/Delete、不再请求快照，结构上重入不可能，**不加运行期防护**（仅在 `DoSnapshot` 写明"不得直接/间接触发 Put/Delete/再请求快照"的注释，可选加 Debug 断言）；并发合并留 P7 入口。
+- **重入**：M4 单线程下 `DoSnapshot` 不调 Put/Delete、不再请求快照，结构上重入不可能，**不加运行期防护**；P7 reactor 串行仍保持该性质，并发合并留性能兑现阶段。
 
 ---
 
@@ -465,19 +467,21 @@ WAL 设备   部署建议：   SizeBytes ≥ snapshot_threshold_bytes × 2~3
 | `ForEachAbortsOnError` | 回调返错 → `ForEach` 提前停并把错误传出（落 `test/index/` 契约测试） |
 
 - 槽头 `covered_seq == wal.last_seq()` 的核对并入 `WriteSnapshotEndToEnd`（3 个 Put → covered_seq=3）。
-- **不测**：崩溃恢复（M6）、`Load`（M6）、回收（M5）、并发（P7）、value 的 FUA/异步持久性（崩溃才显形 → M6）；WAL 设备容量校验（随实装推迟 M5，见 §11 实装注）。
+- **不测**：崩溃恢复（M6）、`Load`（M6）、回收（M5）、后台快照并发（性能兑现阶段）、value 的 FUA/异步持久性（崩溃才显形 → M6）；WAL 设备容量校验（随实装推迟 M5，见 §11 实装注）。
 - **落点**：新建 `test/snapshot/`；loop 设备（数据 + WAL + 快照三路径）；**SetUp 把快照设备 8K 之后全区清零**（防 loop 设备跨用例残留误判，已实装）。
 
 ---
 
 ## 14. M4/M6 边界 + 未来演进（写入文档备查，非 M4 实现）
 
+P9 同步注：P5 的 snapshot 历史实现直接持有 `RawDevice`。P9M10 将其迁移到 snapshot 专用设备抽象，P9M11 增加 SPDK 适配；A/B 槽格式、校验和恢复逻辑保持一份，不复用 value/data 的 1 MiB `IoBackend`。
+
 - **M4/M6 边界**：M4 = 只做**写流程**（Open/Write/Close）；**`Load` + 完整恢复编排（recover 模式 Open + 加载快照 + 重放 WAL + `RebuildFromActive`）= M6**。即便 M6 复用 §7.2 的选槽逻辑，灌索引与续写仍是 M6。
-- **P7 注意事项（现在记、不实现）**：
-  1. **`covered_seq` 口径**：并发下必须从"已分配 `last_seq`"换成"已提交水位"，否则那个 seq/提交窗口会丢数据（§8.2）。
-  2. **一致扫描**：M4 的"冻结写者"是语义占位（单线程不上锁）；P7 由后端落实——哈希表用短锁/拷贝（rehash 会漏稳定键 = 丢数据，无法无锁），B+树用 COW/MVCC（这也是未来上 B+树的一大动因）。"冻结写者"若伸到设备 I/O 期间会拉长停写，P7 可改"短锁内拷贝、解锁后写"缩窗。
-  3. **后台快照线程**：`RequestSnapshot` 内部改唤醒线程；定时器作为新调用方接入；并发合并（只许一份在飞）在入口做。
-  4. **重入/合并防护**：随后台线程一起加。
+- **P7 实际结果与后续注意事项**：
+  1. P7 一次完整执行一个 op，未产生 seq/提交窗口，`covered_seq` 继续使用 `last_seq()`。
+  2. 快照在 reactor 内串行执行，`ForEach` 无需短锁、拷贝或 MVCC，但会阻塞所属 reactor。
+  3. 后台快照线程、定时器、并发合并与重入防护均未实现，统一归性能兑现阶段。
+  4. 若未来流水线化，必须同时引入已提交水位和一致扫描机制；可结合 P10 B+树结构重评 COW/MVCC。
 - **静默腐坏**：介质级冗余（RAID / 多副本 / 纠删 / 巡检）划在下层 / 未来；cabe 现阶段靠校验和检测 + WAL 重建兜底。
 
 ---
@@ -486,9 +490,9 @@ WAL 设备   部署建议：   SizeBytes ≥ snapshot_threshold_bytes × 2~3
 
 > 本次设计推翻了 P3 对 `MetaIndex` concept 的描述，并细化了 README 的 P5M4 范围；以**当前设计为准**同步：
 
-1. **`doc/P5/README.md`**：① P5M4 段——删除"`WriteSnapshot`/`LoadSnapshot` 参数改裸设备"的旧描述（实为**移除**二者），改为本稿摘要（snapshot 模块 / 双缓冲两槽 / covered_seq / 触发 / 部署容量校验 / `Load`→M6）；② 关键技术备忘"模糊快照"条订正为"M4 冻结写者一致快照，模糊/无锁留 P7"。
-2. **`doc/P3/P3M2_meta_index_design.md`**（concept 权威设计稿）：加 P5M4 起的**收窄超越注记**——移除 `WriteSnapshot`/`LoadSnapshot`（快照 I/O 上移 snapshot 模块）、`ForEach` 改返回 `int32_t` 可中止（原 void）；原 7 方法描述保留作历史。
-3. **`doc/P3/README.md`、`doc/P3/P3M4_convergence_design.md`**：在"`MetaIndex` 7 个方法"处加一行"（P5M4 起收窄为 5 方法 + `ForEach` 可中止，见 P5M4 设计稿）"。
+1. **`doc/P5/README.md`**：① P5M4 段——删除"`WriteSnapshot`/`LoadSnapshot` 参数改裸设备"的旧描述（实为**移除**二者），改为本稿摘要（snapshot 模块 / 双缓冲两槽 / covered_seq / 触发 / 部署容量校验 / `Load`→M6）；② 关键技术备忘说明 P7 继续采用 reactor 串行一致快照，模糊/无锁快照归性能兑现阶段。
+2. **`doc/P3/P3M2_meta_index_design.md`**（concept 权威设计稿）：加 P5M4 起的**收窄超越注记**——移除 `WriteSnapshot`/`LoadSnapshot`（快照 I/O 上移 snapshot 模块）、`ForEach` 改返回 `int32_t` 可中止（原 void）；原 8 方法描述保留作历史。
+3. **`doc/P3/README.md`、`doc/P3/P3M4_convergence_design.md`**：在“`MetaIndex` 8 个方法”处加一行“P5M4 起收窄为 6 个方法 + `ForEach` 可中止”。
 4. **`doc/P5/P5M1_super_block_design.md`**：§7.1 设备尺寸校验处加交叉引用——"快照/ WAL 设备的部署期容量下界校验在 P5M4 引入（见 P5M4 §11）；此处 M1 只保证 ≥8K 能放下超级块"。
 5. **里程碑重编号**（快照/环形拆分、恢复 M5→M6、收敛 M6→M7）已在前序"里程碑重拆"中同步至 README + P5M1/2/3 + 相关代码注释,本里程碑不重复。
 
@@ -500,7 +504,7 @@ WAL 设备   部署建议：   SizeBytes ≥ snapshot_threshold_bytes × 2~3
 2. 快照设备布局：8K 双份超级块 + 对半切 A/B 两槽；Open 算 A/B 布局常驻 + 容量校验（不足 `kDeviceTooSmall`）。
 3. 写流程：遍历索引 → 1 MiB 临时缓冲流式写非活跃槽 → 数据→槽头→一次 `fdatasync`；`covered_seq` 记入槽头（先 `Flush()` 再取 `last_seq()`）。
 4. 双缓冲：代际号取号/续号；写非恢复槽、保好覆坏；读时选槽 + 回退逻辑（灌索引留 M6）。
-5. 触发：手动 `Engine::Snapshot()`（同步返结果）+ 大小阈值（自动发后不管、退避）汇到 `RequestSnapshot`；定时留 P7。
+5. 触发：手动 `Engine::Snapshot()`（同步返结果）+ 大小阈值（自动发后不管、退避）汇到 `RequestSnapshot`；定时字段在 P7 后仍未生效。
 6. `MetaIndex` 收窄：移除 `WriteSnapshot`/`LoadSnapshot`，`ForEach` 改 `int32_t` 可中止；契约测试随之更新。
 7. `Wal::last_seq()`、`DeviceContext.snapshot`、`Engine` 三处编排、`snapshot_buffer_size`、两个错误码到位。
 8. `test_snapshot` 新增用例（§13）全绿；已有测试保持绿色。

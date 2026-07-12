@@ -1,6 +1,6 @@
 # P9 - SPDK NVMe API 后端接入 · 总体里程碑设计
 
-状态：🚧 设计完成，待各里程碑详细设计与实现
+状态：🚧 总体设计完成；P9M0 已实现，下一步进入 P9M1 详细设计与实现
 
 ## 1. 阶段目标
 
@@ -34,7 +34,7 @@ P9 将这些抽象落到 SPDK 的 DMA 可用内存和 NVMe 命令提交路径上
 | 阶段 | 调整后定位 |
 | --- | --- |
 | P9 | SPDK NVMe API 后端接入 |
-| P10 | B+树索引学习路径 |
+| P10 | 生产级无锁内存 B+树索引（学习与可选生产实现） |
 | P11 | 多 NVMe 规模化与真盘验证 |
 | P12 | 可观测性与运维工具 |
 
@@ -100,12 +100,12 @@ P9 不包含：
 
 | 决策点 | 结论 |
 | --- | --- |
-| P9-D1 阶段定位 | P9 正式定位为 SPDK NVMe API 后端接入；B+树索引学习路径后移到 P10。 |
+| P9-D1 阶段定位 | P9 正式定位为 SPDK NVMe API 后端接入；生产级无锁内存 B+树索引后移到 P10，详细方案留 P10 单独讨论。 |
 | P9-D2 接入路线 | 直接基于 SPDK NVMe API 接入，不先走 SPDK bdev。 |
 | P9-D3 里程碑切分 | 按“可运行证据”小步推进，先 Cabe 外部验证 SPDK，再逐步接入 value/data、WAL、snapshot。 |
 | P9-D4 设备配置模型 | 新增类型化 SPDK 配置，显式使用 `BDF + namespace id`，不使用伪路径字符串作为长期模型。 |
 | P9-D5 namespace 用途映射 | 每个设备组显式配置 data、WAL、snapshot namespace；代码不硬编码 `nsid 1/2/3` 用途，文档中将当前测试环境约定为 `1=data, 2=WAL, 3=snapshot`。 |
-| P9-D6 构建与环境 | SPDK 后续作为 `third_party/spdk` 子模块纳入 Cabe；`CABE_SPDK_ROOT` 仅作为本地覆盖路径；SPDK 环境准备、编译、检查和设备绑定由 Cabe 脚本管理，设备绑定必须显式执行。 |
+| P9-D6 构建与环境 | SPDK 固定作为 `third_party/spdk` 子模块纳入 Cabe，版本锁定到 `v26.01` 对应提交；不引入本地覆盖路径；SPDK 环境准备、编译、检查和设备绑定由 Cabe 脚本管理，设备绑定必须显式执行。 |
 | P9-D7 生命周期 | SPDK 后端在 `Engine::Open` 中初始化 Cabe 进程内 SPDK 运行时，在 `Engine::Close` 中释放本次打开周期所有 SPDK 资源并调用 `spdk_env_fini`；重复 Open 只支持同参数，不一致则失败。 |
 | P9-D8 探测策略 | 只按 `Options::spdk_devices` 中显式出现的 BDF 定向 probe / attach；同一 BDF 只 attach 一次；namespace 按配置 `nsid` 获取，不自动选择设备。 |
 | P9-D9 独立验证工具 | 在改 Cabe 主路径前先提供 Cabe 自带 SPDK 验证工具，覆盖只读探测、namespace 枚举、DMA 分配、qpair 创建和 1MiB 读写校验。 |
@@ -150,7 +150,7 @@ flowchart LR
 
 | 里程碑 | 文档 | 状态 | 核心目标 |
 | --- | --- | --- | --- |
-| P9M0 | `P9M0_spdk_environment_design.md` | ⏳ 待详细设计 | 完成阶段重排、SPDK 子模块规划、环境脚本和设备绑定安全边界。 |
+| P9M0 | `P9M0_spdk_environment_design.md` | ✅ 已实现 | 完成阶段重排、SPDK 子模块接入、环境脚本和设备绑定安全边界。 |
 | P9M1 | `P9M1_build_config_design.md` | ⏳ 待详细设计 | 接入 SPDK 构建、类型化配置、错误码段和测试环境变量框架。 |
 | P9M2 | `P9M2_probe_tool_design.md` | ⏳ 待详细设计 | 实现 SPDK 定向 probe、namespace 只读枚举和安全验证工具。 |
 | P9M3 | `P9M3_qpair_dma_rw_verify_design.md` | ⏳ 待详细设计 | 跑通 qpair、DMA 内存、completion 轮询和 1MiB 读写校验。 |
@@ -171,32 +171,33 @@ flowchart LR
 目标：
 
 - 将 P9 正式定位为 SPDK，B+树后移；
-- 将 SPDK 作为 `third_party/spdk` 子模块纳入长期规划；
-- 固化当前开发环境与正式环境之间的关系；
-- 设计 SPDK 环境准备、编译、hugepage 检查和设备绑定脚本；
+- 将 SPDK 作为 `third_party/spdk` 子模块接入仓库，并锁定到 `v26.01`；
+- 明确 `/home/pk/spdk` 等外部路径不参与 P9 正式设计；
+- 提供 SPDK 环境准备、编译、检查、大页内存显式配置和设备接管脚本；
 - 明确设备绑定是显式高风险操作，不由 `setup-dev.sh` 默认执行。
 
 建议脚本边界：
 
 | 脚本 | 职责 |
 | --- | --- |
-| `scripts/setup-dev.sh` | 安装 Cabe 基础依赖，可安装 SPDK 所需系统依赖，但不默认绑定设备。 |
-| `scripts/setup-spdk.sh` | 初始化 / 更新 SPDK 子模块，安装 SPDK 依赖，编译 SPDK，检查 hugepage。 |
-| `scripts/spdk-device.sh` | 显式执行 `status`、`bind`、`unbind`、`reset`，只操作传入或白名单 BDF。 |
+| `scripts/setup-dev.sh` | 安装 Cabe 基础依赖；不编译 SPDK，不配置大页内存，不接管设备。 |
+| `scripts/setup-spdk.sh` | 初始化并校验 `third_party/spdk` 子模块，安装 SPDK 依赖，编译 SPDK，检查环境，显式配置大页内存。 |
+| `scripts/spdk-device.sh` | 显式执行 `status`、`bind`、`unbind`，只操作单个传入 BDF；检查 holder、挂载点、系统盘和目标驱动条件；设备操作不修改大页内存。 |
 
 P9M0 退出条件：
 
 - P9/P10/P11/P12 阶段重排方案同步到后续文档计划；
-- SPDK 子模块路径和本地覆盖路径语义定稿；
-- 设备绑定安全边界定稿；
-- 当前 `/home/pk/spdk` 被标注为临时验证路径。
+- `third_party/spdk` 子模块锁定到 SPDK `v26.01` 对应提交；
+- `scripts/setup-spdk.sh` 和 `scripts/spdk-device.sh` 完成并通过安全校验；
+- 设备接管只允许显式单 BDF 操作；默认 `vfio-pci` 要求有效 IOMMU group；显式允许 `uio_pci_generic`，禁止自动降级；
+- 所有已完成文档中的旧路线引用已同步到 P9 最新设计。
 
 ## 8. P9M1 - 构建接入与配置模型
 
 目标：
 
 - 为 `CABE_IO_BACKEND=spdk` 接入 SPDK 构建；
-- 默认从 `third_party/spdk` 查找 SPDK，允许 `CABE_SPDK_ROOT` 本地覆盖；
+- 默认且仅从 `third_party/spdk` 查找 SPDK；
 - 新增类型化 SPDK 设备配置；
 - 新增 SPDK 错误码段；
 - 新增 SPDK 测试环境变量解析和默认跳过策略。

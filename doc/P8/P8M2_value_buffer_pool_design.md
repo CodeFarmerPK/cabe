@@ -35,7 +35,7 @@
 4. **无锁分配与释放**：池内部使用带版本号的原子空闲栈管理槽位，不使用 mutex / condition_variable。
 5. **严格关闭边界**：`Engine::Close()` 必须等待所有已分配 `ValueBuffer` 释放后才继续关闭设备并返回。
 6. **来源识别基础能力**：池能判断一个 `DataView` 是否来自当前设备池中处于已分配状态的完整槽位。
-7. **后端中立**：P8M2 不绑定 `io_uring` 注册缓冲区或 SPDK，但池元数据为未来后端私有信息预留空间。
+7. **后端中立**：P8M2 不绑定 `io_uring` 注册缓冲区或 SPDK；池只维护设备、池、槽位和代次身份，不保存后端私有指针。
 8. **保持 `Put` 统一入口**：`Put` 的公开接口和实际写入行为在 P8M2 不改变。
 
 ### 1.2 交付范围
@@ -68,7 +68,7 @@
 | 把来源识别接入 `Put` 行为分支 | P8M3 |
 | `IoBackend::Write` 写入描述符升级 | P8M4 |
 | `io_uring` 注册缓冲区注册、注销和写入 | P8M4 |
-| SPDK 后端或 SPDK 大页内存接入 | P10 |
+| SPDK 后端或 SPDK DMA 可用内存接入 | P9 |
 | 应用端跨进程导入外部内存 | 不做 |
 | 新增公开“强制零拷贝”写入接口 | 不做 |
 | 新增公开路径统计接口 | 不做 |
@@ -412,8 +412,6 @@ PoolState
   slot_count
   base_address
   total_size
-  backend_kind
-  backend_private
 
   closing: atomic<bool>
   active_count: atomic<uint32_t>
@@ -763,10 +761,12 @@ P8M2 的普通 slab 内存不是 `io_uring` 注册缓冲区，也不是 SPDK 直
 - 固定 1 MiB value 内存；
 - 1 MiB 地址对齐；
 - 设备池归属；
-- 后端私有字段预留；
+- 池编号、槽位编号和槽位代次；
 - 关闭和释放边界。
 
-P8M4 可以把 `io_uring` 注册缓冲区信息挂到池后端私有字段；P10 可以把底层 slab 分配替换为 SPDK 大页内存。
+P8M4 最终通过 `ExportSlotViews` 导出地址、长度和槽位索引，由 `io_uring` 后端自行保存注册索引映射，
+没有把后端私有状态挂进池。P9M7 将底层 slab 分配替换为 Cabe 自管的 SPDK DMA 可用内存；应用端
+仍只看到 `ValueBuffer`，不直接管理或导入 SPDK DMA 内存。
 
 ---
 
@@ -906,7 +906,7 @@ P8M2 完成时必须满足：
 | 陈旧 `DataView` 别名新分配槽位 | `DataView` 无控制块身份，无法区分旧视图和新所有者 | 文档明确 `DataView` 不得超过 `ValueBuffer` 生命周期；P8 后续不把 stale view 定义为合法用法。 |
 | 多设备归属错位 | key 路由到设备 A，却使用设备 B 的池 | `Engine` 和 `DeviceContext` 同序保存池；来源识别时校验 device_id。 |
 | 内存占用过大 | 多设备大容量配置导致 Open 失败或系统压力 | 默认容量保守；容量可配置为 0；Open 阶段失败及时暴露。 |
-| 过早绑定 `io_uring` / SPDK | 后续后端切换困难 | P8M2 只保留后端私有字段，不公开后端概念。 |
+| 过早绑定 `io_uring` / SPDK | 后续后端切换困难 | P8M2 只保留后端中立槽位身份，不公开后端概念或保存后端私有指针。 |
 | P8M2 范围膨胀 | 无锁池和写入路径改动相互干扰 | P8M2 不改 `Put` 行为，零拷贝路径接入留给 P8M3/P8M4。 |
 
 ---

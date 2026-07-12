@@ -6,7 +6,7 @@
 > `Options.wal_level`，由两个组件**每次操作现读**，运行时可改（经 Engine 一个入口）。
 >
 > M3 仍是单线程 + 同步实现：攒批的"异步"体现在结构(攒缓冲、按触发刷出)上，底层刷盘仍是
-> 阻塞 `fdatasync`；真正的后台刷盘线程、定时刷出、双缓冲、零拷贝、io_uring/SPDK 异步全留 P7+。
+> 阻塞 `fdatasync`；后台刷盘线程、定时刷出和双缓冲留后续性能阶段；value 零拷贝归 P8，SPDK WAL 设备抽象与适配归 P9M8/P9M9。
 >
 > **本文为详细设计**；C++ 片段为设计示意，代码实装以此为准。
 
@@ -32,7 +32,7 @@
 2. 延续**级别内化**：`Engine` 只分发 I/O，`Wal`/`IoBackend` 各自现读 `Options.wal_level` 分支；`Engine::Put/Delete` 代码不变。
 3. **WAL 攒批**（级别 2/4）：`WriteWal` 只追加不每帧刷，攒满 / Close / 切档收紧才刷；新增 `Flush()`。
 4. **value 异步**（级别 3/4）：`io.Write` 按级别决定要不要 FUA。
-5. **Options 的 WAL 字段生效**：`wal_level`、`wal_buffer_size` 生效；`wal_flush_interval_ms` 存而不用（P7）。
+5. **Options 的 WAL 字段生效**：`wal_level`、`wal_buffer_size` 生效；`wal_flush_interval_ms` 存而不用（P7 未兑现，归性能兑现阶段）。
 6. **运行时改级别**：Engine 一个改级别入口，收紧时先刷缓冲。
 
 ### 1.2 交付范围
@@ -47,11 +47,11 @@
 
 | 推迟项 | 落点 | 原因 |
 |---|---|---|
-| 定时刷出（`wal_flush_interval_ms` 生效） | P7 | 真正的定时刷出要后台线程独立计时；单线程下机会式模拟给不出"空闲也兜底"的承诺，且 P7 会重写，故不做 |
-| 双缓冲 + 后台刷（消除 `fsync` 抖动） | P7+ | 抖动真实存在，但消除它要把刷盘挪到独立执行体；单线程同步下双缓冲零收益，只留干净接缝 |
-| 零拷贝 / SPDK / 跨后端异步抽象层 | P7+ | 需 io_uring/SPDK 的注册缓冲 / DMA；M3 不焊死特定形态，见 §12 |
+| 定时刷出（`wal_flush_interval_ms` 生效） | 性能兑现阶段 | P7 建立 reactor 但未增加定时器；真正定时刷出仍需超时唤醒或独立执行体 |
+| 双缓冲 + 后台刷（消除 `fsync` 抖动） | 性能兑现阶段 | P7/P9 首轮均不做多请求在飞；待深度异步设计时统一处理 |
+| value 零拷贝 / SPDK WAL 设备适配 | P8 / P9 | P8 完成 value `ValueBuffer` 路径；P9M8/P9M9 引入 WAL 专用设备抽象与 SPDK DMA/Flush 适配，见 §12 |
 | `wal_buffer_size` 运行时改大小 | 未来 Options 维护接口 | 需"先刷 + 重分配"；缓冲大小是次要旋钮，Open 时定死更省 |
-| 并发安全的运行时改级别 | P7 | M3 单线程，`SetWalLevel` 与读写同线程顺序发生，无并发问题 |
+| 并发安全的运行时改级别 | P7 已兑现 | `SetWalLevel` 与读写统一投递到所属 reactor 串行执行，无需给 WAL 加锁 |
 | 崩溃恢复 / WAL 重放 / value 损坏的恢复策略 | P5M6 | M3 无恢复；级别 3/4 崩溃后的损坏检测靠现有 `Get` CRC，恢复处置在 M6 |
 | 环形缓冲 / 回收 | P5M5 | M3 仍线性追加，假定 WAL 不写满 |
 
@@ -62,7 +62,7 @@
 - **`Wal`**：`Open(wal_path, WalLevel level)` 存 `level_` 拷贝；`WriteWal` = `Append` + `Sync`（**每帧**整块写 + `fdatasync`）；持一块 **4K** 缓冲 `cur_buf_`（`kWalBlockSize`）；无 `Flush()`。按 P5M2-D11，**M2 统一按级别 1 运行**，`level_` 已布好线但分支未启用（`WriteWal` 里 `(void)level_;`）。
 - **`IoBackend`**（sync / io_uring 两后端）：`Open(path)`；`Write` **无脑 FUA**（`pwrite`/提交 + `fdatasync`）。
 - **`Engine`**：`Put`/`Delete` 已接级别 1 WAL（value FUA → WAL 同步 → 内存 → 返回 / 墓碑帧）；**不持有 Options**；`Open` 仅 create 模式开 WAL。
-- **`Options`**：`wal_level` 默认 `WalSync`(级别 3)、`wal_buffer_size` 默认 32K、`wal_flush_interval_ms` 默认 1s——**均为占位，M3 起生效**。
+- **`Options`**：`wal_level` 默认 `WalSync`(级别 3)、`wal_buffer_size` 默认 32K、`wal_flush_interval_ms` 默认 1s。M3 使前两项生效；定时刷出字段至今仍存而不用，归后续性能阶段。
 - **`wal/wal_frame.h`**：128 字节帧、双 CRC、`seq`，已定，M3 不动。
 
 ---
@@ -76,10 +76,10 @@
 | **P5M3-D3** | value 持久（IoBackend） | 级别 1/2 → `Write` 走 FUA；3/4 → 只写不 `fdatasync`。`opts == nullptr`（bench/test 单独构造）默认按**级别 3 行为**（不 FUA），与默认级别一致 |
 | **P5M3-D4** | WAL 落盘（Wal） | 级别 1/3 → 同步（每帧落盘）；2/4 → 攒批（攒满/Close/收紧才刷）（P6M1 演进注：级别 1/3 改"每**批**落盘才返回"——提交组合并并发写者，单线程退化为批大小 1、逐调用语义等价；见 §6.3 注） |
 | **P5M3-D5** | 缓冲结构 | **一块**缓冲，大小 = `wal_buffer_size`，Open 时定、一次性分配、运行期固定，Open 时向上取整到 4K 倍数且 ≥4K；两档共用；空闲部分不管；对不完整写入安全（帧 CRC 兜底）。（P5M5 注：攒批"攒满"判定改以**有效窗口** `min(buf_size, 到环尾)` 为准——贴缝截短，见 P5M5 §4） |
-| **P5M3-D6** | 刷出触发 + 线程 | 触发 = 攒满 / Close / 切档收紧；**定时器 → P7**；`Flush()` 在调用（engine）线程上同步内联执行 |
-| **P5M3-D7** | 抖动与扩展 | 单缓冲 + `Flush()` 干净自包含；双缓冲 / 后台刷 / 零拷贝 / SPDK 全留 P7+，M3 只留干净接缝（`RawDevice` 原语 / 窄 `Flush()` / `AllocAligned` 分配口），不焊死特定形态 |
+| **P5M3-D6** | 刷出触发 + 线程 | 触发 = 攒满 / Close / 切档收紧；P7 未实现定时器，继续归性能兑现阶段；`Flush()` 同步内联执行 |
+| **P5M3-D7** | 抖动与扩展 | P5 保持单缓冲 + `Flush()` 自包含；value 零拷贝归 P8，SPDK WAL 适配归 P9M8/P9M9。P5 留下 `RawDevice` 原语、窄 `Flush()` 和对齐分配口，供后续迁移而不改变上层 WAL 逻辑 |
 | **P5M3-D8** | 默认级别 | M3 起按配置级别执行，**默认级别 3**；M2 的"强制级别 1"（P5M2-D11）解除 |
-| **P5M3-D9** | 运行时改级别 | 走 Engine 改级别入口；收紧（攒批 2/4 → 同步 1/3）时先 `Flush()`；并发安全 → P7；`wal_buffer_size` 运行时改大小 → 未来 |
+| **P5M3-D9** | 运行时改级别 | 走 Engine 改级别入口；收紧（攒批 2/4 → 同步 1/3）时先 `Flush()`；P7 通过 reactor 串行化兑现并发安全；`wal_buffer_size` 运行时改大小仍未实现 |
 | **P5M3-D10** | 读侧 | M3 读路径不加新代码；级别 3/4 崩溃后的 value 损坏由现有 `Get` 的 CRC 兜住；处置策略 → M6 |
 | **P5M3-D11** | 改动面 | 改 5 处现有文件；无新文件、无新模块、CMake 不动；M3 不加新错误码（`Flush` 失败复用 `kWalWriteFailed`） |
 
@@ -287,7 +287,7 @@ Status Engine::SetWalLevel(WalLevel new_level) {
 ```
 
 - M3 只做这一个最小"改级别"入口；通用 Options 接口、以及对 `wal_buffer_size` 改动的显式拒绝（如 `kEngineOptionImmutable`）留未来维护接口。M3 里 `wal_buffer_size` 没有修改入口，本就改不了。
-- 并发安全（多线程下改级别）→ P7。
+- 并发安全（多线程下改级别）已由 P7 reactor 串行化兑现。
 
 ---
 
@@ -298,7 +298,8 @@ Status Engine::SetWalLevel(WalLevel new_level) {
 - **掉电崩溃 + 恢复后（M6）**：WAL（级别 3 同步）重放出 key→块，但块 value 没落盘 → 块里是旧数据/垃圾 → `Get` 读出 CRC 不匹配 → `kEngineDataCorrupted`。
 - **M3 读路径不加任何新代码**：现有 `Get` 的 CRC 校验就是检测路径，不区分"没落盘 / 真损坏"，都返回 `kEngineDataCorrupted`。
 - M3 没有恢复、不崩溃，这个场景在 M3 **跑不出来**（要故障注入，已推迟），真正验证在 M6；损坏处置策略（丢弃 / 报上层 / `verify_value_crc_on_recovery`）也在 M6。
-- **M3 不主动兜底 value 的最终落盘**（异步档的 value 何时真落到介质，靠 M4 快照检查点 / P7 后台刷），这是异步档"尽力而为"的契约。
+- **M3 不主动兜底 value 的最终落盘**。M4 快照只持久化元数据，P7 也未增加 value 后台刷；
+  异步档何时落到介质仍服从其“尽力而为”契约，若要强化需另行设计持久化机制。
 
 ---
 
@@ -333,12 +334,12 @@ Status Engine::SetWalLevel(WalLevel new_level) {
 
 ## 12. 未来演进（写入文档备查，非 M3 实现）
 
-- **定时刷出**：`wal_flush_interval_ms` 生效，需后台线程独立计时 → **P7**。
-- **双缓冲 + 后台刷（消抖动）**：单缓冲的 `fsync` 阻塞会造成尾延迟尖刺，真实存在；但消除它要把刷盘挪到独立执行体（后台线程 / 异步 I/O），单线程同步下双缓冲零收益 → **P7+**。
-- **跨后端方案**：io_uring（内核、注册缓冲、环收割）与 SPDK（用户态、DMA、轮询、NVMe FUA/Flush）原语层差太远，"普适方案"会退化成最小公约数、丢掉零拷贝。正解是**抽象层**：**上层 WAL 逻辑（帧/级别/攒批/调度/并发/背压）写一次**，**下层 per-backend 实现原语（分配缓冲 / 提交可带持久标志的写 / 收割完成）+ 持久机制**（`fdatasync` / `RWF_DSYNC` / NVMe FUA）。抽象层画在"异步 + 完成 + 后端提供缓冲"这一层，sync 实现成退化版。这与 cabe 现有 `IoBackend`（编译期可换抽象 + per-backend 实现）一脉相承 → **P7+**。
+- **定时刷出**：`wal_flush_interval_ms` 至今未生效；P7 未实现，归性能兑现阶段。
+- **双缓冲 + 后台刷（消抖动）**：P7/P9 首轮均不做深度异步，归性能兑现阶段。
+- **P9 已锁定的跨后端方案**：上层 WAL 帧、级别、环形算法和恢复逻辑保持一份；底层在 P9M8 抽成 WAL 专用设备接口，由 Raw 与 SPDK 分别适配。P9 不复用 value/data 的 1 MiB `IoBackend`，也不在首轮引入通用异步完成框架、多请求在飞或 poll group；SPDK 首轮以 DMA 缓冲区 + 同步式 completion 轮询跑通语义。
 - **`wal_buffer_size` 运行时改大小**：需"先刷 + 重分配"，归未来 Options 维护接口。
-- **并发安全的运行时改级别** → P7；**环形缓冲 + 回收** → M5；**崩溃恢复 / 重放 / value 损坏的恢复处置** → M6。
-- **M3 留好的干净接缝**（让上述都"换接缝不动上层逻辑"）：WAL I/O 原语走 `RawDevice`；持久收敛到窄接口 `Flush()`；缓冲经 `RawDevice::AllocAligned` 这个分配口拿。这几个接缝不只为 io_uring，而是为整个 io_uring + 零拷贝 + SPDK 的未来留的，所以不焊死 A/B 之类特定形态。
+- **并发安全的运行时改级别**已由 P7 reactor 串行化兑现；**环形缓冲 + 回收** → M5；**崩溃恢复 / 重放 / value 损坏的恢复处置** → M6。
+- **M3 留好的干净接缝**（让 P9 能“换设备适配、不动上层逻辑”）：WAL I/O 集中在 `RawDevice` 调用点，持久化收敛到窄 `Flush()`，缓冲经统一分配口获得；P9M8 据此迁移到 WAL 专用设备抽象，P9M9 再补 SPDK 实现。
 
 ---
 

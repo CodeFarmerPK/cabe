@@ -26,6 +26,7 @@
 
 1. `error_code.h`：六段错误码空间定型，每段 1000 号，保留现有 memory 段取值，段间不重叠由编译期断言保证。
    （P5M4 注：按 P2M1 §4.3 扩展约定在 `-106000` 起新增第七段 **snapshot**——六段定型时预留的"不够用再加段"通道首次启用，原六段未受任何扰动；P5 终态七段占用见 P5M7 收敛稿 §6。）
+   （P9 同步注：P9-D20 已确认继续沿用该扩展机制新增 **SPDK 专属错误码段**；具体基址和码值由 P9M1 设计，既有七段及数值保持不变。）
 2. `logger.h`（**纯头宏**，无 `.cpp`）：stderr 最简实现，五级日志、运行期 `CABE_LOG_LEVEL` 控级、统一格式、调用点零改动（沿用 `CABE_LOG_*` 宏名）。
 
 ### 1.2 交付范围（本里程碑产出）
@@ -41,7 +42,7 @@
 | `Status` 类型（封装错误码 + 消息） | **P1/P2** | M3 只定义码值，`Status` 是公开 API 的一部分 |
 | io / index / wal / engine / wal_recovery 段的**具体码** | 各模块起始阶段 | M3 只划段 + 定基址；具体码随模块产生时补 |
 | 日志落盘 / 滚动 / 异步队列 / 采样 | 不做（超出范围） | M3 是"最简 stderr"；高级日志非项目目标 |
-| Metrics / 慢日志 / 可观测性导出 | **P5（Metrics 接口）/ P12（导出）** | 与日志分属不同子系统 |
+| Metrics / 慢日志 / 可观测性导出 | **P12（接入 + 导出）** | P5-D6 最终未接入 Metrics；P12 负责补接入、导出和运维工具 |
 | 编译期级别裁剪（`CABE_MIN_LOG_LEVEL` 把低级宏编译掉） | 可选，需要时再加 | M3 用运行期过滤即可满足"env 控级" |
 
 ---
@@ -70,7 +71,7 @@
 
 ---
 
-## 3. 待 owner 终审的决策
+## 3. 收敛前待终审的决策（P0M7 已锁定）
 
 ### 决策-1：命名空间归属（延续 M2 决策-1）
 
@@ -276,8 +277,8 @@ add_library(cabe::common ALIAS cabe_common)
 
 | # | 决策 | 备选 | 理由 | 状态 |
 |---|---|---|---|---|
-| M3-D1 | error_code / logger 进 `cabe::err` / `cabe::log`；`CABE_LOG_*` 宏名保留 | 全局 | 延续 M2 命名空间约定，避免全局污染 | **建议采纳，待终审**（§3 决策-1，与 M2-D1 一并） |
-| M3-D2 | 错误码用 `inline constexpr int`，弃 `#define` | `#define` / `enum class` | 类型安全、可 `static_assert`、可直接作 int | 建议采纳（§3 决策-2） |
+| M3-D1 | error_code / logger 进 `cabe::err` / `cabe::log`；`CABE_LOG_*` 宏名保留 | 全局 | 延续 M2 命名空间约定，避免全局污染 | **✅ 已锁定（P0M7 收敛）** |
+| M3-D2 | 错误码用 `inline constexpr int`，弃 `#define` | `#define` / `enum class` | 类型安全、可 `static_assert`、可直接作 int | **✅ 已锁定（P0M7 收敛）** |
 | M3-D3 | 六段每段 1000 号 + 相邻段等距的不重叠 `static_assert` | 不校验 / 运行期校验 | ROADMAP 退出条件「段位静态不重叠」；编译期零成本 | 锁定 |
 | M3-D4 | logger 用纯头宏 + `printf` 风格 `fprintf`（无 `.cpp`/无 `std::format`） | `std::format`+模板+`.cpp` | owner 指定：沿用原 logger.h 最简纯头形态；`-Wformat` 把关格式串 | 锁定（owner 定） |
 | M3-D5 | `CABE_LOG_LEVEL` 运行期控级，默认 `WARN`，首用解析缓存 | 编译期裁剪 | ROADMAP 指定 env 控级；construct-on-first-use 线程安全 | 锁定 |
@@ -299,7 +300,7 @@ add_library(cabe::common ALIAS cabe_common)
 | 输出格式 `[LEVEL][tid][file:line] message` | §5.2 | ✅ |
 | 禁止全空操作 | §5 实装 stderr | ✅ |
 | 退出：demo 五级日志 + 段位不重叠编译期断言 | §10 | ✅ |
-| 命名空间 / 错误码形态 | 进 `cabe::`、改 `constexpr` | ⚠️ 超出字面，待终审（§3） |
+| 命名空间 / 错误码形态 | 进 `cabe::`、改 `constexpr` | ✅ P0M7 已锁定 |
 
 ---
 

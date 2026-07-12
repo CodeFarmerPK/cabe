@@ -32,7 +32,7 @@
 3. **回收**：快照成功落地后，head 跳到快照定格时刻捕获的物理边界——铁律（回收绝不越过最新已落地快照的 `covered_seq`）落地。
 4. **写满兜底**：空间核算 + 两档检查点；撞墙时强制快照救援 + 重试一次；救不了返回 `kWalFull`。
 5. **部署期容量校验**：`Wal::Open` 校验 `ring_size ≥ max(阈值×2, 缓冲+4K)`（兑现 M4 §11 实装注）。
-6. **TRIM 挂点**：`ReclaimUpTo` 内留空桩（实施归 P7，与数据盘 `TrimDeviceBlock` 同待遇）。
+6. **TRIM 挂点**：`ReclaimUpTo` 内留空桩；P7 未实现实际 discard，与数据盘 `TrimDeviceBlock` 一并继续归性能兑现阶段。
 
 ### 1.2 交付范围
 
@@ -49,10 +49,10 @@
 |---|---|---|
 | 重放 / 恢复 / 头尾指针从盘上重建 / recover 模式打开 WAL | **P5M6** | 严格分离：M5 只交付"守住四条不变量的环形 WAL"，恢复方案由 M6 自行设计 |
 | `Wal` 的任何读盘接口 | P5M6 | M5 的 `Wal` 仍是"只写"模块 |
-| TRIM 实施（`BLKDISCARD` 原语 + 统一 TRIM 设施） | **P7** | 纯性能/寿命优化；与数据盘 `TrimDeviceBlock` 空桩同一故事，P7 统一做（value/WAL/快照三层各调） |
-| 定时刷出 / 后台快照 / 并发 | P7 | 既有归属不变 |
+| TRIM 实施（`BLKDISCARD` 原语 + 统一 TRIM 设施） | **性能兑现阶段** | P7 只迁移空桩，未实现实际 discard |
+| 定时刷出 / 后台快照 / 真正多请求并发 | 性能兑现阶段 | P7 采用 per-reactor 串行执行，没有兑现这些债务 |
 | 故障注入（快照设备坏时救援自愈等） | 推迟 | 同 M3/M4 先例 |
-| "挂起动作对齐窗口边界"类调度优化 | P7 | 讨论中否决于同步原型（挂起状态机 + 契约破坏），异步世界自然复活 |
+| "挂起动作对齐窗口边界"类调度优化 | 性能兑现阶段 | 同步原型中否决；待深度异步状态机统一设计 |
 
 ---
 
@@ -83,7 +83,7 @@
 | **P5M5-D12** | 空间核算 | `live(head→新起点) + W ≤ ring_size − 4K`，**在新窗口/新块起点上求值**；同步档块推进时（W=4K）、攒批档开窗时（W=有效窗口）各查一次；**开窗是惰性的**——`Append` 见窗口容量 0 先重试开窗（回收后自然通过），仍失败才 `kWalFull`（救援重试的成立前提） |
 | **P5M5-D13** | 救援 | **撞墙反应式**：`WriteWal` 返 `kWalFull` → Engine 强制 `DoSnapshot`（直调、绕过增长闸门——被闸住会卡死且无法自愈）→ **重试一次**（快照成功则数学上必成）；**不设第三个"快满"主动触发**（增长触发管常态、撞墙救援管异常）；双故障下每写一次失败尝试——吵闹换自愈，如实认账 |
 | **P5M5-D14** | `kWalFull` 契约 | 对外可见**当且仅当救援无效**；Put 失败 = 新块回收、索引未动、旧值可读；Delete 失败 = 全不动；重试 = 完整重走（被拒帧不在任何缓冲、seq 未耗）；响亮运维信号（根因：快照持续失败/配置病态） |
-| **P5M5-D15** | TRIM | 实施归 P7；M5 在 `ReclaimUpTo` 内插**空桩** `TrimReclaimedRange(old_head, new_head)`（`TODO(P7)`：模环区间跨缝拆两段、建议性、失败静默）——挂点与范围语义用代码钉死，与 `TrimDeviceBlock` 同款；统一 TRIM 设施 P7 自行设计，快照设备 TRIM 机会很瘦（A/B 皆承重墙） |
+| **P5M5-D15** | TRIM | M5 在 `ReclaimUpTo` 内插**空桩** `TrimReclaimedRange(old_head, new_head)`；P7 未实现统一设施，继续归性能兑现阶段。模环区间需跨缝拆两段、建议性失败静默；快照设备 TRIM 机会很瘦 |
 | **P5M5-D16** | 容量校验 | `Wal::Open`（几何后、分配前）：`ring_size ≥ max(snapshot_threshold_bytes × 2, wal_buffer_size + 4K)`，否则 `kDeviceTooSmall`（复用 M4 码，注释当时已含 WAL）；口径用 `ring_size` 非裸 `SizeBytes`（对齐快照侧 `slot_size` 先例）；recover 校验归 M6；日志带三个数 |
 | **P5M5-D17** | 改动面 | **零新文件、零新模块、CMake 零改、Options 零新字段**（全复用既有两个字段）；`wal_frame.h`/`snapshot/`/`index/`/`io/` 全零；错误码 +2 |
 | **P5M5-D18** | M5/M6 边界 | M5 交付 = 守住四条不变量的环形 WAL；重放/恢复/指针重建/recover/读盘接口全归 M6 且本文零提及其设计；**M5 结束时 recover 行为与 M4 结束时完全相同**（退出判定钉死） |
@@ -286,18 +286,18 @@ int32_t Engine::WriteWalRescuing(DeviceContext& dc, const WalEntry& e) {
 
 ## 9. TRIM（D15）
 
-实施归 P7。M5 在 `ReclaimUpTo` 内插私有空桩：
+M5 在 `ReclaimUpTo` 内插私有空桩；P7 未实现，后续归性能兑现阶段：
 
 ```cpp
 void Wal::TrimReclaimedRange(std::uint64_t old_head, std::uint64_t new_head) {
-    // TODO(P7): 经统一 TRIM 设施对 [old_head, new_head) 模环区间(跨缝拆两段)发建议性
+    // TODO(性能兑现阶段): 经统一 TRIM 设施对 [old_head, new_head) 模环区间(跨缝拆两段)发建议性
     //   discard(sync=BLKDISCARD / io_uring / SPDK 各后端原语);失败静默,绝不影响回收。
-    //   与 Engine::TrimDeviceBlock 同款待遇;统一设施由 P7 自行设计,三层(value/WAL/快照)各调。
+    //   与 Engine::TrimDeviceBlock 同款待遇;统一设施后续设计,三层(value/WAL/快照)各调。
     (void)old_head; (void)new_head;
 }
 ```
 
-范围语义与调用时序用代码钉死（P7 只填函数体）；快照设备 TRIM 机会很瘦（A/B 皆承重墙），value 与 WAL 才是大户。
+范围语义与调用时序用代码钉死；P7 没有填函数体。快照设备 TRIM 机会很瘦（A/B 皆承重墙），value 与 WAL 才是大户。
 
 ---
 
@@ -362,7 +362,7 @@ Wal::Open(几何算完后、缓冲分配前):
 
 **诚实认账（测不了的）**：① Engine 级"真撞满 + 救援"端到端不可行（128K Put × 1 MiB value = 128G 写放大）——救援语义由 Wal 级三件套全覆盖，`WriteWalRescuing` 胶水靠审查；② Engine 级"快照→回收"接线无黑盒观测口（head 纯内存、Engine 不暴露 `Wal`）——由 direct-Wal 模拟序列覆盖语义，3 行接线靠审查，**不为测试扩公开 API**。
 
-**不测**：恢复/重放（M6）、TRIM 实效（P7 桩）、并发（P7）、故障注入（推迟，同 M3/M4 先例）。落点：全部扩展 `test/wal/wal_test.cpp`。（P5M6 兑现注：恢复/重放测试矩阵 27 例落定——direct-Wal 测法延续为 M6 模块级主力，见 P5M6 §13。）
+**不测**：恢复/重放（M6）、TRIM 实效（性能兑现阶段）、后台/多请求并发（性能兑现阶段）、故障注入（推迟，同 M3/M4 先例）。落点：全部扩展 `test/wal/wal_test.cpp`。（P5M6 兑现注：恢复/重放测试矩阵 27 例落定——direct-Wal 测法延续为 M6 模块级主力，见 P5M6 §13。）
 
 ---
 
@@ -382,9 +382,9 @@ Wal::Open(几何算完后、缓冲分配前):
 | `P5M2_wal_core_design.md` | ① "只增不减(回收在 M5)、假定不写满" → M5 兑现注记；② "写过设备尾 kIoBase 失败安全" → 超越注记（模环后不可达，背压移交空间核算）；③ "`kWalFull` 留待 M5" → 兑现；④ §6 接口注追加 M5（新成员/新接口/Flush 留窗） |
 | `P5M3_wal_levels_design.md` | ① §6.5 `Flush` 描述 → 超越注记（M5 起整块推进半块留窗，提前刷出无空洞）；② §6.6 切档措辞对账（刷后可留窗，恰为同步档兼容态）；③ D5"攒满 = 缓冲满" → M5 起以有效窗口为准 |
 | `P5M4_snapshot_design.md` | ① §8.3 "M5 据 covered_seq 回收" → 注记：实装为同刻捕获的物理边界（物理孪生）；② §11 实装注 → 兑现 + 口径细化（`ring_size` 基准 + `max(…, 缓冲+4K)`） |
-| `doc/P5/README.md` | M5 段按定稿重写；备忘 #4 TRIM → "M5 留桩、P7 统一实施"；退出条件 #4 措辞；状态行与里程碑表（M3/M4 → ✅ 已实装，M5 → 设计稿） |
+| `doc/P5/README.md` | M5 段按定稿重写；备忘 #4 记录 M5 留 TRIM 空桩（P7 后仍未实施）；退出条件与状态同步 |
 | `P2M1_api_freeze_design.md` | Put/Delete 承诺表补一行：M5 起可能返回 `kWalFull`（仅空间耗尽且快照救援无效） |
-| `ROADMAP.md` | P5 段"快照后截断回收(TRIM)"加小注（TRIM 实施推 P7，M5 留桩） |
+| `ROADMAP.md` | P5 段说明 M5 留 TRIM 空桩；P7 未实施，归性能兑现阶段 |
 | 代码注释 | 实装阶段 grep 收口（`wal.h` 模块注释、"假定不写满"类旧注）——文档阶段不动代码 |
 
 （第二轮对账 = 实装 + 审查修复后的完工回顾，届时结实装偏差的账——M4 先例。）
