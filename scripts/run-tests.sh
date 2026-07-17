@@ -22,6 +22,7 @@ usage() {
   --tsan              启用 ThreadSanitizer
   --ubsan             启用 UndefinedBehaviorSanitizer
                       不传则不开检测器
+                      P9M1-D19 未裁决前，spdk 后端不接受检测器组合
 
 后端（必填）:
   --backend=NAME      IoBackend 选择: sync | io_uring | spdk
@@ -64,19 +65,21 @@ usage() {
   build-clang-asan              (clang++ + sync + ASAN)
   build-io_uring                (g++ + io_uring + 无检测器)
   build-clang-io_uring-asan     (clang++ + io_uring + ASAN)
+  build-spdk                    (g++ + spdk + 无检测器)
 
 示例（设备路径取自 ./scripts/mkloop.sh create 的输出）:
-  ./scripts/run-tests.sh --device=/dev/loop0 --wal-device=/dev/loop1 --snapshot-device=/dev/loop2
-  ./scripts/run-tests.sh --device=/dev/loop0 --wal-device=/dev/loop1 --snapshot-device=/dev/loop2 --asan
+  ./scripts/run-tests.sh --backend=sync --device=/dev/loop0 --wal-device=/dev/loop1 --snapshot-device=/dev/loop2
+  ./scripts/run-tests.sh --backend=sync --device=/dev/loop0 --wal-device=/dev/loop1 --snapshot-device=/dev/loop2 --asan
   ./scripts/run-tests.sh --device=/dev/loop0 --wal-device=/dev/loop1 --snapshot-device=/dev/loop2 --backend=io_uring
+  ./scripts/run-tests.sh --backend=spdk --clean                    # 无设备 P9M1 单元测试 + 链接验证
   # N=2 多设备：先 ./scripts/mkloop.sh create-multi 建两组 6 块，再带两组设备旗标
   ./scripts/run-tests.sh --backend=sync \\
       --device=/dev/loop0 --wal-device=/dev/loop1 --snapshot-device=/dev/loop2 \\
       --device2=/dev/loop3 --wal-device2=/dev/loop4 --snapshot-device2=/dev/loop5
-  ./scripts/run-tests.sh --compiler=clang++ --asan                    # clang++ + ASAN（无设备测试跳过）
-  ./scripts/run-tests.sh --release                                    # Release（跳过设备测试）
-  ./scripts/run-tests.sh --filter 'Engine*' --device=...              # 只跑 Engine 用例
-  ./scripts/run-tests.sh --clean --asan                               # 清理后重建 + ASAN
+  ./scripts/run-tests.sh --backend=sync --compiler=clang++ --asan     # clang++ + ASAN（无设备测试跳过）
+  ./scripts/run-tests.sh --backend=sync --release                     # Release（跳过设备测试）
+  ./scripts/run-tests.sh --backend=sync --filter 'Engine*' --device=... # 只跑 Engine 用例
+  ./scripts/run-tests.sh --backend=sync --clean --asan                # 清理后重建 + ASAN
 
 退出码:
   0  全部 PASS
@@ -148,8 +151,17 @@ esac
 # ---------- 后端必填校验（P6M3-D16：自 P6 起取消默认后端） ----------
 if [[ -z "$BACKEND" ]]; then
     echo "Error: --backend 为必填项（自 P6 起取消默认后端，见 ROADMAP P6 段「后端策略」/ doc/P6/README.md D10）。" >&2
-    echo "  指定其一: --backend=sync | --backend=io_uring" >&2
+    echo "  指定其一: --backend=sync | --backend=io_uring | --backend=spdk" >&2
     echo "  例: ./scripts/run-tests.sh --backend=sync --device=... --wal-device=... --snapshot-device=..." >&2
+    exit 2
+fi
+
+# ---------- SPDK + sanitizer 前置拒绝（P9M1-D19 尚未裁决） ----------
+if [[ "$BACKEND" == "spdk" && "$SANITIZER" != "none" ]]; then
+    cat >&2 <<'EOF'
+Error: P9M1-D19 尚未裁决 SPDK/DPDK 与 sanitizer 的匹配构建策略。
+当前仅支持 --backend=spdk 的普通无 sanitizer 构建，禁止把仅插桩 Cabe 的组合标记为完整通过。
+EOF
     exit 2
 fi
 
@@ -162,7 +174,7 @@ io_uring 的 SQ/CQ 是用户态与内核共享内存，TSAN 看不到内核侧 s
 会产生大量误报。
 
 可用组合:
-  ./scripts/run-tests.sh --tsan                      (sync + TSAN)
+  ./scripts/run-tests.sh --backend=sync --tsan       (sync + TSAN)
   ./scripts/run-tests.sh --backend=io_uring --asan   (io_uring + ASAN)
   ./scripts/run-tests.sh --backend=io_uring --ubsan  (io_uring + UBSAN)
 EOF

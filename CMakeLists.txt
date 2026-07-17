@@ -77,6 +77,14 @@ cabe_validate_choice(CABE_IO_BACKEND sync io_uring spdk)
 cabe_validate_choice(CABE_META_INDEX hashmap bplustree)
 cabe_validate_choice(CABE_BLOCK_ALLOCATOR ring_queue)
 
+# ---------- SPDK 仓库内静态依赖（仅显式选择 spdk 时解析）----------
+# 放在通用编译选项和子目录之前：sync/io_uring 完全不感知 SPDK；spdk 则在创建
+# Cabe 目标前完成无副作用前置检查并建立 cabe::spdk_deps。
+if(CABE_IO_BACKEND STREQUAL "spdk")
+    include("${PROJECT_SOURCE_DIR}/cmake/CabeSpdk.cmake")
+    cabe_configure_spdk()
+endif()
+
 # ---------- cabe_flags：统一编译契约（接口库）----------
 add_library(cabe_flags INTERFACE)
 target_compile_features(cabe_flags INTERFACE cxx_std_20)

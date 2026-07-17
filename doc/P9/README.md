@@ -1,6 +1,6 @@
 # P9 - SPDK NVMe API 后端接入 · 总体里程碑设计
 
-状态：🚧 总体设计完成；P9M0 已实现，下一步进入 P9M1 详细设计与实现
+状态：🚧 总体设计完成；P9M0/P9M1 已实现，下一步进行 P9M2 详细设计
 
 ## 1. 阶段目标
 
@@ -55,7 +55,7 @@ P9 需要保持以下长期方向：
 | 系统准备层 | Cabe 进程外完成的 SPDK 源码准备、编译、hugepage 配置和 NVMe 设备绑定。 |
 | BDF | PCIe 设备地址，例如 `0000:13:00.0`，用于标识 NVMe controller。 |
 | namespace id | NVMe controller 内部的 namespace 编号，例如 `1`、`2`、`3`。 |
-| SPDK 设备组 | 一组显式配置的 data、WAL、snapshot namespace，三者共同组成 Cabe 的一个逻辑设备组。 |
+| SPDK 设备组 | 一组显式配置的 data、WAL、snapshot namespace 设备视图；每个视图由 `BDF + namespace id + 可选字节区间` 标识，三者共同组成 Cabe 的一个逻辑设备组。 |
 | `SpdkNvmeDevice` | Cabe 内部对 SPDK NVMe controller、namespace、qpair、LBA 换算、DMA 内存和 completion 轮询的薄封装。 |
 | qpair | SPDK NVMe I/O queue pair。P9 中 qpair 是 reactor 私有资源。 |
 | SPDK DMA 内存 | 由 SPDK DMA 分配接口或 Cabe 封装的 SPDK DMA 内存池分配出的设备可访问内存。 |
@@ -103,7 +103,7 @@ P9 不包含：
 | P9-D1 阶段定位 | P9 正式定位为 SPDK NVMe API 后端接入；生产级无锁内存 B+树索引后移到 P10，详细方案留 P10 单独讨论。 |
 | P9-D2 接入路线 | 直接基于 SPDK NVMe API 接入，不先走 SPDK bdev。 |
 | P9-D3 里程碑切分 | 按“可运行证据”小步推进，先 Cabe 外部验证 SPDK，再逐步接入 value/data、WAL、snapshot。 |
-| P9-D4 设备配置模型 | 新增类型化 SPDK 配置，显式使用 `BDF + namespace id`，不使用伪路径字符串作为长期模型。 |
+| P9-D4 设备配置模型 | 新增类型化 SPDK 配置，显式使用 `BDF + namespace id + 可选字节区间`，不使用伪路径字符串作为长期模型。 |
 | P9-D5 namespace 用途映射 | 每个设备组显式配置 data、WAL、snapshot namespace；代码不硬编码 `nsid 1/2/3` 用途，文档中将当前测试环境约定为 `1=data, 2=WAL, 3=snapshot`。 |
 | P9-D6 构建与环境 | SPDK 固定作为 `third_party/spdk` 子模块纳入 Cabe，版本锁定到 `v26.01` 对应提交；不引入本地覆盖路径；SPDK 环境准备、编译、检查和设备绑定由 Cabe 脚本管理，设备绑定必须显式执行。 |
 | P9-D7 生命周期 | SPDK 后端在 `Engine::Open` 中初始化 Cabe 进程内 SPDK 运行时，在 `Engine::Close` 中释放本次打开周期所有 SPDK 资源并调用 `spdk_env_fini`；重复 Open 只支持同参数，不一致则失败。 |
@@ -151,7 +151,7 @@ flowchart LR
 | 里程碑 | 文档 | 状态 | 核心目标 |
 | --- | --- | --- | --- |
 | P9M0 | `P9M0_spdk_environment_design.md` | ✅ 已实现 | 完成阶段重排、SPDK 子模块接入、环境脚本和设备绑定安全边界。 |
-| P9M1 | `P9M1_build_config_design.md` | ⏳ 待详细设计 | 接入 SPDK 构建、类型化配置、错误码段和测试环境变量框架。 |
+| P9M1 | `P9M1_build_config_design.md` | ✅ D1-D18 已实现并验证；D19 待决 | 接入 SPDK 构建、类型化配置、错误码段和测试环境变量框架。 |
 | P9M2 | `P9M2_probe_tool_design.md` | ⏳ 待详细设计 | 实现 SPDK 定向 probe、namespace 只读枚举和安全验证工具。 |
 | P9M3 | `P9M3_qpair_dma_rw_verify_design.md` | ⏳ 待详细设计 | 跑通 qpair、DMA 内存、completion 轮询和 1MiB 读写校验。 |
 | P9M4 | `P9M4_spdk_nvme_device_design.md` | ⏳ 待详细设计 | 引入内部 `SpdkNvmeDevice` 薄封装和严格生命周期管理。 |
@@ -205,9 +205,15 @@ P9M0 退出条件：
 建议配置形态：
 
 ```cpp
+struct SpdkNvmeByteRange {
+    std::uint64_t offset_bytes = 0;
+    std::uint64_t length_bytes = 0;
+};
+
 struct SpdkNvmeNamespaceConfig {
     std::string bdf;
     std::uint32_t nsid = 0;
+    std::optional<SpdkNvmeByteRange> range;
 };
 
 struct SpdkDeviceConfig {
@@ -218,18 +224,42 @@ struct SpdkDeviceConfig {
 
 struct Options {
     std::vector<DeviceConfig> devices;
+
+    // 既有字段保持原顺序。
+    // ...
+
+    // 必须追加到 Options 末尾。
     std::vector<SpdkDeviceConfig> spdk_devices;
 };
 ```
 
+`devices` 与 `spdk_devices` 严格互斥，编译后端决定唯一有效的配置族。显式字节区间采用
+`[offset_bytes, offset_bytes + length_bytes)` 半开区间；同一 namespace 可以承载多个首尾相邻或
+互不重叠的设备视图，但整个 namespace 视图与任何其他视图冲突。
+
+data 使用独立 NVMe SSD 是推荐部署形态，不是配置硬约束；WAL 与 snapshot 可以使用独立 namespace，
+也可以通过非重叠字节区间共享同一 namespace。Cabe 校验物理区间是否冲突，不按角色名称强制设备拓扑。
+
 P9M1 退出条件：
 
 - `sync` / `io_uring` 构建不依赖 SPDK；
-- `spdk` 构建能找到 SPDK 头文件和库；
+- `spdk` 构建只从项目内 `third_party/spdk` 找到 SPDK 头文件和静态库；
 - 缺少 SPDK 依赖时 CMake 报错清晰；
-- SPDK 配置能表达多设备组；
-- 重复 namespace 能在 Open 前被拒绝；
+- SPDK 源码、构建戳或本地归档不一致时 CMake 报错清晰，不回退系统同名库；
+- 无设备链接验证程序能够证明真实 SPDK 符号链接闭包完整；
+- SPDK 配置能表达多设备组和每角色可选字节区间；
+- 全部设备组和角色中的重叠 namespace 设备视图能在硬件访问前被拒绝；
+- 合法配置形成不含 SPDK 指针的不可变打开计划，并明确返回尚未实现；
 - SPDK 错误码段已落地。
+
+完整设计与尚待裁决的 sanitizer / 覆盖率组合策略见
+[`P9M1_build_config_design.md`](P9M1_build_config_design.md)。
+在 D19 裁决前，`run-tests.sh` 明确拒绝 `spdk` 与 ASAN、TSAN、UBSAN 的组合，避免产生范围不清的通过结论。
+
+实现验证结果：GCC 15 与 Clang 21 的普通 SPDK 构建均通过 113 项测试，其中
+`spdk-unit` 27 项、`spdk-link` 1 项；使用两组 loop 设备的既有回归中，sync 238 项、
+io_uring 254 项均无失败。既有 `ConcurrencyTest.WalFullRescue` 仍按其容量条件跳过，
+不属于 P9M1 新增跳过项。P9M1 测试没有初始化 SPDK runtime、配置大页或访问 NVMe 设备。
 
 ## 9. P9M2 - 定向探测与只读验证工具
 
@@ -560,7 +590,7 @@ P9 完成时必须满足：
 - SPDK 作为 Cabe 自管依赖的路径清晰；
 - 普通 `sync` / `io_uring` 构建不依赖 SPDK；
 - `CABE_IO_BACKEND=spdk` 可构建；
-- SPDK 设备配置使用显式 `BDF + namespace id`；
+- SPDK 设备配置使用显式 `BDF + namespace id + 可选字节区间`；
 - Cabe 不自动选择 SPDK 设备；
 - SPDK 运行时在 `Engine::Open` 初始化，在 `Engine::Close` 释放；
 - qpair 为 reactor 私有资源；

@@ -17,7 +17,7 @@
 
 **形态**:
 - 公开 API:同步调用,内部按需异步
-- 部署:Linux 用户态进程；sync / `io_uring` 使用块设备节点，P9 SPDK 使用显式 `BDF + namespace id` 直接访问 NVMe namespace
+- 部署:Linux 用户态进程；sync / `io_uring` 使用块设备节点，P9 SPDK 使用显式 `BDF + namespace id + 可选字节区间` 直接访问 NVMe namespace
 - 设备数 N 在 Open 时固定,运行期不可变
 
 ---
@@ -440,13 +440,13 @@ D10 与 doc/P6/P6M3 §6.5(P6M3-D14~D17)。
 
 ### P9 — SPDK NVMe API 后端
 
-**状态**：🚧 总体里程碑设计与 P9M0 已完成，下一步进入 P9M1 构建接入与配置模型；详见 [doc/P9/README.md](doc/P9/README.md)
+**状态**：🚧 P9M0/P9M1 已实现并通过构建、配置与回归验证，下一步进行 P9M2 详细设计；P9M1-D19（SPDK sanitizer/覆盖率构建变体）仍待后续裁决，详见 [doc/P9/README.md](doc/P9/README.md)
 
 **目标**:直接基于 SPDK NVMe API 接入 NVMe 设备,让 value/data、WAL、snapshot 和超级块读写逐步迁移到 SPDK 后端。P9 不走 SPDK bdev 路线,也不把 SPDK 当成外部服务。
 
 **范围**:
 - 将 SPDK 固定为 `third_party/spdk` 子模块,由 Cabe 脚本管理初始化、依赖、编译、检查、大页内存和显式设备接管。
-- 新增类型化 SPDK 设备配置,使用显式 `BDF + namespace id` 表达 data、WAL、snapshot namespace。
+- 新增类型化 SPDK 设备配置,使用显式 `BDF + namespace id + 可选字节区间` 表达 data、WAL、snapshot namespace 设备视图。
 - 新增 Cabe 自带 SPDK 验证工具,先完成定向 probe、namespace 枚举、DMA 分配、qpair 创建和 1MiB 读写校验。
 - 引入内部 `SpdkNvmeDevice` 薄封装和 `SpdkIoBackend`,先让 value/data 路径可工作,再接入 P8 `ValueBufferPool` 形成 SPDK 零拷贝路径。
 - 将 WAL、snapshot 和超级块读写从 `RawDevice` 逐步迁移到可替换设备抽象,分别补 SPDK 适配。
@@ -575,7 +575,7 @@ D10 与 doc/P6/P6M3 §6.5(P6M3-D14~D17)。
 | **value** | 数据层 | 用户传入 / 取出的字节负载,大小恒为 `kValueSize`(1 MiB) |
 | **`kValueSize`** | 常量 | 1 MiB = 1048576 字节 |
 | **`BlockId`** | 设备层 | 逻辑寻址:`device_id:8 \| block_idx:56`;逻辑字节偏移 = `block_idx × 1 MiB`,物理数据偏移由后端再加头部 8K |
-| **设备组** | 配置 / 运行时 | 一组 data、WAL、snapshot 设备资源；当前由一个 reactor 独占一个 `DeviceContext`，P9 中各角色由显式 `BDF + namespace id` 配置 |
+| **设备组** | 配置 / 运行时 | 一组 data、WAL、snapshot 设备资源；当前由一个 reactor 独占一个 `DeviceContext`，P9 中各角色由显式 `BDF + namespace id + 可选字节区间` 配置 |
 | **data / WAL / snapshot 设备** | 设备层 | 设备组内三种物理角色；P5～P8 为裸块设备路径，P9 SPDK 路径对应显式 NVMe namespace |
 | **block** | 设备层 | data 设备上的一个 1 MiB 物理数据区域；**1 block 存 1 value** |
 | **`ValueMeta`** | 数据层 | 内存索引中关于一个已存 value 的元数据 `{BlockId, timestamp, crc, state, reserved}` |

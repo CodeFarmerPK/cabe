@@ -11,7 +11,7 @@
 ## 范围摘要
 
 - 审查 P1 已实装的公开 API：`Engine::Open / Put / Get / Delete / Close` 签名、`Options` / `Status` 类型
-- 错误码空间评估：P2 当时以六段 × 1000 起步；P5 已追加 snapshot 段，P9M1 将按既有扩展纪律追加 SPDK 专属段，旧码值保持不变
+- 错误码空间评估：P2 当时以六段 × 1000 起步；P5 已追加 snapshot 段，P9M1 已追加 `-107xxx` SPDK 专属段，旧码值保持不变
 - 公开类型 ABI 承诺范围：结构体布局 / 枚举值 / 函数签名分别承诺到什么程度
 - API 承诺语义：Put 部分写 / Engine 析构 / Open 幂等等的行为承诺
 - 输出一份**公开 API 符号清单 + 冻结声明**文档

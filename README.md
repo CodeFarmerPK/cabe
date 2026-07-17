@@ -7,7 +7,7 @@
 Cabe 是一个面向单机部署的 KV 存储引擎:
 
 - **定长 value**:每次 Put / Get 的数据大小**恒为 1 MiB**(`kValueSize`)
-- **NVMe 裸设备**:sync / `io_uring` 后端打开块设备节点；P9 SPDK 后端按 `BDF + namespace id` 直接访问 NVMe namespace；均不走文件系统或 page cache
+- **NVMe 裸设备**:sync / `io_uring` 后端打开块设备节点；P9 SPDK 后端按 `BDF + namespace id + 可选字节区间` 直接访问 NVMe namespace；均不走文件系统或 page cache
 - **一层索引,一次 IO**:`key → BlockId` 一次查找后,数据 IO 直达物理位置
 - **WAL + Snapshot**:外置 WAL 设备保证持久化与 crash recovery；阈值触发或显式请求的 snapshot 用于回收 WAL
 - **多 NVMe 聚合**:支持 N 个 `(data, WAL, snapshot)` 设备组,key hash 路由分布
@@ -26,7 +26,7 @@ Cabe 是一个面向单机部署的 KV 存储引擎:
 
 ## 项目状态
 
-当前 **P8(零拷贝主路径)已收尾**，**P9M0(SPDK 环境与路线基线)已实现**，下一步进入 P9M1 构建接入与配置模型。完整路线见 [ROADMAP.md](ROADMAP.md)。
+当前 **P8(零拷贝主路径)已收尾**，**P9M0(SPDK 环境与路线基线)**和 **P9M1(SPDK 构建接入与配置模型)**均已实现，下一步进入 P9M2 定向探测与只读验证工具设计。完整路线见 [ROADMAP.md](ROADMAP.md)。
 
 | 阶段 | 内容 | 状态 |
 |---|---|---|
@@ -40,7 +40,7 @@ Cabe 是一个面向单机部署的 KV 存储引擎:
 | P6 | Group Commit | ✅ 完成 |
 | P7 | Reactor + 无锁 MT + 多 device 端到端 | ✅ 完成 |
 | P8 | 零拷贝主路径 | ✅ 完成 |
-| P9 | SPDK NVMe API 后端接入 | 🚧 M0 已完成，待 M1 |
+| P9 | SPDK NVMe API 后端接入 | 🚧 M0/M1 已实现，下一步 M2 |
 | P10 | 生产级无锁内存 B+树索引 | ⏳ |
 | P11 | 多 NVMe 规模化与真盘验证 | ⏳ |
 | P12 | 可观测性 + 运维工具 | ⏳ |
@@ -74,12 +74,21 @@ Cabe 基础依赖装机脚本为 `scripts/setup-dev.sh`（仅 Fedora 43+）。SP
 # 初次环境装配(仅 Fedora 43+)
 ./scripts/setup-dev.sh
 
-# P9M0：初始化并校验仓库内 SPDK 子模块；依赖安装、编译和大页内存配置均为显式操作
+# P9M0/P9M1：初始化、安装依赖并编译仓库内锁定版本的 SPDK
 ./scripts/setup-spdk.sh init
+./scripts/setup-spdk.sh deps
+./scripts/setup-spdk.sh build --jobs="$(nproc)"  # 成功后生成供 Cabe CMake 校验的构建戳
+# check 还会检查 P9M0 的 1 GiB 大页基线；P9M1 无设备构建本身不要求大页
+./scripts/setup-spdk.sh check
 
 # 配置 + 构建(Release + HashMetaIndex;自 P6 起 I/O 后端必填、无默认)
 cmake -S . -B build -G Ninja -DCABE_IO_BACKEND=io_uring   # 当前可用的过渡后端
 cmake --build build
+
+# P9M1：真实静态链接 SPDK/DPDK，但 Engine 数据路径仍明确返回尚未实现
+cmake -S . -B build-spdk -G Ninja -DCABE_IO_BACKEND=spdk -DCABE_BUILD_TESTS=ON
+cmake --build build-spdk
+ctest --test-dir build-spdk --output-on-failure
 
 # Sanitizer 矩阵(后端必填;TSAN 与 io_uring 不兼容,TSAN 用 sync)
 cmake -S . -B build-asan  -G Ninja -DCABE_IO_BACKEND=io_uring -DCABE_SANITIZER=address
@@ -93,15 +102,16 @@ cmake -S . -B build-ubsan -G Ninja -DCABE_IO_BACKEND=io_uring -DCABE_SANITIZER=u
 # 切换 I/O 后端(必填,自 P6 起无默认;见 ROADMAP P6 段「后端策略」/ doc/P6/README.md D10)
 cmake -S . -B build -DCABE_IO_BACKEND=io_uring   # 当前过渡后端 + P6 性能锚点
 cmake -S . -B build -DCABE_IO_BACKEND=sync       # 仅正确性回归(开发/性能基准已冻结于 P6)
-cmake -S . -B build -DCABE_IO_BACKEND=spdk       # 计划项：P9M1 接构建，P9M6 形成可工作后端；P9M0 尚不可用
+cmake -S . -B build-spdk -DCABE_IO_BACKEND=spdk  # P9M1 构建/配置已可用；P9M6 形成可工作 value/data 后端
 
 # 切换索引实现(后端仍必填)
 cmake -S . -B build -DCABE_IO_BACKEND=io_uring -DCABE_META_INDEX=hashmap    # 默认索引,P3
 cmake -S . -B build -DCABE_IO_BACKEND=io_uring -DCABE_META_INDEX=bplustree  # P10 计划能力，当前尚不可用
 ```
 
-> 提示:日常测试 / 覆盖率 / 基准走脚本(`scripts/run-tests.sh` / `run-coverage.sh` /
-> `run-bench.sh`),均需 `--backend=sync|io_uring`,脚本会转成 `-DCABE_IO_BACKEND`。
+> 提示:日常测试走 `scripts/run-tests.sh`，需显式指定 `--backend=sync|io_uring|spdk`；
+> P9M1 的 SPDK 测试不要求设备。覆盖率和基准脚本当前仍按各自阶段设计使用 Raw 后端。
+> P9M1-D19 尚未裁决前，`run-tests.sh` 会拒绝 `spdk` 与 ASAN、TSAN、UBSAN 的组合。
 
 ## 仓库结构
 
@@ -145,6 +155,7 @@ cabe/
 - [doc/P8/README.md](doc/P8/README.md) — P8 零拷贝总体设计与收敛状态
 - [doc/P9/README.md](doc/P9/README.md) — P9 SPDK NVMe API 后端总体里程碑设计
 - [doc/P9/P9M0_spdk_environment_design.md](doc/P9/P9M0_spdk_environment_design.md) — P9M0 环境与路线基线
+- [doc/P9/P9M1_build_config_design.md](doc/P9/P9M1_build_config_design.md) — P9M1 构建接入与配置模型详细设计
 
 ## 许可
 

@@ -21,6 +21,7 @@ SPDK_VERSION_TAG="v26.01"
 SPDK_VERSION_FILE="26.01.0"
 SPDK_LOCKED_COMMIT="2ef883ef96e79c3cc16da02f667a7a58c2453f2f"
 SPDK_HUGEMEM_BASELINE_MIB=1024
+SPDK_BUILD_STAMP="$SPDK_DIR/build/.cabe-build-stamp"
 
 usage() {
     cat <<EOF
@@ -29,7 +30,7 @@ usage() {
 命令:
   init                         初始化并校验 third_party/spdk 子模块
   deps                         调用 SPDK pkgdep.sh 安装构建依赖（需要 root/sudo）
-  build [--jobs=N]             执行 SPDK 默认 ./configure && make -jN
+  build [--jobs=N]             执行 SPDK 默认 ./configure && make -jN，并生成 Cabe 构建戳
   check                        校验版本、commit、构建产物、大页内存和基础工具
   hugepage --mem-mib=N --confirm
                                显式配置 SPDK 大页内存（需要 root/sudo）
@@ -109,10 +110,70 @@ check_spdk_version() {
     if grep -Eq '^[+U]' <<< "$submodule_status"; then
         die "SPDK recursive submodules are not at their recorded commits; run: ./scripts/setup-spdk.sh init"
     fi
+
+    local dirty
+    dirty="$(git -C "$SPDK_DIR" status --porcelain --untracked-files=no --ignore-submodules=none)"
+    [[ -z "$dirty" ]] || die "SPDK source tree has tracked modifications; restore the locked submodule before building"
+}
+
+stamp_value() {
+    local key="$1"
+    local line
+    line="$(grep -m1 "^${key}=" "$SPDK_BUILD_STAMP" 2>/dev/null || true)"
+    [[ -n "$line" ]] || return 1
+    printf '%s\n' "${line#*=}"
+}
+
+write_build_stamp() {
+    require_command sha256sum
+    local config="$SPDK_DIR/mk/config.mk"
+    local config_header="$SPDK_DIR/build/include/spdk/config.h"
+    [[ -f "$config" && -f "$config_header" ]] || die "SPDK build metadata is incomplete after make"
+
+    local config_hash config_header_hash cc_path cc_version stamp_tmp
+    config_hash="$(sha256sum "$config" | awk '{print $1}')"
+    config_header_hash="$(sha256sum "$config_header" | awk '{print $1}')"
+    cc_path="$(command -v "${CC:-cc}")" || die "SPDK build compiler is not available: ${CC:-cc}"
+    cc_version="$("$cc_path" --version)"
+    cc_version="${cc_version%%$'\n'*}"
+    stamp_tmp="${SPDK_BUILD_STAMP}.tmp"
+
+    {
+        printf 'schema=1\n'
+        printf 'commit=%s\n' "$SPDK_LOCKED_COMMIT"
+        printf 'version=%s\n' "$SPDK_VERSION_FILE"
+        printf 'config_sha256=%s\n' "$config_hash"
+        printf 'config_header_sha256=%s\n' "$config_header_hash"
+        printf 'compiler=%s\n' "$cc_path"
+        printf 'compiler_version=%s\n' "$cc_version"
+    } > "$stamp_tmp"
+    mv "$stamp_tmp" "$SPDK_BUILD_STAMP"
+}
+
+check_build_stamp() {
+    [[ -f "$SPDK_BUILD_STAMP" ]] || die "SPDK Cabe build stamp is missing; run: ./scripts/setup-spdk.sh build"
+    require_command sha256sum
+
+    local schema commit version config_hash config_header_hash
+    schema="$(stamp_value schema || true)"
+    commit="$(stamp_value commit || true)"
+    version="$(stamp_value version || true)"
+    config_hash="$(stamp_value config_sha256 || true)"
+    config_header_hash="$(stamp_value config_header_sha256 || true)"
+
+    [[ "$schema" == "1" ]] || die "invalid SPDK Cabe build stamp schema; rebuild SPDK"
+    [[ "$commit" == "$SPDK_LOCKED_COMMIT" ]] || die "SPDK build stamp commit mismatch; rebuild SPDK"
+    [[ "$version" == "$SPDK_VERSION_FILE" ]] || die "SPDK build stamp version mismatch; rebuild SPDK"
+    [[ "$config_hash" == "$(sha256sum "$SPDK_DIR/mk/config.mk" | awk '{print $1}')" ]] ||
+        die "SPDK config changed after build; rebuild SPDK"
+    [[ "$config_header_hash" == "$(sha256sum "$SPDK_DIR/build/include/spdk/config.h" | awk '{print $1}')" ]] ||
+        die "SPDK generated config changed after build; rebuild SPDK"
 }
 
 check_build_artifacts() {
     local required=(
+        "$SPDK_DIR/mk/config.mk"
+        "$SPDK_DIR/build/include/spdk/config.h"
         "$SPDK_DIR/build/bin/spdk_tgt"
         "$SPDK_DIR/build/bin/spdk_nvme_identify"
         "$SPDK_DIR/build/bin/spdk_nvme_perf"
@@ -127,6 +188,7 @@ check_build_artifacts() {
     done
 
     ((${#missing[@]} == 0)) || die "SPDK build artifacts are missing: ${missing[*]}; run: ./scripts/setup-spdk.sh build"
+    check_build_stamp
 }
 
 check_hugepage() {
@@ -178,8 +240,10 @@ cmd_build() {
     check_spdk_version
     require_command make
 
+    rm -f "$SPDK_BUILD_STAMP" "${SPDK_BUILD_STAMP}.tmp"
     (cd "$SPDK_DIR" && ./configure)
     (cd "$SPDK_DIR" && make -j"$jobs")
+    write_build_stamp
 }
 
 cmd_check() {
@@ -208,6 +272,7 @@ cmd_clean() {
     check_spdk_version
     require_command make
     (cd "$SPDK_DIR" && make clean)
+    rm -f "$SPDK_BUILD_STAMP" "${SPDK_BUILD_STAMP}.tmp"
 }
 
 parse_jobs() {

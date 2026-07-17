@@ -7,6 +7,7 @@ add_library(cabe_engine STATIC
     value_buffer.cpp
     value_buffer_pool.cpp
     buffer_pool.cpp
+    spdk_config.cpp
     super_block.cpp
 )
 target_link_libraries(cabe_engine PUBLIC cabe_util cabe_io cabe_index cabe_slots cabe_wal cabe_snapshot)
@@ -17,6 +18,8 @@ if(CABE_IO_BACKEND STREQUAL "sync")
     target_compile_definitions(cabe_engine PUBLIC CABE_USE_IO_SYNC=1)
 elseif(CABE_IO_BACKEND STREQUAL "io_uring")
     target_compile_definitions(cabe_engine PUBLIC CABE_USE_IO_URING=1)
+elseif(CABE_IO_BACKEND STREQUAL "spdk")
+    target_compile_definitions(cabe_engine PUBLIC CABE_USE_IO_SPDK=1)
 else()
     message(FATAL_ERROR "CABE_IO_BACKEND='${CABE_IO_BACKEND}' 尚未实现")
 endif()

@@ -20,6 +20,7 @@ namespace cabe::err {
     inline constexpr int kEngineBase      = -104000;
     inline constexpr int kWalRecoveryBase = -105000;
     inline constexpr int kSnapshotBase    = -106000;
+    inline constexpr int kSpdkBase        = -107000;
 
     // ---- 段位不重叠（编译期）：相邻段恰好相距一个段容量，无缝且不交叠 ----
     static_assert(kMemoryBase - kSegmentSize == kIoBase);
@@ -28,6 +29,7 @@ namespace cabe::err {
     static_assert(kWalBase - kSegmentSize == kEngineBase);
     static_assert(kEngineBase - kSegmentSize == kWalRecoveryBase);
     static_assert(kWalRecoveryBase - kSegmentSize == kSnapshotBase);
+    static_assert(kSnapshotBase - kSegmentSize == kSpdkBase);
 
     // 段内编号：基址段的第 n 个码（n ∈ [0, kSegmentSize)）
     constexpr int InSeg(int base, int n) noexcept { return base - n; }
@@ -104,6 +106,12 @@ namespace cabe::err {
     inline constexpr int kSnapshotCorrupted   = InSeg(kSnapshotBase, 3); // -106003  快照证据矛盾：撞代际/双槽数据皆坏/记录违例（查数据）
 
     static_assert(kSnapshotCorrupted > kSnapshotBase - kSegmentSize);
+
+    // ---- SPDK 段（P9M1：纯配置与 namespace 资源边界）----
+    inline constexpr int kSpdkInvalidConfig    = InSeg(kSpdkBase, 0); // -107000  配置族/BDF/nsid/范围非法
+    inline constexpr int kSpdkNamespaceOverlap = InSeg(kSpdkBase, 1); // -107001  同一 namespace 的角色范围重叠
+
+    static_assert(kSpdkNamespaceOverlap > kSpdkBase - kSegmentSize);
 
     // io 段的具体码随模块产生时补入。
 } // namespace cabe::err

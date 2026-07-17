@@ -63,6 +63,10 @@
 | WAL / snapshot SPDK 接入 | P9M9 / P9M11 |
 | SPDK bench 归档 | P9M14 |
 
+> 本表记录 P9M0 当时的范围边界。表中归属 P9M1 的三项现均已实现；其余项目仍按对应后续里程碑推进。
+> P9M1 还在不改变 P9M0 命令入口的前提下扩展了 `setup-spdk.sh build/clean`：成功构建写入 Cabe 构建戳，
+> 清理同步删除；Cabe 主 CMake 据此拒绝陈旧或构建后被改写的归档。
+
 ---
 
 ## 2. 决策汇总
@@ -586,12 +590,18 @@ DEFAULT_WAL_BDF="..."
 DEFAULT_SNAPSHOT_BDF="..."
 ```
 
-设备用途的正式配置模型属于 P9M1：
+设备用途的正式配置模型属于 P9M1，现已按下述最终形态实现：
 
 ```cpp
+struct SpdkNvmeByteRange {
+    std::uint64_t offset_bytes = 0;
+    std::uint64_t length_bytes = 0;
+};
+
 struct SpdkNvmeNamespaceConfig {
     std::string bdf;
     std::uint32_t nsid = 0;
+    std::optional<SpdkNvmeByteRange> range;
 };
 
 struct SpdkDeviceConfig {
@@ -673,14 +683,14 @@ Codex 负责全量语义同步，不要求用户人工判读。同步时禁止�
 P9M0 完成后的第二轮全量复查已覆盖根 README / ROADMAP / CONTEXT、`doc/P0` ~ `doc/P9` 和
 `bench/baselines/README.md`。本轮在保留历史实现事实的前提下，进一步同步了：
 
-- P9M0 已完成、下一步进入 P9M1 的当前状态；
+- P9M0 已完成、当时下一步进入 P9M1 的阶段状态；P9M1 实现完成后，根文档与 P9 文档已继续同步到“下一步进入 P9M2”；
 - sync / `io_uring` / SPDK 的历史实现、过渡实现和长期方向；
 - P9 `BDF + namespace id` 设备模型及仓库内 SPDK 子模块来源；
 - `ValueBuffer`、应用端自备普通内存复制回退和 SPDK DMA 可用内存边界；
 - WAL 专用设备抽象、snapshot 专用设备抽象和超级块轻量设备视图；
 - P9 bench 只归档原始 JSON、不作性能结论的最新裁决；
 - P11 真盘规模验证与 P12 可观测性/通用运维工具的边界；
-- P9 SPDK 专属错误码段由 P9M1 落地的扩展纪律。
+- P9M1 已在 `-107000` 起落地 SPDK 专属错误码段，并保持既有错误码值不变。
 
 ### 10.5 前向同步后的再次全量复查
 
@@ -856,7 +866,7 @@ P9M0 完成时必须满足：
 
 ## 15. 后续入口
 
-P9M0 完成后，P9M1 开始处理 Cabe 主工程与 SPDK 的正式构建关系：
+P9M0 完成后，P9M1 按本节入口处理了 Cabe 主工程与 SPDK 的正式构建关系：
 
 - `CABE_IO_BACKEND=spdk` 构建接入；
 - SPDK 头文件和库查找；
@@ -864,4 +874,4 @@ P9M0 完成后，P9M1 开始处理 Cabe 主工程与 SPDK 的正式构建关系�
 - SPDK 错误码段；
 - SPDK 测试环境变量和默认跳过策略。
 
-P9M2 开始实现 Cabe 自有只读探测工具；P9M3 再进入 qpair、DMA 和 1 MiB 读写验证。
+上述 P9M1 项目现均已实现。下一步由 P9M2 实现 Cabe 自有只读探测工具；P9M3 再进入 qpair、DMA 和 1 MiB 读写验证。

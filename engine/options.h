@@ -3,6 +3,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -38,6 +39,27 @@ namespace cabe {
         std::string snapshot_path;   // 快照设备（裸块设备，存索引镜像）
     };
 
+    // P9M1：SPDK NVMe namespace 的可选字节范围。采用半开区间
+    // [offset_bytes, offset_bytes + length_bytes)，便于相邻范围无歧义地共享 namespace。
+    struct SpdkNvmeByteRange {
+        std::uint64_t offset_bytes = 0;
+        std::uint64_t length_bytes = 0;
+    };
+
+    struct SpdkNvmeNamespaceConfig {
+        std::string bdf;                         // 完整 PCI BDF：dddd:bb:dd.f
+        std::uint32_t nsid = 0;                  // 具体 namespace ID；仅 1..0xFFFFFFFE 合法
+        std::optional<SpdkNvmeByteRange> range;  // 空表示使用整个 namespace
+    };
+
+    // 每个 Cabe 设备组仍由 data/WAL/snapshot 三种角色组成；三者可以位于不同
+    // namespace，也可以通过互不重叠的范围共享同一 namespace。
+    struct SpdkDeviceConfig {
+        SpdkNvmeNamespaceConfig data;
+        SpdkNvmeNamespaceConfig wal;
+        SpdkNvmeNamespaceConfig snapshot;
+    };
+
     struct Options {
         std::vector<DeviceConfig> devices;   // 设备组列表，N = size()
 
@@ -59,6 +81,11 @@ namespace cabe {
 
         // ---- P8 零拷贝值缓冲区配置 ----
         std::size_t value_buffer_pool_blocks = 16;             // 每设备 Cabe 值缓冲区数量；0 表示关闭公开分配能力
+
+        // ---- P9 SPDK NVMe 配置 ----
+        // 放在末尾，保持此前 Options 的位置式聚合初始化兼容性。Raw 与 SPDK
+        // 两个配置族严格互斥，具体校验由 P9M1 的纯配置层完成。
+        std::vector<SpdkDeviceConfig> spdk_devices;
     };
 
 } // namespace cabe

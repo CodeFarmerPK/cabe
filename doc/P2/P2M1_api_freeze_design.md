@@ -146,6 +146,9 @@ struct DeviceConfig {
     std::string snapshot_path;   // 快照设备（P5 起）
 };
 
+// P9M1：完整定义见 engine/options.h；每个角色由 BDF、nsid 和可选字节区间标识。
+struct SpdkDeviceConfig;
+
 struct Options {
     std::vector<DeviceConfig> devices;  // 设备组列表，N 在 Open 时固定（D8）
     bool create = false;                // P5：false=recover（默认）/ true=create（破坏性初始化）
@@ -160,6 +163,7 @@ struct Options {
     std::uint32_t snapshot_interval_sec = 600;
     bool verify_value_crc_on_recovery = false;
     std::size_t value_buffer_pool_blocks = 16;           // P8M1 新增：每设备 Cabe 值缓冲区数量；0 表示关闭公开分配能力
+    std::vector<SpdkDeviceConfig> spdk_devices;           // P9M1 新增，严格追加在末尾；与 devices 互斥
 };
 ```
 
@@ -220,8 +224,8 @@ struct Status {
 
 ## 4. 错误码空间审查
 
-> 本节的数量和清单保留 P2 冻结时点快照。P5 已新增 snapshot 段及后续错误码；P9-D20
-> 已锁定再增 SPDK 专属段，现行完整清单始终以 `common/error_code.h` 为准。
+> 本节的数量和清单保留 P2 冻结时点快照。P5 已新增 snapshot 段及后续错误码；P9M1
+> 已新增 `kSpdkBase=-107000` 及两个配置错误码，现行完整清单始终以 `common/error_code.h` 为准。
 
 ### 4.1 段位划分（尽量保持）
 
@@ -295,8 +299,8 @@ P1 期间确立的约定，P2 冻结确认：
 | 风险 | 说明 | 缓解 |
 |---|---|---|
 | 冻结太早 | P3-P12 可能发现公开 API 不够用——需要改签名 | 冻结是意图声明非绝对约束；改了同步更新文档 |
-| Options 扩展 | P5 已按"末尾追加"约定扩展 data/WAL/snapshot 路径和恢复字段；P8 追加值缓冲区池配置；P9 将追加独立的类型化 `spdk_devices` 配置 | 新字段不改变既有 Raw 路径语义；SPDK 使用 `BDF + namespace id`，不把伪设备路径塞入旧字段 |
-| 错误码扩展 | P5 已增加 snapshot 段；P9-D20 决定新增 SPDK 专属错误码段 | 沿用“不够用则追加新段且保持旧码值不变”的扩展纪律；具体 SPDK 段由 P9M1 定义 |
+| Options 扩展 | P5 已扩展 data/WAL/snapshot 路径和恢复字段；P8 追加值缓冲区池配置；P9M1 已在末尾追加独立的类型化 `spdk_devices` 配置 | 新字段不改变既有 Raw 路径语义；SPDK 使用 `BDF + namespace id + 可选字节区间`，不把伪设备路径塞入旧字段 |
+| 错误码扩展 | P5 已增加 snapshot 段；P9M1 已增加 `-107xxx` SPDK 专属错误码段 | 沿用“不够用则追加新段且保持旧码值不变”的扩展纪律；M1 已分配配置非法与 namespace 重叠两个错误码 |
 | Put 持久化语义被后端演进破坏 | P2 时尚无 WAL；P5 已建立四级持久化语义，P8 零拷贝未改变该契约 | P9 的 SPDK value/WAL 路径必须继续通过恢复与故障测试证明四级语义不退化 |
 
 ---

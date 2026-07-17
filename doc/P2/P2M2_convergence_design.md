@@ -27,7 +27,7 @@ P2 阶段只有一个技术里程碑（P2M1），产出为冻结声明文档：
 |---|---|---|
 | 冻结总原则 | 设计意图声明（尽量保持），非绝对约束；全部完工发布后才严格约束 | [P2M1](P2M1_api_freeze_design.md) §1 |
 | 公开 API 符号清单 | P8 起 Engine 有 8 个操作入口，另有 `is_open()` 观察口；7 个操作返回 `Status`，`AllocateValueBuffer` 返回 `ValueBufferResult`。内部类型不在冻结承诺范围 | [P2M1](P2M1_api_freeze_design.md) §3 |
-| 错误码空间 | P2 以 6 段 × 1000 起步；P5M4 增设第七段 snapshot(-106000)，P9-D20 已决定由 P9M1 再增 SPDK 专属段；旧码值保持不变 | [P2M1](P2M1_api_freeze_design.md) §4 |
+| 错误码空间 | P2 以 6 段 × 1000 起步；P5M4 增设 snapshot(-106000)，P9M1 已增 SPDK 专属段(-107000)；旧码值保持不变 | [P2M1](P2M1_api_freeze_design.md) §4 |
 | 返回值分层 | 公开状态操作用 `Status`；值缓冲区分配用 `ValueBufferResult`；内部组件用 `int32_t`；转换点在 Engine 方法体内 | [P2M1](P2M1_api_freeze_design.md) §5 |
 | Put 持久化承诺 | P5 起由 WAL 四级策略定义；P8 零拷贝路径不改变该语义，P9 SPDK 路径必须继续保持 | [P2M1](P2M1_api_freeze_design.md) §3.1 |
 
@@ -60,7 +60,7 @@ P2 段头部加 **状态**：✅ 已实施（P2M2 收敛通过）
 
 | 风险 | 缓解 |
 |---|---|
-| P2 冻结时尚无概念验证 | P3/P5/P7/P8 已分别完成抽象、持久化、reactor/多设备和零拷贝实证；P9 继续按“必要时追加、不破坏既有语义”扩展类型化 SPDK 配置 |
+| P2 冻结时尚无概念验证 | P3/P5/P7/P8 已分别完成抽象、持久化、reactor/多设备和零拷贝实证；P9M1 已按“必要时追加、不破坏既有语义”落地类型化 SPDK 配置 |
 
 ---
 

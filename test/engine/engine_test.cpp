@@ -237,6 +237,23 @@ TEST(Engine, EmptyDevicesFails) {
     EXPECT_EQ(e.Open(cabe::Options{}).code, cabe::err::kEngineInvalidOpts);
 }
 
+TEST(Engine, RawBackendRejectsSpdkAndMixedConfigFamilies) {
+    cabe::SpdkDeviceConfig spdk{
+        .data = {.bdf = "0000:13:00.0", .nsid = 1, .range = std::nullopt},
+        .wal = {.bdf = "0000:13:00.0", .nsid = 2, .range = std::nullopt},
+        .snapshot = {.bdf = "0000:13:00.0", .nsid = 3, .range = std::nullopt},
+    };
+
+    cabe::Options options;
+    options.spdk_devices.push_back(spdk);
+    cabe::Engine spdk_only;
+    EXPECT_EQ(spdk_only.Open(options).code, cabe::err::kSpdkInvalidConfig);
+
+    options.devices.push_back({"data", "wal", "snapshot"});
+    cabe::Engine mixed;
+    EXPECT_EQ(mixed.Open(options).code, cabe::err::kSpdkInvalidConfig);
+}
+
 // P7M4：N>1 现合法（多设备）；负向测改为守 N≤256 上界（DeviceId=uint8_t）。
 TEST(Engine, TooManyDevicesFails) {
     cabe::Engine e;

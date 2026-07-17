@@ -1,5 +1,6 @@
 #include "engine/engine.h"
 #include "engine/put_path.h"
+#include "engine/spdk_config.h"
 #include "engine/super_block.h"
 #include "engine/value_buffer_pool.h"
 #include "common/logger.h"
@@ -65,6 +66,7 @@ namespace cabe {
             return fallback;
         }
 
+#if !defined(CABE_USE_IO_SPDK)
         int32_t RegisterValueBufferPool(DeviceContext& dc,
                                         const std::shared_ptr<ValueBufferPool>& pool) {
             if (!pool) return err::kEngineNotOpen;
@@ -85,6 +87,7 @@ namespace cabe {
             return dc.io.RegisterWriteBuffers(
                 std::span<const ValueBufferSlotView>{views.data(), exported});
         }
+#endif
     } // namespace
 
     Engine::~Engine() {
@@ -96,7 +99,21 @@ namespace cabe {
 
     Status Engine::Open(const Options& opts) {
         if (opened_.load(std::memory_order_acquire)) return Status::Error(err::kEngineAlreadyOpen);
-        if (opts.devices.empty()) return Status::Error(err::kEngineInvalidOpts);
+
+#if defined(CABE_USE_IO_SPDK)
+        const auto plan = BuildSpdkOpenPlan(opts);
+        if (!plan.ok()) return plan.status;
+
+        // P9M1 的终点是完整的纯配置计划与真实 SPDK 链接闭包。此处不得初始化
+        // SPDK runtime、探测设备、分配大页或伪装成功；后续里程碑逐层替换该出口。
+        return Status::Error(err::kEngineNotImplemented);
+#else
+        // 保留历史空配置的公开错误语义；一旦任一配置族出现，就严格执行族互斥。
+        if (opts.devices.empty() && opts.spdk_devices.empty()) {
+            return Status::Error(err::kEngineInvalidOpts);
+        }
+        const int32_t family_rc = ValidateDeviceConfigFamily(opts, DeviceConfigFamily::Raw);
+        if (family_rc != err::kSuccess) return Status::Error(family_rc);
         if (opts.devices.size() > 256) return Status::Error(err::kEngineInvalidOpts);   // P7M4：DeviceId=uint8_t → 最多 256 设备
 
         options_ = opts;   // P5M3：常驻；组件持 &options_ 现读 wal_level（M1 只读）
@@ -191,6 +208,7 @@ namespace cabe {
                       opts.create ? "create" : "recover");
         return Status::Ok();
         // 终态契约（P5M6-D4）：自此引擎不再记得自己怎么打开的——后续一切路径零 create/recover 分支。
+#endif
     }
 
     Status Engine::Close() {
